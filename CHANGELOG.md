@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-10-22
+
 ### 双上游整合（2026-10-22）
 
 - 合并 RuoJi6/ARTEX `620ca5d` 与 sharenjun/ARTEX-main `5ba4570`；后者使用源码共同基线 `e6ec569` 做三方整合，保留两个上游的真实提交父链。
@@ -18,7 +20,8 @@
 - 使用全新的临时 PostgreSQL 运行 ARTEX 与本地 Norma 的完整 overlay 测试：2608 个测试/子测试通过，9 个可选或外部环境用例跳过，无失败。
 - Agent、DB、Server、Guard、Interceptor 的计划任务、报告整理、收官、同步、限速、审批等交叉功能通过 `-race -shuffle=on` 专项回归。
 - 前端 10 项单元测试、TypeScript 检查和静态导出通过；发布脚本 4 项契约测试、测试入口自身回归、两模块 `go vet`、Actions actionlint 和 Shell 语法检查通过。
-- macOS ARM64 内嵌前端二进制构建及 `-h` 通过；隔离数据库下 `/api/health`、首页内嵌 HTML 和初始化状态验证通过，测试服务正常退出。未执行真实外部任务、正式部署或发布标签。
+- 合并提交 `5b7bd60` 的 GitHub CI 四项检查全部通过，包含 Windows 回归、同步/收官竞态回归、报告流程回归和测试布局检查。
+- macOS ARM64 内嵌前端二进制构建及 `-h` 通过；隔离数据库下 `/api/health`、首页内嵌 HTML 和初始化状态验证通过，测试服务正常退出。未执行真实外部任务或正式部署；发布标签由本 fork 的 GitHub Actions 构建安装包。
 
 ## [4.0.1] - 2026-10-12
 
