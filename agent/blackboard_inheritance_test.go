@@ -25,7 +25,7 @@ func callReadJSON(t *testing.T, tool actool.CoreTool, input string) any {
 	return out
 }
 
-func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
+func TestGraphOverviewReferencesAssociatedCompanyScope(t *testing.T) {
 	d := testDB(t)
 	defer d.Close()
 
@@ -94,26 +94,33 @@ func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
 	if len(related) != 1 {
 		t.Fatalf("inherited scope source missing: %d", len(related))
 	}
-	scopeRows, ok := related[0]["scope"].([]map[string]any)
-	if !ok || len(scopeRows) != 1 {
-		t.Fatalf("inherited scope missing: %#v", related[0]["scope"])
+	// The RuoJi6 baseline carries a company reference in asset_scope rather
+	// than embedding all company rules into the lightweight coverage summary.
+	scopeRows, ok := related[0]["asset_scope"].([]map[string]any)
+	if !ok || len(scopeRows) != 1 || scopeRows[0]["company_id"] != companyID {
+		t.Fatalf("inherited company scope reference missing: %#v", related[0]["asset_scope"])
 	}
-	companyScope, ok := scopeRows[0]["company_scope"].([]map[string]any)
-	if !ok || len(companyScope) != len(inputs) {
-		t.Fatalf("company scope not expanded: %#v", scopeRows[0])
+	rules, err := companies.GetScope(companyID)
+	if err != nil || len(rules) != len(inputs) {
+		t.Fatalf("company rules not preserved: %d %v", len(rules), err)
 	}
-	kinds := make(map[string]string, len(companyScope))
-	for _, rule := range companyScope {
-		kinds[fmt.Sprint(rule["kind"])] = fmt.Sprint(rule["value"])
+	kinds := make(map[string]string, len(rules))
+	for _, rule := range rules {
+		value := rule.Value
+		if rule.Domain != "" {
+			value = rule.Domain
+		} else if rule.Net != "" {
+			value = rule.Net
+		}
+		if rule.Raw != "" {
+			value = rule.Raw
+		}
+		kinds[rule.Kind] = value
 	}
 	for _, input := range inputs {
 		if kinds[input.Kind] != input.Value {
 			t.Errorf("scope %s=%q want %q", input.Kind, kinds[input.Kind], input.Value)
 		}
-	}
-	keywords, ok := scopeRows[0]["company_keywords"].([]string)
-	if !ok || len(keywords) != 1 || keywords[0] != keyword {
-		t.Fatalf("company keywords missing: %#v", scopeRows[0]["company_keywords"])
 	}
 	if hc, _ := coverage["host_count"].(int); hc < 1 {
 		t.Fatalf("company asset host not counted in agent context: %#v", coverage["host_count"])
