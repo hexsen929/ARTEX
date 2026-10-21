@@ -39,8 +39,6 @@ type Planner struct {
 	noaEnabledFn      func() bool                            // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
 	compactor         *Compactor                             // cold-node compaction (§7); nil = disabled
-	reviewOptionsFn   func() ReviewOptions
-	reviewSignatureFn func() string
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -180,8 +178,6 @@ func renderTriggers(ts *db.ExplorationStore, evs []TriggerEvent) string {
 	b.WriteString("\n\n【本次触发本轮的实际变动（先看这里，再决定是否补方向）】：")
 	for _, ev := range evs {
 		switch ev.Kind {
-		case "completion_rejected":
-			b.WriteString("\n- 上次收官终验未通过：" + ev.Detail + "。请重新检查目标和必要工作，补充缺失意图或证据；不能仅重复提交同一收官结论。")
 		case "goal":
 			if len(ev.Goals) == 1 {
 				b.WriteString(fmt.Sprintf("\n- 人（主 agent）新增了一个目标：%s —— 新的待达成目标，请据此补充探索方向（若尚无对应意图）。", ev.Goals[0]))
@@ -316,8 +312,8 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
    - **否定/存疑观察**（recent_facts 里"端口关闭/不可注入"等）是 worker 的观察、不是定论：采信前先 node_detail(id) 看 evidence——evidence 扎实、confidence=observed 且手段已穷尽的才视为该方向暂时封住；evidence 缺失、只是"看起来像/只探一次"、或 confidence=inferred 的，按【尚未探明】处理，若在范围内且无其它意图覆盖，默认派一条复核意图去证实或推翻（**同一否定方向至多复核一次**；复核后仍为否定、且证据合理，就尊重该结论、不再派）。
    - **要更深细节才按需调**：list_facts（分页，最新在前，默认 20，可 q 过滤、before 翻页，带 total/has_more）、list_findings（全部漏洞）、node_detail(id)（完整证据/详情；列表/recent_facts 只给摘要）、list_assets（pull：q 搜索、type/company_id/task_id 过滤、分页，或 id/ids 直取）、asset_neighbors。资产全局共享，别默认拉全量。
 
-2. **判目标（核心职责）**：goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id, evidence_id, reason) 标 met。**当你标记的恰是最后一个未完成目标时，系统进入收官申请，仍须停止与核验剩余必要检查并通过只读终验**——收官只由逐个 prove_goal 驱动，没有别的"一键完成"手段。
-   - ⚠️ **量化验收核对（严禁提前盖章）**：目标含用户明确提出的可量化条件（覆盖度达 X%、完成 N 项检查、获得某权限）时，prove_goal 前【必须】核对上方 graph_overview 的实测值（coverage.pct、findings_total 计数等）：未达标就【禁止】prove_goal，改派意图补差；不得以"大体达成/核心已拿下"为由提前标 met。例：要求覆盖度 100% 而实测 coverage.pct=40% → 未达成，继续派补测意图。
+2. **判目标（核心职责）**：goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id, evidence_id, reason) 标 met。**当你标记的恰是最后一个未完成目标时，系统自动判定整个任务完成**——收官只由逐个 prove_goal 驱动，没有别的"一键完成"手段。
+   - ⚠️ **量化验收核对（严禁提前盖章）**：目标含可量化条件（覆盖度达 X%、拿 N 个 flag、获得某权限）时，prove_goal 前【必须】核对上方 graph_overview 的实测值（coverage.pct、findings_total 计数等）：未达标就【禁止】prove_goal，改派意图补差；不得以"大体达成/核心已拿下"为由提前标 met。例：要求覆盖度 100% 而实测 coverage.pct=40% → 未达成，继续派补测意图。
 
 3. **（可选，仅开局、极轻量）探测理解**：仅当图里几乎还没有 fact（recent_facts 基本为空、任务刚开始）、仅凭态势无法把初始意图说具体时，才用 Bash 等对目标做极少量、只读的探测（如 1–2 次 curl 看首页/指纹）。**唯一合法产物是一句更精准的意图描述**——绝不是漏洞的发现/验证/利用，也不是端点/目录/参数的枚举结果（那些是 worker 的活，写成意图派下去）。三条硬边界：
    - 图里已有 worker 产出的 fact（facts>0 / recent_facts 非空）→【禁止】再自己探测，一切判断基于已有 fact，本轮产物只能是"派新意图"或"结束"；想深挖某线索 → 派意图让 worker 去查，不是自己 curl。
@@ -343,19 +339,9 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 不重复、不硬凑；但目标未达成、又有未覆盖且更深的打法时，该派就派。简洁、聚焦、高效。`
 
-// Keep coverage semantics outside the editable body so existing deployments and
-// custom prompts receive the same distinction between an asset and a test surface.
-const plannerFindingCoverageGuidance = `
-
-**多漏洞任务的覆盖与收官**：
-- 以任务原始目标为准：要求全面审计或逐项覆盖范围时，一个高危漏洞只证明它自身，不代表整个系统审计完成；用户明确只需一个漏洞、N 个漏洞或特定结果时，达到该目标即可收官，不擅自扩大任务。
-- 按「资产 + 入口/参数 + 漏洞机理」比对已有意图和证据。同一资产上的另一入口、另一参数或另一漏洞机理可以是独立方向，不能仅因该资产已有 finding、意图 done 或 coverage 已测就视为已覆盖。coverage 是资产被事实触及的粗略比例，不证明所有漏洞类型均已验证。
-- 将已有证据支持的独立候选逐项记入 TodoWrite 的跨轮待办，在内容中注明未测试、待验证、已确认、已测试未发现或受阻；已确认漏洞和其它候选分别跟踪。高价值路线深入时，仍须保留其它在范围内的独立候选，不因首个高危漏洞而丢弃。
-- 为全面审计/逐项覆盖目标调用 prove_goal 前，核对 list_findings 和相关事实/待办；仍有在范围内、与目标相关的独立候选未测试或受阻时，不得把该目标标为已完成，应按依赖、预算和操作约束继续派意图或如实说明未完成范围。量化目标按原始验收数量核对，不要求额外找满所有候选。模型/网络错误、权限不足或预算耗尽只说明未完成验证，不得总结成“未发现漏洞”；已测试未发现也只适用于证据覆盖的具体入口和机理。`
-
 func plannerSystem(goal, dataDir, workDir string) string {
 	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
-	return body + taskRequestGuidance + plannerFindingCoverageGuidance + completionGuidance + artifactSpec(workDir)
+	return body + artifactSpec(workDir)
 }
 
 // Plan runs one planning round. emit, if non-nil, receives the planner's execution
@@ -373,8 +359,6 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// runs in a detached goroutine so it never adds latency to this round.
 	p.compactor.OnPlannerRound(ctx, ts)
 	tsx := NewToolSet(ts, "planner")
-	tsx.SetGoalProofReviewer(NewGoalProofReviewer(p.prov))
-	tsx.completionProposal, _ = ctx.Value(completionProposalKey{}).(*CompletionProposal)
 	tsx.SetFindingRecorder(p.findingRecorder)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
@@ -407,7 +391,6 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
 	sysBody := plannerSystem(goal, p.workDir, taskDir)
-	sysBody += checkWorkflowGuidance
 	if p.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
 	}
@@ -486,7 +469,5 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 				emit(r)
 			}
 		})
-	tsx.completionResultMu.Lock()
-	defer tsx.completionResultMu.Unlock()
 	return tsx.GoalMet, tsx.Reason, err
 }

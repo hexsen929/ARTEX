@@ -74,15 +74,8 @@ func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
 		_ = json.Unmarshal(ev.Input, &in)
 		cmd = in.Text
 	}
-	result := g.applyIntercept(ctx, ev)
-	action := "allow"
-	if result.Decision == "block" {
-		action = "block"
-	}
-	// Record only the completed policy decision, including the original command
-	// on denied calls. Pending approvals have no terminal audit entry yet.
-	g.record(ev.ToolName, action, result.Message, cmd)
-	return result
+	g.record(ev.ToolName, "allow", "", cmd)
+	return g.applyIntercept(ctx, ev)
 }
 
 // applyIntercept evaluates user-configured intercept rules against the tool call.
@@ -91,18 +84,11 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 	if g.interceptor == nil {
 		return hook.Result{}
 	}
-	enabled, err := g.interceptor.IsToolEnabledWithError(ev.ToolName)
-	if err != nil {
-		return block(systemBlockMessage("拦截策略加载失败，阻止执行：" + err.Error()))
-	}
-	if !enabled {
+	if !g.interceptor.IsToolEnabled(ev.ToolName) {
 		return hook.Result{}
 	}
 	ctx = intercept.WithCall(ctx, ev.ToolName, ev.Input)
-	dec, matched, err := g.interceptor.MatchWithError(ev.ToolName, ev.Input)
-	if err != nil {
-		return block(systemBlockMessage("拦截策略加载失败，阻止执行：" + err.Error()))
-	}
+	dec, matched := g.interceptor.Match(ev.ToolName, ev.Input)
 	if !matched {
 		// No rule matched. Ask the LLM fallback judge (if enabled); when it is off
 		// or unwired, keep current behavior and allow.
@@ -116,7 +102,7 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 	case "deny":
 		// 观测:deny 命中不阻塞审批,直接记一条 denied（历史/任务拦截页可见）。
 		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "denied")
-		return block(systemBlockMessage(dec.Message))
+		return g.block(ev.ToolName, systemBlockMessage(dec.Message), "")
 	case "allow":
 		// Record explicit rule and model approvals so review details remain auditable.
 		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "allowed")
@@ -126,11 +112,11 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 		// immediately without creating a pending record — avoids orphaned DB entries
 		// and makes execOne complete fast, reducing the race against drainSynthetic.
 		if ctx.Err() != nil {
-			return block(systemBlockMessage("工作已取消，平台安全管控阻止执行"))
+			return g.block(ev.ToolName, systemBlockMessage("工作已取消，平台安全管控阻止执行"), "")
 		}
 		convID := intercept.ConvIDFromContext(ctx)
 		if !g.interceptor.HandleAsk(ctx, convID, dec, ev.ToolName, ev.Input) {
-			return block(systemBlockMessage("人工审批未通过（用户拒绝或审批超时）"))
+			return g.block(ev.ToolName, systemBlockMessage("人工审批未通过（用户拒绝或审批超时）"), "")
 		}
 		return hook.Result{}
 	}
@@ -187,7 +173,8 @@ func (g *Guard) Attributions() map[string]int {
 	return out
 }
 
-func block(reason string) hook.Result {
+func (g *Guard) block(tool, reason, cmd string) hook.Result {
+	g.record(tool, "block", reason, cmd)
 	return hook.Result{Decision: "block", Message: reason}
 }
 

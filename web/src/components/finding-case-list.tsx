@@ -299,11 +299,7 @@ export function FindingCaseReviewPanel({ taskId, onChange }: { taskId?: string; 
       const result = await api.resolveFindingCaseSuggestion(s.id, accept);
       setSuggestions((v) => v.filter((x) => x.id !== s.id));
       if (accept && result.case_id !== "0") {
-        if (result.report_queued) {
-          toast.success("已归并，Agent 已排队生成统一报告");
-        } else {
-          toast.warning(`已归并，统一报告暂未生成：${result.report_error || "请稍后重新生成"}`);
-        }
+        toast.success("已归并，请进入文件夹生成统一报告");
       } else {
         toast.success("已否决，不会自动再次归并");
       }

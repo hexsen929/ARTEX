@@ -453,20 +453,8 @@ func (d *DB) GetTask(id int64) (*Task, error) {
 
 // SetPaused persists a task's paused flag.
 func (d *DB) SetPaused(id int64, paused bool) error {
-	tx, err := d.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err = tx.Exec(`UPDATE tasks SET paused=$1 WHERE id=$2`, paused, id); err != nil {
-		return err
-	}
-	if !paused {
-		if _, err = tx.Exec(`DELETE FROM task_progress WHERE task_id=$1`, id); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	_, err := d.Exec(`UPDATE tasks SET paused=$1 WHERE id=$2`, paused, id)
+	return err
 }
 
 // Enqueue places a task at the tail of the persistent admission queue. Repeating

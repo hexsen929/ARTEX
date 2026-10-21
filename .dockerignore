@@ -1,6 +1,8 @@
 .git
-/doc
-/docs
+.env
+.env.*
+config.json
+jwt.key
 **/node_modules
 web/.next
 web/out
@@ -16,22 +18,10 @@ bench/.env
 bench/scheduler.py
 bench/entrypoint_v2.sh
 bench/seed_v2.sh
-# Keep only the two Linux Docker binaries from local build outputs.
-.codegraph
-*.log
+
+# Local-only artifacts and documentation.
+/doc
+/docs
 *.bak
 *.tmp
-.env
-.env.*
-!.env.example
-config.json
-jwt.key
-**/tests
-**/*_test.go
-dist/*
-!dist/amd64
-!dist/arm64
-dist/amd64/*
-dist/arm64/*
-!dist/amd64/artex
-!dist/arm64/artex
+*.log

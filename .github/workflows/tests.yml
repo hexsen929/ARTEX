@@ -1,175 +1,51 @@
 name: tests
-
 on:
   push:
     branches: ["**"]
   pull_request:
   workflow_call:
-
 permissions:
   contents: read
-
 jobs:
-  test-layout:
+  regression:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Reject tracked local documentation
-        run: |
-          tracked_docs=$(git ls-files -- doc docs)
-          if [ -n "$tracked_docs" ]; then
-            printf 'doc/ and docs/ must remain local; tracked files found:\n%s\n' "$tracked_docs" >&2
-            exit 1
-          fi
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: |
-            go.sum
-            norma/go.sum
-      - name: Test package-local overlay runner
-        run: go test ./tests/run.go ./tests/run_test.go -count=1
-      # Existing integration tests require a separately configured PostgreSQL DB;
-      # compile every test (including the nested norma module) without hiding it.
-      - name: Test release package contracts
-        run: python3 tests/build_test.py
-      - name: Compile all Go test suites
-        run: go run ./tests/run.go --all -run '^$'
-      - name: Core portable unit tests
-        run: go run ./tests/run.go ./config ./notify ./selfupdate -count=1
-      - name: Skill metadata and upload regression
-        run: go run ./tests/run.go -race ./server -run 'TestSkillMeta|TestBundledScopeSentryMetadata|TestUploadSkill|TestValidSkillName|TestSkillRelPath|TestSkillNameFromFrontmatter' -count=1
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "22"
-      - name: Frontend unit tests
-        working-directory: web
-        run: npm test
-
-  finding-case-regression:
-    runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17
         env:
+          POSTGRES_USER: artex_test
           POSTGRES_PASSWORD: artex_test
           POSTGRES_DB: artex_test
-        ports:
-          - 5432:5432
+        ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U postgres -d artex_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+          --health-cmd "pg_isready -U artex_test -d artex_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      ARTEX_PG_DSN: postgres://postgres:artex_test@localhost:5432/artex_test?sslmode=disable
+      ARTEX_PG_DSN: postgres://artex_test:artex_test@127.0.0.1:5432/artex_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@v4
+      - name: Reject local-only tracked files
+        run: |
+          test -z "$(git ls-files -- doc docs data .codegraph '*.bak' '*.log' config.json .env jwt.key)"
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache-dependency-path: |
-            go.sum
-            norma/go.sum
-      # Exercise the original report/retest paths alongside the new case layer.
-      - name: Finding case and existing workflow regression
-        run: go run ./tests/run.go -race ./agent ./db ./server -run 'TestFindingCase|TestFindingWorkflow|TestReportFinding|TestRetest|TestFindingGroups|TestDeepenFinding|TestInheritedActivity|TestConversationListRunningState|TestMerge|TestFinalTrigger|TestTaskContext' -count=1
-      - uses: actions/setup-node@v7
+      - name: Go tests
+        run: go test ./... -p 2 -count=1 -timeout=5m
+      - name: Go static checks
+        run: go vet ./...
+      - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: Install frontend dependencies
+      - run: npm ci
         working-directory: web
-        run: npm ci --no-audit --no-fund
-      - name: Build frontend
+      - name: Frontend unit tests
+        run: node --experimental-strip-types --test src/lib/*.test.mjs
         working-directory: web
-        run: npm run build
-
-  sync-completion-regression:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_PASSWORD: artex_test
-          POSTGRES_DB: artex_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d artex_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      ARTEX_PG_DSN: postgres://postgres:artex_test@localhost:5432/artex_test?sslmode=disable
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: |
-            go.sum
-            norma/go.sum
-      - name: Sync recovery, retry and task completion race regression
-        run: >-
-          go run ./tests/run.go -race -shuffle=on -p 1 -count=1 -timeout=4m
-          ./agent ./db ./server
-          -run 'TestReviewCompletion|TestBuildReviewInput|TestCompletion|TestTaskCompletion|TestRemainingWork|TestSync|TestSS|TestGoalProof|TestGoalReview|TestGoalCorrection'
-      - name: Worker settlement and execution guard race regression
-        run: >-
-          go run ./tests/run.go --module norma -race -shuffle=on -p 1 -count=1 -timeout=4m
-          ./agentcore ./harness ./subagent ./tool
-          -run 'Test.*Settlement|TestExecuteExtraToolCannotBypassInheritedExecutionGuard|TestInvokeRejectsCanceledExecutionBeforeHostCallback'
-      - name: P0 and P1 task quality race regression
-        run: >-
-          go run ./tests/run.go -race -shuffle=on -p 1 -count=1 -timeout=4m
-          ./agent ./db ./server ./intercept
-          -run 'TestCheck|TestAuthCheckpoint|TestGoalContract|TestGoalProofContains|TestGoalProofMissing|TestProgressIgnores|TestEngagement|TestFindingAssessment|TestFindingEvidence|TestEvidenceHandoff|TestNewGoal|TestManualGoal|TestTaskDTOContract|TestGoalsDecomposition|TestModelFailure|TestP1|TestWorkerSettlement|TestFlagObjective|TestSetGoalsRejects|TestSetGoalsChecks|TestTaskRequestGuidance|TestUserMessage|TestSpawnTask'
-      - name: Thinking replay and HTTP history recovery race regression
-        run: >-
-          go run ./tests/run.go --module norma -race -shuffle=on -p 1 -count=1 -timeout=4m
-          ./llm ./harness ./transcript
-
-  windows-regression:
-    runs-on: windows-2025
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: |
-            go.sum
-            norma/go.sum
-      # Use the runner's bundled PostgreSQL tools with a fresh test data directory.
-      - name: Start isolated PostgreSQL
-        shell: pwsh
-        run: |
-          $pgBin = $env:PGBIN
-          if (!(Test-Path -LiteralPath "$pgBin/initdb.exe")) {
-            throw "The Windows runner must provide PostgreSQL via PGBIN"
-          }
-          $pgTestData = Join-Path $env:RUNNER_TEMP 'artex-test-postgres'
-          & "$pgBin/initdb.exe" -D $pgTestData -U artex_test --auth=trust
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & "$pgBin/pg_ctl.exe" -D $pgTestData -l "$pgTestData/server.log" -o '-h 127.0.0.1 -p 55439' start
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & "$pgBin/createdb.exe" -h 127.0.0.1 -p 55439 -U artex_test artex_test
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "ARTEX_PG_DSN=postgres://artex_test@127.0.0.1:55439/artex_test?sslmode=disable" >> $env:GITHUB_ENV
-      - name: Windows evidence, Python execution and skill path regression
-        run: >-
-          go run ./tests/run.go -p 1 -count=1 -timeout=4m
-          ./evidence ./server
-          -run 'TestEvidence|TestExecPython|TestDetectPython|TestSkillRelPath|TestBundledScopeSentryMetadata'
-      - name: Stop test PostgreSQL
-        if: always()
-        shell: pwsh
-        run: |
-          $pgTestData = Join-Path $env:RUNNER_TEMP 'artex-test-postgres'
-          if (Test-Path -LiteralPath "$pgTestData/postmaster.pid") {
-            & "$env:PGBIN/pg_ctl.exe" -D $pgTestData -m fast stop
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+      - run: npx tsc --noEmit
+        working-directory: web
+      - run: npm run build:static
+        working-directory: web

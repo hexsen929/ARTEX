@@ -33,32 +33,16 @@ func meterTool(t actool.CoreTool, recorder toolUsageRecorder, toolKey, agentKey 
 	return &meteredTool{CoreTool: t, recorder: recorder, toolKey: toolKey, agentKey: agentKey, ri: ri}
 }
 
-func (m *meteredTool) Call(ctx context.Context, input json.RawMessage, tc *actool.ToolContext) (result actool.Result, callErr error) {
-	row := &db.ToolUsage{
+func (m *meteredTool) Call(ctx context.Context, input json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
+	if err := m.recorder.InsertToolUsage(&db.ToolUsage{
 		ToolKey:       m.toolKey,
 		AgentKey:      m.agentKey,
 		TaskID:        m.ri.TaskID,
 		ExplorationID: m.ri.ExplorationID,
 		IntentID:      m.ri.IntentID,
 		SessionID:     m.ri.SessionID,
-	}
-	if err := m.recorder.InsertToolUsage(row); err != nil {
+	}); err != nil {
 		log.Printf("[toolusage] insert %s: %v", m.toolKey, err)
 	}
-	defer func() {
-		if recorder, ok := m.recorder.(interface{ FinishToolUsage(int64, string) error }); ok && row.ID > 0 {
-			outcome := "success"
-			if callErr != nil || result.IsError {
-				outcome = "error"
-			}
-			if recovered := recover(); recovered != nil {
-				_ = recorder.FinishToolUsage(row.ID, "error")
-				panic(recovered)
-			}
-			if err := recorder.FinishToolUsage(row.ID, outcome); err != nil {
-				log.Printf("[toolusage] finish %s: %v", m.toolKey, err)
-			}
-		}
-	}()
 	return m.CoreTool.Call(ctx, input, tc)
 }

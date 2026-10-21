@@ -9,7 +9,6 @@ import { toast } from "sonner";
 
 import { FindingCaseList } from "@/components/finding-case-list";
 import { StatusBadge } from "@/components/status-badge";
-import { EvidenceAssessment } from "@/components/evidence-assessment";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger } from "@/components/ui/select";
@@ -76,7 +75,6 @@ function Row({
             <span className="truncate text-xs text-muted-foreground">{f.summary}</span>
           </div>
         </button>
-        <EvidenceAssessment finding={f} />
         <Badge variant="outline">流量证据 {f.traffic_count ?? 0} 条</Badge>
         {f.assets && f.assets.length > 0 && (
           <div className="hidden shrink-0 flex-wrap justify-end gap-1 sm:flex">

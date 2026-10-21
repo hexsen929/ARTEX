@@ -1,8 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { useSearchParams } from "next/navigation";
-import { toast } from "sonner";
 import {
   RadioIcon,
   SearchIcon,
@@ -13,7 +11,6 @@ import {
   Trash2Icon,
   CopyIcon,
   CheckIcon,
-  DownloadIcon,
 } from "lucide-react";
 
 import {
@@ -122,9 +119,7 @@ function CopyButton({ text }: { text: string }) {
 
 const PAGE_SIZES = [25, 50, 100];
 
-function LLMRecordsInner() {
-  const searchParams = useSearchParams();
-  const taskFilter = searchParams.get("task") ?? "";
+export default function LLMRecordsPage() {
   const [page, setPage] = React.useState(0);
   const [size, setSize] = React.useState(50);
   const [session, setSession] = React.useState("");
@@ -162,12 +157,10 @@ function LLMRecordsInner() {
 
   // Per-task delete (task picker + confirm dialog)
   const [tasks, setTasks] = React.useState<LLMTask[]>([]);
-  const [pickedTask, setPickedTask] = React.useState(taskFilter);
+  const [pickedTask, setPickedTask] = React.useState("");
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
   const [reloadTick, setReloadTick] = React.useState(0); // manual refetch trigger
-
-  React.useEffect(() => { setPickedTask(taskFilter); }, [taskFilter]);
 
   // Load recording toggle state on mount.
   React.useEffect(() => {
@@ -175,7 +168,7 @@ function LLMRecordsInner() {
     api
       .settings()
       .then((s) => { if (alive) setRecEnabled(!!s.llm_record); })
-      .catch((error) => { if (alive) toast.error(`读取录制设置失败：${(error as Error).message}`); });
+      .catch(() => {});
     return () => { alive = false; };
   }, []);
 
@@ -185,9 +178,8 @@ function LLMRecordsInner() {
     try {
       const s = await api.setSettings({ llm_record: on });
       setRecEnabled(!!s.llm_record);
-    } catch (error) {
+    } catch {
       setRecEnabled(!on); // revert on failure
-      toast.error(`录制设置更新失败：${(error as Error).message}`);
     } finally {
       setRecBusy(false);
     }
@@ -200,13 +192,11 @@ function LLMRecordsInner() {
   }, [session]);
 
   // Reset page on filter change.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: each filter change resets pagination.
   React.useEffect(() => {
     setPage(0);
   }, [sessionQ, model, size, pickedTask]);
 
   // Load list.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reloadTick explicitly refreshes after deletion.
   React.useEffect(() => {
     let alive = true;
     setLoading(true);
@@ -217,12 +207,12 @@ function LLMRecordsInner() {
         setRecords(r.records ?? []);
         setTotal(r.total ?? 0);
       })
-      .catch((error) => { if (alive) toast.error(`读取录制记录失败：${(error as Error).message}`); })
+      .catch(() => {})
       .finally(() => alive && setLoading(false));
     api
       .llmTasks()
       .then((r) => { if (alive) setTasks(r.tasks ?? []); })
-      .catch(() => { /* The record list remains usable when the optional task picker fails. */ });
+      .catch(() => {});
     return () => { alive = false; };
   }, [page, size, sessionQ, model, pickedTask, reloadTick]);
 
@@ -239,7 +229,7 @@ function LLMRecordsInner() {
         setPage(0);
         setReloadTick((t) => t + 1);
       })
-      .catch((error) => toast.error(`删除录制记录失败：${(error as Error).message}`))
+      .catch(() => {})
       .finally(() => setDeleting(false));
   };
 
@@ -255,7 +245,7 @@ function LLMRecordsInner() {
     api
       .llmRecordDetail(selected.id)
       .then((d) => { if (alive) setDetail(d); })
-      .catch((error) => { if (alive) toast.error(`读取记录详情失败：${(error as Error).message}`); })
+      .catch(() => {})
       .finally(() => { if (alive) setDetailLoading(false); });
     return () => { alive = false; };
   }, [selected]);
@@ -263,16 +253,6 @@ function LLMRecordsInner() {
   const totalPages = Math.max(1, Math.ceil(total / size));
   const rangeStart = total === 0 ? 0 : page * size + 1;
   const rangeEnd = page * size + records.length;
-
-  const downloadRecord = () => {
-    if (!detail) return;
-    const url = URL.createObjectURL(new Blob([JSON.stringify(detail, null, 2)], { type: "application/json;charset=utf-8" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `artex-llm-record-${detail.id}.json`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
@@ -307,9 +287,6 @@ function LLMRecordsInner() {
             <SelectValue placeholder="选择任务…" />
           </SelectTrigger>
           <SelectContent>
-            {pickedTask && !tasks.some((t) => t.task_id === pickedTask) && (
-              <SelectItem value={pickedTask}>任务 #{pickedTask}</SelectItem>
-            )}
             {tasks.length === 0 ? (
               <SelectItem value="__none__" disabled>
                 暂无任务记录
@@ -324,7 +301,6 @@ function LLMRecordsInner() {
             )}
           </SelectContent>
         </Select>
-        {pickedTask && <Button variant="ghost" size="sm" onClick={() => setPickedTask("")}>清除任务筛选</Button>}
         <Button
           variant="destructive"
           size="sm"
@@ -396,10 +372,6 @@ function LLMRecordsInner() {
           </Button>
         </div>
       </div>
-
-      <p className="text-xs text-muted-foreground">
-        录制开关作用于全部任务，开启后仅记录后续调用，无法补录之前的回合。选择一条记录可检查请求、响应、实际模型及错误，并下载完整 JSON；原文视图用于核对服务商实际收发内容。
-      </p>
 
       {/* History table + inline detail (Burp-style split) */}
       <div className="flex h-[calc(100vh-13rem)] min-h-0 flex-col gap-3">
@@ -515,14 +487,10 @@ function LLMRecordsInner() {
               )}
               {/* 原文视图开关。旧记录没有原文，此时禁用而非静默回退，避免看着像
                   「原文与解析一致」。 */}
-              <Button variant="ghost" size="sm" className="ml-auto h-7 shrink-0 text-xs" disabled={!detail || detailLoading} onClick={downloadRecord}>
-                <DownloadIcon className="size-3.5" />
-                下载 JSON
-              </Button>
               <Button
                 variant={showRaw ? "secondary" : "ghost"}
                 size="sm"
-                className="h-7 shrink-0 text-xs"
+                className="ml-auto h-7 shrink-0 text-xs"
                 disabled={!hasRaw}
                 title={hasRaw ? "查看与 provider 实际收发的 HTTP 原文" : "该记录录制于此功能上线前，无原文"}
                 onClick={() => setRawView((v) => !v)}
@@ -608,13 +576,5 @@ function LLMRecordsInner() {
         </AlertDialogContent>
       </AlertDialog>
     </div>
-  );
-}
-
-export default function LLMRecordsPage() {
-  return (
-    <React.Suspense fallback={<Loader2Icon className="m-auto size-5 animate-spin text-muted-foreground" />}>
-      <LLMRecordsInner />
-    </React.Suspense>
   );
 }

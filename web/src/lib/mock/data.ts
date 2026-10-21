@@ -32,8 +32,6 @@ import type {
   Settings,
   SkillCall,
   SkillItem,
-  SSSyncItem,
-  SSSyncRun,
   Stats,
   Task,
   TaskCategory,
@@ -141,16 +139,6 @@ export const tasks: Task[] = [
     created_unix: 1784966400,
     completed_at: T("2026-07-20T22:11:00Z"),
     completed_unix: 1785190260,
-    completion: {
-      attempt_id: 1,
-      phase: "completed",
-      reason: "演示收官记录：全部工作退出后完成只读终验。",
-      started_at: T("2026-07-20T22:10:00Z"),
-      deadline_at: T("2026-07-20T22:11:30Z"),
-      updated_at: T("2026-07-20T22:11:00Z"),
-      review: "演示数据：目标证据与已保存结果一致，没有仍需执行的必要检查。此记录未运行真实 Agent。",
-      remaining_work: [],
-    },
     last_activity: T("2026-07-20T22:11:00Z"),
     last_activity_unix: 1785190260,
     paused: false,
@@ -206,95 +194,6 @@ export const taskTemplates: TaskTemplate[] = [
 ];
 
 export const getTask = (id: string) => tasks.find((t) => t.id === id);
-
-// Explicit demonstration history remains available while the source is disabled.
-export const syncRuns: SSSyncRun[] = [
-  {
-    id: 701,
-    status: "partial",
-    started_at: T("2026-07-26T03:20:00Z"),
-    finished_at: T("2026-07-26T03:20:08Z"),
-    request: { dimension: "project", targets: ["演示项目（未连接真实数据源）"], asset_types: ["subdomain"] },
-    result: {
-      run_id: 701,
-      status: "partial",
-      started_at: T("2026-07-26T03:20:00Z"),
-      finished_at: T("2026-07-26T03:20:08Z"),
-      synced: { subdomain: 1 },
-      companies: [],
-      warnings: ["演示数据：用于展示历史与逐项结果，未向真实数据源发送请求，也未修改资产。"],
-      errors: ["演示失败：一条源记录缺少有效的资产标识。"],
-      stats: {
-        fetched: 3,
-        written: 1,
-        created: 0,
-        updated: 0,
-        unchanged: 1,
-        skipped: 1,
-        failed: 1,
-        derived_ip_written: 0,
-        derived_ip_failed: 0,
-      },
-      unique_assets: { total: 1, created: 0, updated: 0, unchanged: 1, direct: 1, derived: 0 },
-      targets: [
-        {
-          target: "演示项目（未连接真实数据源）",
-          asset_type: "subdomain",
-          status: "partial",
-          truncated: false,
-          stats: {
-            fetched: 3,
-            written: 1,
-            created: 0,
-            updated: 0,
-            unchanged: 1,
-            skipped: 1,
-            failed: 1,
-            derived_ip_written: 0,
-            derived_ip_failed: 0,
-          },
-          error: "演示失败：一条源记录缺少有效的资产标识。",
-        },
-      ],
-    },
-  },
-];
-
-export const syncItems: Record<number, SSSyncItem[]> = {
-  701: [
-    {
-      id: 70101,
-      target: "演示项目（未连接真实数据源）",
-      asset_type: "subdomain",
-      source_asset_id: "demo-existing",
-      status: "written",
-      outcome: "unchanged",
-      reason: "演示：已有资产内容未变化。",
-      derived_ip_written: 0,
-      derived_ip_failed: 0,
-    },
-    {
-      id: 70102,
-      target: "演示项目（未连接真实数据源）",
-      asset_type: "subdomain",
-      source_asset_id: "demo-skipped",
-      status: "skipped",
-      reason: "演示：源记录没有可用域名，已跳过。",
-      derived_ip_written: 0,
-      derived_ip_failed: 0,
-    },
-    {
-      id: 70103,
-      target: "演示项目（未连接真实数据源）",
-      asset_type: "subdomain",
-      source_asset_id: "demo-failed",
-      status: "failed",
-      reason: "演示：资产标识无效，未写入。",
-      derived_ip_written: 0,
-      derived_ip_failed: 0,
-    },
-  ],
-};
 
 const grandTotal: TokenTotal = tasks.reduce(
   (a, t) => ({

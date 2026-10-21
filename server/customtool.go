@@ -186,12 +186,7 @@ const settingPythonInterp = "python_interpreter"
 func detectPython() string {
 	for _, c := range []string{"python3", "python"} {
 		if p, err := exec.LookPath(c); err == nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			output, probeErr := exec.CommandContext(ctx, p, "-c", "import sys; print('artex-python-ok')").Output()
-			cancel()
-			if probeErr == nil && strings.TrimSpace(string(output)) == "artex-python-ok" {
-				return p
-			}
+			return p
 		}
 	}
 	return ""

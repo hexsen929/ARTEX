@@ -68,17 +68,6 @@ func WithReviewWorkingDirectory(ctx context.Context, workingDir string) context.
 	return context.WithValue(ctx, reviewContextKey{}, env)
 }
 
-// UserMessage returns the complete current human message bound by application
-// wiring. Audit history, model summaries and truncated background cannot grant
-// new task requirements. ReviewInput's display limit does not truncate this value.
-func UserMessage(ctx context.Context) (string, bool) {
-	env, ok := ctx.Value(reviewContextKey{}).(reviewEnvironment)
-	if !ok || env.background.Source != BackgroundUserMessage || env.background.Truncated || strings.TrimSpace(env.background.Text) == "" {
-		return "", false
-	}
-	return env.background.Text, true
-}
-
 func BuildReviewInput(ctx context.Context, tool string, arguments json.RawMessage) (ReviewInput, error) {
 	if !json.Valid(arguments) {
 		return ReviewInput{}, fmt.Errorf("工具参数不是有效 JSON")

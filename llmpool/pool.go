@@ -139,6 +139,7 @@ func (p *Pool) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Mes
 		if !shouldFailover(ctx, err) {
 			// Non-failover error (e.g. ctx cancel, deterministic 4xx): surface as-is
 			// without tripping health, matching Stream's non-failover path.
+			p.health.Pass(m.ID)
 			return llm.Message{}, "", llm.Usage{}, err
 		}
 		lastErr = err
@@ -229,11 +230,6 @@ func statusOf(err error) int {
 // over-long request fails identically everywhere.
 func shouldFailover(ctx context.Context, err error) bool {
 	if err == nil {
-		return false
-	}
-	var historyErr *llm.HistoryError
-	var requestErr *llm.RequestError
-	if errors.As(err, &historyErr) || errors.As(err, &requestErr) {
 		return false
 	}
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

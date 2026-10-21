@@ -85,10 +85,9 @@ type PortService struct {
 
 // AssetStore operates on the assets table.
 type AssetStore struct {
-	db          *DB
-	company     *CompanyStore
-	tx          *sql.Tx
-	syncChanges *syncAssetChanges
+	db      *DB
+	company *CompanyStore
+	tx      *sql.Tx
 }
 
 // Assets returns the asset store.
@@ -263,9 +262,6 @@ func (s *AssetStore) UpsertRootDomain(req UpsertRootDomainReq) (int64, error) {
 			return scoped.UpsertRootDomain(req)
 		})
 	}
-	if err := s.captureSyncAsset("type='root_domain' AND domain=$1", domain); err != nil {
-		return 0, err
-	}
 	companyID, err := s.resolveCompanyWithICP(domain, "", req.ICP)
 	if err != nil {
 		return 0, err
@@ -350,9 +346,6 @@ func (s *AssetStore) UpsertIP(req UpsertIPReq) (int64, error) {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
 			return scoped.UpsertIP(req)
 		})
-	}
-	if err := s.captureSyncAsset("type='ip' AND ip=$1", req.IP); err != nil {
-		return 0, err
 	}
 	cseg := calcCSegment(req.IP)
 	companyID, err := s.resolveCompanyWithICP("", req.IP, "")
@@ -467,9 +460,6 @@ func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (id int64, err erro
 			return scoped.UpsertSubdomain(req)
 		})
 	}
-	if err := s.captureSyncAsset("type='subdomain' AND domain=$1 AND COALESCE(record_type,'')=$2", domain, req.RecordType); err != nil {
-		return 0, err
-	}
 
 	rootDomain, _ := RootDomain(domain)
 	if rootDomain == "" {
@@ -583,13 +573,6 @@ func (s *AssetStore) UpsertApp(req UpsertAppReq) (int64, error) {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
 			return scoped.UpsertApp(req)
 		})
-	}
-	if req.BundleID != "" {
-		if err := s.captureSyncAsset("type='app' AND bundle_id=$1", req.BundleID); err != nil {
-			return 0, err
-		}
-	} else if err := s.captureSyncAsset("type='app' AND bundle_id IS NULL AND app_name=$1", req.Name); err != nil {
-		return 0, err
 	}
 
 	var taskIDs string
@@ -710,9 +693,6 @@ func (s *AssetStore) UpsertHTTPService(req UpsertHTTPServiceReq) (int64, error) 
 		})
 	}
 	normURL := normalizeURL(req.URL)
-	if err := s.captureSyncAsset("type='service' AND service_type='http' AND url=$1", normURL); err != nil {
-		return 0, err
-	}
 	domain, port, serviceName := parseURL(normURL)
 	rootDomain, _ := RootDomain(domain)
 	if rootDomain == "" {
@@ -860,9 +840,6 @@ func (s *AssetStore) UpsertOtherService(req UpsertOtherServiceReq) (int64, error
 	serviceName := strings.ToLower(strings.TrimSpace(req.ServiceName))
 
 	domain := DomainKey(req.Domain)
-	if err := s.captureSyncAsset("type='service' AND service_type='other' AND COALESCE(domain,'')=$1 AND COALESCE(ip,'')=$2 AND port=$3 AND service_name=$4", domain, req.IP, req.Port, serviceName); err != nil {
-		return 0, err
-	}
 	var rootDomain string
 	if domain != "" {
 		rootDomain, _ = RootDomain(domain)
@@ -1000,9 +977,6 @@ func (s *AssetStore) UpsertEndpoint(req UpsertEndpointReq) (int64, error) {
 	}
 	method := strings.ToUpper(req.Method)
 	normURL := normalizeURL(req.URL)
-	if err := s.captureSyncAsset("type='endpoint' AND url=$1 AND method=$2", normURL, method); err != nil {
-		return 0, err
-	}
 	domain, port, _ := parseURL(normURL)
 	rootDomain, _ := RootDomain(domain)
 	if rootDomain == "" {

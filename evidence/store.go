@@ -107,7 +107,12 @@ func (s *Store) writeBody(r io.Reader, expectedLength int64, expectedHash string
 	if err = os.Rename(f.Name(), path); err != nil {
 		return "", err
 	}
-	return hash, syncEvidenceDirectory(filepath.Dir(path))
+	d, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	defer d.Close()
+	return hash, d.Sync()
 }
 
 // StageFindingsExport freezes bindings/report versions and makes private body

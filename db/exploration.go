@@ -65,24 +65,22 @@ func jsonbClean(b []byte) []byte {
 
 // Node is a typed reasoning node (= old task_nodes). kind ∈ goal|intent|finding|hint.
 type Node struct {
-	FindingID      int64           `json:"finding_id,omitempty"` // populated by finding-aware reads; never inferred from ID
-	FindingNodeID  int64           `json:"finding_node_id,omitempty"`
-	TrafficCount   int             `json:"traffic_count,omitempty"`
-	ID             int64           `json:"id"`
-	Kind           string          `json:"kind"`
-	Payload        json.RawMessage `json:"payload"`
-	Priority       int             `json:"priority"`
-	State          string          `json:"state"`
-	Origin         string          `json:"origin,omitempty"`
-	Owner          string          `json:"owner,omitempty"`
-	BlockedReason  string          `json:"blocked_reason,omitempty"`
-	DeleteReason   string          `json:"delete_reason,omitempty"` // 仅意图假删除(state='deleted')时非空
-	Anchors        []int64         `json:"anchors,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
-	SourceTaskID   int64           `json:"source_task_id,omitempty"`
-	Inherited      bool            `json:"inherited,omitempty"`
-	ContentVersion int             `json:"content_version"`
-	GoalAudit      json.RawMessage `json:"goal_audit,omitempty"`
+	FindingID     int64           `json:"finding_id,omitempty"` // populated by finding-aware reads; never inferred from ID
+	FindingNodeID int64           `json:"finding_node_id,omitempty"`
+	TrafficCount  int             `json:"traffic_count,omitempty"`
+	ID            int64           `json:"id"`
+	Kind          string          `json:"kind"`
+	Payload       json.RawMessage `json:"payload"`
+	Priority      int             `json:"priority"`
+	State         string          `json:"state"`
+	Origin        string          `json:"origin,omitempty"`
+	Owner         string          `json:"owner,omitempty"`
+	BlockedReason string          `json:"blocked_reason,omitempty"`
+	DeleteReason  string          `json:"delete_reason,omitempty"` // 仅意图假删除(state='deleted')时非空
+	Anchors       []int64         `json:"anchors,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	SourceTaskID  int64           `json:"source_task_id,omitempty"`
+	Inherited     bool            `json:"inherited,omitempty"`
 }
 
 // Activity is one worker execution step (= old task_activity).
@@ -276,7 +274,19 @@ func (s *ExplorationStore) SetNodeState(id int64, state string) error {
 // scoped to kind='goal' so it can never mutate an intent/fact by id. Returns an
 // error if no such goal exists in this exploration.
 func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) error {
-	return s.editGoalPayload(id, text, vulnclass)
+	payload := map[string]any{"text": text}
+	if vulnclass != "" {
+		payload["vulnclass"] = vulnclass
+	}
+	raw, _ := json.Marshal(payload)
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload=$1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(raw), id, s.expID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("目标不存在")
+	}
+	return nil
 }
 
 // DeleteGoal hard-deletes a goal node; scoped to kind='goal' so it can never drop
@@ -317,7 +327,7 @@ func (s *ExplorationStore) ReopenIntent(id int64) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes
 SET state='open', completed_at=NULL, blocked_reason=NULL
 WHERE id=$1 AND exploration_id=$2 AND kind='intent'
-  AND state IN ('blocked','exhausted','stopped') AND COALESCE(payload->>'retired_contract','false')<>'true'`, id, s.expID)
+  AND state IN ('blocked','exhausted','stopped')`, id, s.expID)
 	if err != nil {
 		return false, err
 	}
@@ -330,7 +340,7 @@ WHERE id=$1 AND exploration_id=$2 AND kind='intent'
 // number reopened. Workers resume from their transcripts; kept graph writes remain.
 func (s *ExplorationStore) ReopenBlockedIntents() (int64, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
-WHERE exploration_id=$1 AND kind='intent' AND state='blocked' AND COALESCE(payload->>'retired_contract','false')<>'true'`, s.expID)
+WHERE exploration_id=$1 AND kind='intent' AND state='blocked'`, s.expID)
 	if err != nil {
 		return 0, err
 	}
@@ -688,12 +698,12 @@ func (u *TokenUsage) add(other TokenUsage) {
 	u.CacheWriteTokens += other.CacheWriteTokens
 }
 
-const nodeCols = `id, kind, payload, priority, state, COALESCE(origin,''), COALESCE(owner,''), COALESCE(blocked_reason,''), COALESCE(delete_reason,''), created_at, content_version, goal_audit`
+const nodeCols = `id, kind, payload, priority, state, COALESCE(origin,''), COALESCE(owner,''), COALESCE(blocked_reason,''), COALESCE(delete_reason,''), created_at`
 
 func scanNode(sc interface{ Scan(...any) error }) (*Node, error) {
 	var n Node
 	var payload []byte
-	if err := sc.Scan(&n.ID, &n.Kind, &payload, &n.Priority, &n.State, &n.Origin, &n.Owner, &n.BlockedReason, &n.DeleteReason, &n.CreatedAt, &n.ContentVersion, &n.GoalAudit); err != nil {
+	if err := sc.Scan(&n.ID, &n.Kind, &payload, &n.Priority, &n.State, &n.Origin, &n.Owner, &n.BlockedReason, &n.DeleteReason, &n.CreatedAt); err != nil {
 		return nil, err
 	}
 	n.Payload = json.RawMessage(payload)
@@ -1128,7 +1138,7 @@ func (s *ExplorationStore) Frontier(limit int) ([]*Node, error) {
 		limit = 50
 	}
 	rows, err := s.db.Query(`SELECT `+nodeCols+` FROM exploration_nodes
-WHERE exploration_id=$1 AND kind='intent' AND state='open' AND COALESCE(payload->>'retired_contract','false')<>'true'
+WHERE exploration_id=$1 AND kind='intent' AND state='open'
 ORDER BY priority DESC, id ASC LIMIT $2`, s.expID, limit)
 	if err != nil {
 		return nil, err
@@ -1162,7 +1172,7 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exist
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
-WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open' AND COALESCE(payload->>'retired_contract','false')<>'true'`, owner, id, s.expID)
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id, s.expID)
 	if err != nil {
 		return false, err
 	}

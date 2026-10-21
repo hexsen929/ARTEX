@@ -5,14 +5,12 @@ import * as React from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { ArchiveIcon, ArrowLeftIcon, BrainIcon, CheckIcon, CircleAlertIcon, PauseIcon, PlayIcon, RadioIcon } from "lucide-react";
+import { ArchiveIcon, ArrowLeftIcon, BrainIcon, CheckIcon, CircleAlertIcon, PauseIcon, PlayIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { IntelligencePanel } from "@/components/intelligence-panel";
 import { StatusBadge } from "@/components/status-badge";
-import { TaskCompletionBadge, TaskCompletionPanel } from "@/components/task-completion";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
-import { TaskEngagementEditor } from "@/components/task-engagement-editor";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -170,16 +168,6 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
           <PopoverTitle>任务 LLM 配置链</PopoverTitle>
           <PopoverDescription>{editorDescription}</PopoverDescription>
         </PopoverHeader>
-
-        <p className="text-sm text-muted-foreground">
-          模型优先级：Agent 角色绑定 → 任务配置链 → 全局默认。修改全局模型或重启任务不会覆盖已有的角色绑定和任务配置链；余额不足时，请在这里更换配置，或清空任务链以跟随全局默认。角色绑定可在 Agent 设置中调整。
-        </p>
-        <Button variant="outline" size="sm" asChild>
-          <Link href={`/function/llm-records/?task=${encodeURIComponent(task.id)}`}>
-            <RadioIcon data-icon="inline-start" />
-            查看此任务 LLM 录制
-          </Link>
-        </Button>
 
         {exhausted && (
           <Alert variant="destructive">
@@ -384,9 +372,7 @@ function TaskDetailInner() {
           </code>
           <Separator orientation="vertical" className="mx-1 hidden h-4 sm:block" />
           <TaskLLMControl task={task} profiles={profiles} onUpdated={load} />
-          <TaskEngagementEditor task={task} onUpdated={load} />
           <StatusBadge domain={terminal ? "task" : "engine"} value={terminal ? task.status : engineMode} dot />
-          <TaskCompletionBadge task={task} />
           {canArchive ? (
             <AlertDialog>
               <AlertDialogTrigger asChild>{archiveTrigger}</AlertDialogTrigger>
@@ -418,7 +404,6 @@ function TaskDetailInner() {
           </Button>
         </div>
         <p className="truncate text-xs text-muted-foreground">{task.goal}</p>
-        <TaskCompletionPanel task={task} />
         {/* Tabs */}
         <div className="no-scrollbar min-w-0 overflow-x-auto">
           <TabsList variant="default" className="min-w-max">

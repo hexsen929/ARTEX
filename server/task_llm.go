@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,19 +27,6 @@ type taskAgentBundle struct {
 	pl             *agent.Planner
 	wk             *agent.Worker
 	main           *agent.MainAgent
-}
-
-func (r *taskLLMRuntime) reviewSignature() string {
-	cfg, ok := r.activeCfg()
-	if !ok {
-		return "unavailable"
-	}
-	raw, err := json.Marshal(cfg)
-	if err != nil {
-		return "unavailable"
-	}
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
 }
 
 type llmAuditProfile struct {
@@ -402,7 +387,7 @@ func streamEventCommitsOutput(event llm.StreamEvent) bool {
 	switch event.Type {
 	case llm.SETextDelta, llm.SEThinkingDelta, llm.SEToolInputJSON:
 		return event.Text != ""
-	case llm.SEToolUseStart, llm.SEContentBlockStart, llm.SEContentBlockStop, llm.SEThinkingSignature, llm.SEMessageDelta, llm.SEMessageStop:
+	case llm.SEToolUseStart, llm.SEMessageDelta, llm.SEMessageStop:
 		return true
 	default:
 		return false
@@ -583,7 +568,6 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetMaxTokens(workerRuntime.maxTokens)       // 同上,输出上限也跟随当前激活 profile
 	wk.SetNoaEnabled(s.m.NoaCompactionEnabled)     // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
-	wk.SetSettlementTimeoutResolver(s.workerSettlementTimeout)
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
@@ -592,8 +576,6 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
 	pl.SetNonStreaming(plannerRuntime.nonStreaming)
 	pl.SetMaxTokens(plannerRuntime.maxTokens)
-	pl.SetReviewOptions(s.completionReviewOptions)
-	pl.SetReviewSignature(plannerRuntime.reviewSignature)
 	pl.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
 	pl.SetKillWork(s.engine.KillWork)
 	pl.SetSteerWork(s.engine.SteerWork)

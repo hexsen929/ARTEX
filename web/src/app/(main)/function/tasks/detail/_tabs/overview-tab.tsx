@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { GoalCorrection } from "@/components/goal-correction";
 
 import {
   ActivityIcon,
@@ -131,8 +130,6 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const [goals, setGoals] = React.useState<TaskGoal[]>([]);
   const [goalText, setGoalText] = React.useState("");
   const [goalVuln, setGoalVuln] = React.useState("");
-  const [goalType, setGoalType] = React.useState<"inspection" | "outcome">("outcome");
-  const [goalChecks, setGoalChecks] = React.useState("");
   const [goalBusy, setGoalBusy] = React.useState(false);
   const [goalErr, setGoalErr] = React.useState("");
   const [editingGoalId, setEditingGoalId] = React.useState<string | null>(null);
@@ -178,21 +175,12 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const addGoal = async () => {
     const text = goalText.trim();
     if (!text) return;
-    const checks = goalChecks
-      .split("\n")
-      .map((check) => check.trim())
-      .filter(Boolean);
-    if (goalType === "inspection" && !checks.length) {
-      setGoalErr("请填写检查范围与完成条件，每行一项");
-      return;
-    }
     setGoalBusy(true);
     setGoalErr("");
     try {
-      await api.addGoal(taskId, text, goalType, goalType === "inspection" ? checks : [], goalVuln.trim() || undefined);
+      await api.addGoal(taskId, text, goalVuln.trim() || undefined);
       setGoalText("");
       setGoalVuln("");
-      setGoalChecks("");
       await loadGoals();
     } catch (e) {
       setGoalErr(e instanceof Error ? e.message : "添加失败");
@@ -463,7 +451,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         </CardContent>
       </Card>
       {/* 目标管理：查看/新增/修改/删除本任务的探索目标。新增与修改会通知规划者并复活任务，
-          删除仅通知规划者（不复活）。检查目标保存覆盖条件，成果目标要求取得可核验成果。 */}
+          删除仅通知规划者（不复活）。目标 = 最终可交付/可核验的结果，不是攻击步骤或侦察动作。 */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
@@ -476,16 +464,6 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         <CardContent className="flex flex-col gap-3">
           {/* 新增表单 */}
           <div className="flex flex-wrap items-center gap-2">
-            <select
-              aria-label="新增目标类型"
-              className="h-7 rounded-md border bg-background px-2 text-sm"
-              value={goalType}
-              onChange={(e) => setGoalType(e.target.value as "inspection" | "outcome")}
-              disabled={goalBusy}
-            >
-              <option value="outcome">取得成果</option>
-              <option value="inspection">完成检查</option>
-            </select>
             <Input
               className="h-7 min-w-56 flex-1 text-sm"
               placeholder="新增目标，如『拿到管理员账号的越权访问』"
@@ -511,16 +489,6 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             </Button>
             {goalErr && <span className="text-xs text-red-500">{goalErr}</span>}
           </div>
-          {goalType === "inspection" && (
-            <textarea
-              aria-label="新增目标必需检查"
-              className="min-h-16 rounded-md border bg-background px-3 py-2 text-sm"
-              placeholder="检查范围与完成条件，每行一项，例如：完成指定登录端点的两项授权候选并保存响应"
-              value={goalChecks}
-              onChange={(e) => setGoalChecks(e.target.value)}
-              disabled={goalBusy}
-            />
-          )}
           {/* 目标列表 */}
           {goals.length > 0 ? (
             <div className="flex flex-col gap-1.5">
@@ -571,10 +539,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                 ) : (
                   <div key={g.id} className="flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm">
                     <StatusBadge domain="goal" value={g.state} />
-                    <div className="min-w-0 flex-1 break-words">
-                      <span>{g.text}</span>
-                      <GoalCorrection taskId={taskId} goal={g} onChanged={loadGoals} />
-                    </div>
+                    <span className="min-w-0 flex-1 break-words">{g.text}</span>
                     {g.vulnclass && (
                       <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-xs">
                         {g.vulnclass}

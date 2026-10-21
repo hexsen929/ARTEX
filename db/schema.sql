@@ -199,7 +199,6 @@ ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS delete_reason TEXT;
 -- digest body (summary/state/confidence); cold_since_round stamps the planner round
 -- a node most recently went from "has a live downstream branch" to none (NULL = hot).
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS content_version  INT    NOT NULL DEFAULT 0;
-ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS goal_audit JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS cold_since_round BIGINT;
 -- ck_node_kind: existing installs predate the 'digest' kind — recreate to allow it.
 DO $$
@@ -254,7 +253,7 @@ CREATE TABLE IF NOT EXISTS exploration_edges (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (exploration_id, src_id, rel, dst_id),
     CONSTRAINT ck_edge_noself CHECK (src_id <> dst_id),
-    CONSTRAINT ck_edge_rel CHECK (rel IN ('spawns','derived_from','yields','proves','covers','supports'))
+    CONSTRAINT ck_edge_rel CHECK (rel IN ('spawns','derived_from','yields','proves','covers'))
 );
 CREATE INDEX IF NOT EXISTS idx_expedges_src ON exploration_edges(src_id, rel);
 CREATE INDEX IF NOT EXISTS idx_expedges_dst ON exploration_edges(dst_id, rel);
@@ -266,11 +265,11 @@ BEGIN
     SELECT conname INTO cname FROM pg_constraint
      WHERE conrelid='exploration_edges'::regclass AND contype='c'
        AND pg_get_constraintdef(oid) LIKE '%rel%'
-       AND pg_get_constraintdef(oid) NOT LIKE '%supports%';
+       AND pg_get_constraintdef(oid) NOT LIKE '%covers%';
     IF cname IS NOT NULL THEN
         EXECUTE 'ALTER TABLE exploration_edges DROP CONSTRAINT '||quote_ident(cname);
         ALTER TABLE exploration_edges ADD CONSTRAINT ck_edge_rel
-            CHECK (rel IN ('spawns','derived_from','yields','proves','covers','supports'));
+            CHECK (rel IN ('spawns','derived_from','yields','proves','covers'));
     END IF;
 END $$;
 
@@ -930,7 +929,6 @@ CREATE TABLE IF NOT EXISTS tool_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_tool_usage_tool ON tool_usage(tool_key, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_tool_usage_task ON tool_usage(task_id);
-ALTER TABLE tool_usage ADD COLUMN IF NOT EXISTS outcome TEXT NOT NULL DEFAULT 'unknown';
 
 -- =====================================================================
 -- H. 内置工具目录
@@ -1157,7 +1155,6 @@ CREATE TABLE IF NOT EXISTS findings (
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS name   TEXT NOT NULL DEFAULT '';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS report TEXT NOT NULL DEFAULT '';
-ALTER TABLE findings ADD COLUMN IF NOT EXISTS evidence_audit JSONB NOT NULL DEFAULT '[]';
 CREATE INDEX IF NOT EXISTS idx_findings_task ON findings(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_time ON findings(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status, created_at DESC);
@@ -1228,20 +1225,6 @@ CREATE TABLE IF NOT EXISTS finding_traffic_bindings (
 );
 CREATE INDEX IF NOT EXISTS idx_finding_traffic_order ON finding_traffic_bindings(finding_id, position, id);
 CREATE INDEX IF NOT EXISTS idx_finding_traffic_snapshot ON finding_traffic_bindings(snapshot_id);
-
-CREATE TABLE IF NOT EXISTS task_progress (
-    task_id BIGINT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
-    fingerprint TEXT NOT NULL,
-    stale_rounds INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS task_engagement_audits (
-    id BIGSERIAL PRIMARY KEY,
-    task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    reason TEXT NOT NULL,
-    previous JSONB NOT NULL,
-    current JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
 
 -- =====================================================================
 -- M. 后端日志持久化
@@ -1550,7 +1533,6 @@ CREATE TABLE IF NOT EXISTS finding_case_review_runs (
 
 ALTER TABLE finding_case_review_runs ADD COLUMN IF NOT EXISTS finding_ids JSONB NOT NULL DEFAULT '[]';
 
-ALTER TABLE finding_case_review_runs ADD COLUMN IF NOT EXISTS review_mode TEXT NOT NULL DEFAULT 'historical' CHECK (review_mode IN ('historical','report'));
 ALTER TABLE finding_case_review_runs ADD COLUMN IF NOT EXISTS reviewed_ids JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE finding_case_review_runs ADD COLUMN IF NOT EXISTS conclusion JSONB NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS idx_finding_case_reviews_active_task ON finding_case_review_runs(task_id) WHERE state IN ('queued','running');
@@ -1589,97 +1571,3 @@ CREATE INDEX IF NOT EXISTS idx_task_intelligence_assets ON task_intelligence USI
 
 -- Optional derived credential presentation; raw intelligence remains authoritative.
 ALTER TABLE task_intelligence ADD COLUMN IF NOT EXISTS credential_analysis JSONB;
--- ScopeSentry sync history is global provenance, not an ARTEX task-owned graph.
--- Removing an MCP or asset keeps the request and raw observation auditable.
-CREATE TABLE IF NOT EXISTS sync_runs (
-    id BIGSERIAL PRIMARY KEY,
-    source_mcp_id BIGINT REFERENCES mcp_servers(id) ON DELETE SET NULL,
-    status TEXT NOT NULL DEFAULT 'running'
-        CHECK (status IN ('running','success','partial','failed','interrupted')),
-    request JSONB NOT NULL,
-    result JSONB NOT NULL DEFAULT '{}',
-    fetched INTEGER NOT NULL DEFAULT 0,
-    written INTEGER NOT NULL DEFAULT 0,
-    skipped INTEGER NOT NULL DEFAULT 0,
-    failed INTEGER NOT NULL DEFAULT 0,
-    derived_ip_written INTEGER NOT NULL DEFAULT 0,
-    derived_ip_failed INTEGER NOT NULL DEFAULT 0,
-    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    finished_at TIMESTAMPTZ
-);
-CREATE TABLE IF NOT EXISTS sync_observations (
-    id BIGSERIAL PRIMARY KEY,
-    run_id BIGINT NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
-    target TEXT NOT NULL,
-    source_target_id TEXT NOT NULL DEFAULT '',
-    asset_type TEXT NOT NULL,
-    item_index INTEGER NOT NULL,
-    source_asset_id TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL CHECK (status IN ('written','skipped','failed')),
-    reason TEXT NOT NULL DEFAULT '',
-    asset_id BIGINT REFERENCES assets(id) ON DELETE SET NULL,
-    derived_ip_written INTEGER NOT NULL DEFAULT 0,
-    derived_ip_failed INTEGER NOT NULL DEFAULT 0,
-    raw JSONB,
-    raw_omitted BOOLEAN NOT NULL DEFAULT false,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (run_id,target,asset_type,item_index)
-);
-CREATE INDEX IF NOT EXISTS idx_sync_observations_run ON sync_observations(run_id,id);
-CREATE INDEX IF NOT EXISTS idx_sync_observations_asset ON sync_observations(asset_id) WHERE asset_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_sync_runs_source ON sync_runs(source_mcp_id) WHERE source_mcp_id IS NOT NULL;
-
--- Persist the source page before applying any row, so a restart replays the
--- exact downloaded page instead of a shifted source page number.
-CREATE TABLE IF NOT EXISTS sync_pages (
-    run_id BIGINT NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
-    target TEXT NOT NULL,
-    asset_type TEXT NOT NULL,
-    page INTEGER NOT NULL,
-    items JSONB NOT NULL,
-    item_count INTEGER NOT NULL,
-    done BOOLEAN NOT NULL DEFAULT false,
-    last_page BOOLEAN NOT NULL DEFAULT false,
-    PRIMARY KEY (run_id,target,asset_type,page)
-);
-
-ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS created INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS updated INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS unchanged INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE sync_observations ADD COLUMN IF NOT EXISTS outcome TEXT NOT NULL DEFAULT '';
-ALTER TABLE sync_observations ADD COLUMN IF NOT EXISTS asset_changes JSONB NOT NULL DEFAULT '[]';
-CREATE TABLE IF NOT EXISTS sync_asset_changes (
-    run_id BIGINT NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
-    original_asset_id BIGINT NOT NULL,
-    asset_id BIGINT REFERENCES assets(id) ON DELETE SET NULL,
-    asset_type TEXT NOT NULL,
-    outcome TEXT NOT NULL CHECK (outcome IN ('created','updated','unchanged')),
-    direct BOOLEAN NOT NULL,
-    PRIMARY KEY (run_id,original_asset_id)
-);
-CREATE INDEX IF NOT EXISTS idx_sync_asset_changes_asset ON sync_asset_changes(asset_id) WHERE asset_id IS NOT NULL;
-
--- A completion attempt is separate from task lifecycle and goal evidence.
--- The row is also the persistent admission barrier while workers settle.
-CREATE TABLE IF NOT EXISTS task_completions (
-    task_id BIGINT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
-    attempt_id BIGINT NOT NULL DEFAULT 1,
-    phase TEXT NOT NULL CHECK (phase IN ('draining','reviewing','completed','interrupted')),
-    reason TEXT NOT NULL DEFAULT '',
-    snapshot JSONB NOT NULL DEFAULT '{}',
-    input_digest TEXT NOT NULL DEFAULT '',
-    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deadline_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS review_deadline_at TIMESTAMPTZ;
-ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS review_profile TEXT NOT NULL DEFAULT '';
-ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS failure_kind TEXT NOT NULL DEFAULT '';
-ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS failure_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS failure_attempt_id BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS failure_counts JSONB NOT NULL DEFAULT '{}';
-ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS failure_digest TEXT NOT NULL DEFAULT '';
-ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS failure_profile TEXT NOT NULL DEFAULT '';
-ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
-ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS recovery_action TEXT NOT NULL DEFAULT '';

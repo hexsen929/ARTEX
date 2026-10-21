@@ -213,19 +213,7 @@ func (s *Server) resolveCaseSuggestion(w http.ResponseWriter, r *http.Request) {
 		caseHTTPError(w, err)
 		return
 	}
-	result := map[string]any{"case_id": i64s(id), "report_queued": false}
-	if a.Accept && id > 0 {
-		// The correction is already committed. A disabled Reporter must not undo
-		// that decision or make the client believe that the merge itself failed.
-		runs, err := s.queueFindingCaseReport(id)
-		if err != nil {
-			result["report_error"] = err.Error()
-		} else {
-			result["report_queued"] = true
-			result["runs"] = runs
-		}
-	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, 200, map[string]string{"case_id": i64s(id)})
 }
 func (s *Server) mergeFindingCase(w http.ResponseWriter, r *http.Request) {
 	var a findingCaseRequest
@@ -440,29 +428,17 @@ func (s *Server) reviewFindingCases(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "请选择1至200条原始上报")
 		return
 	}
-	runs, err := s.queueFindingCaseReview(ids)
-	if err != nil {
-		caseHTTPError(w, err)
-		return
-	}
-	writeJSON(w, 202, map[string]any{"runs": runs})
-}
-
-// queueFindingCaseReview shares the reserved, read-only historical review lane.
-func (s *Server) queueFindingCaseReview(ids []int64) ([]map[string]any, error) {
-	return s.queueFindingCaseReviewMode(ids, "historical")
-}
-
-func (s *Server) queueFindingCaseReviewMode(ids []int64, mode string) ([]map[string]any, error) {
 	reporter, err := s.m.pg.GetAgentByKey("reporter")
 	if err != nil || reporter == nil || !reporter.Enabled || s.chatAgentRef() == nil {
-		return nil, errors.New("报告 Agent 未启用或模型不可用")
+		writeErr(w, 409, "报告 Agent 未启用或模型不可用")
+		return
 	}
 	batches := map[int64][]int64{}
 	for _, fid := range ids {
 		f, err := s.m.pg.FindingCaseSummary(fid)
 		if err != nil || f == nil || f.TaskID == nil {
-			return nil, errors.New("所选漏洞来源任务不可用")
+			writeErr(w, 400, "所选漏洞来源任务不可用")
+			return
 		}
 		batches[*f.TaskID] = append(batches[*f.TaskID], fid)
 	}
@@ -471,24 +447,23 @@ func (s *Server) queueFindingCaseReviewMode(ids []int64, mode string) ([]map[str
 	for taskID := range batches {
 		t, ok := s.m.Task(i64s(taskID))
 		if !ok {
-			return nil, errors.New("任务不可用")
+			writeErr(w, 409, "任务不可用")
+			return
 		}
 
-		taskContexts[taskID] = triggeredRun{taskDesc: t.descriptionText(), taskGoal: t.goalText()}
+		taskContexts[taskID] = triggeredRun{taskDesc: t.Description, taskGoal: t.Goal}
 	}
-	reservations, err := s.m.pg.CreateFindingCaseReviews(context.Background(), batches, mode)
+	reservations, err := s.m.pg.CreateFindingCaseReviews(r.Context(), batches)
 	if err != nil {
-		return nil, err
+		caseHTTPError(w, err)
+		return
 	}
 	runs := []map[string]any{}
 	for _, reservation := range reservations {
 		taskID, fids := reservation.TaskID, reservation.FindingIDs
 		taskContext := taskContexts[taskID]
 		raw, _ := json.Marshal(fids)
-		msg := fmt.Sprintf("人工选择整理（只读原始记录）：本任务所选 finding_ids=%s。逐条读取已有报告，仅判断同一实际根因，明确则归并，不确定提交建议；已有组更新统一报告。禁止生成或覆盖原始报告、改评级状态、补绑证据，不归并未选记录，不探测目标。不得等待人工确认或阻塞独立报告完成；结束前调用 complete_finding_case_review 提交逐条判断并通过验收。", raw)
-		if mode == "report" {
-			msg = fmt.Sprintf("所选报告生成：仅处理本任务 finding_ids=%s。先保留或补全各条独立报告，再读取全部组成员和实际版本，保存完整统一报告。疑似重复建议不得等待人工确认或阻塞报告生成。不得修改未选记录，不重新探测目标。", raw)
-		}
+		msg := fmt.Sprintf("人工选择整理（只读原始记录）：本任务所选 finding_ids=%s。逐条读取已有报告，仅判断同一实际根因，明确则归并，不确定提交建议；已有组更新统一报告。禁止生成或覆盖原始报告、改评级状态、补绑证据，不归并未选记录，不探测目标。结束前调用 complete_finding_case_review 提交逐条判断并通过验收。", raw)
 		item := triggeredRun{agentKey: "reporter", title: "漏洞整理 · task#" + i64s(taskID), message: msg, taskID: taskID, taskDesc: taskContext.taskDesc, taskGoal: taskContext.taskGoal, conversationID: reservation.ConversationID}
 		cfg := s.readTriggerBehavior("reporter")
 		s.queueMu.Lock()
@@ -498,7 +473,7 @@ func (s *Server) queueFindingCaseReviewMode(ids []int64, mode string) ([]map[str
 		s.queueMu.Unlock()
 		runs = append(runs, map[string]any{"conversation_id": reservation.ConversationID, "task_id": i64s(taskID)})
 	}
-	return runs, nil
+	writeJSON(w, 202, map[string]any{"runs": runs})
 }
 func (s *Server) caseReviewRuns(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.m.pg.Query(`SELECT conversation_id,task_id,state,error FROM finding_case_review_runs ORDER BY conversation_id DESC LIMIT 50`)
@@ -532,8 +507,7 @@ func (s *Server) checkCaseReviewScope(ctx context.Context, name string, a findin
 		return nil
 	}
 	var raw, conclusion json.RawMessage
-	var mode string
-	err := s.m.pg.QueryRow(`SELECT finding_ids,conclusion,review_mode FROM finding_case_review_runs WHERE conversation_id=$1`, conv).Scan(&raw, &conclusion, &mode)
+	err := s.m.pg.QueryRow(`SELECT finding_ids,conclusion FROM finding_case_review_runs WHERE conversation_id=$1`, conv).Scan(&raw, &conclusion)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
@@ -556,13 +530,7 @@ func (s *Server) checkCaseReviewScope(ctx context.Context, name string, a findin
 		if !allowed[parseProfileID(a.FindingID)] {
 			return errors.New("历史整理只能检索所选记录的候选")
 		}
-	case "update_finding_report", "update_finding_evidence", "bind_finding_traffic", "report_finding":
-		if mode == "report" && name != "report_finding" {
-			if !allowed[parseProfileID(a.FindingID)] {
-				return errors.New("报告生成只能修改所选记录")
-			}
-			return nil
-		}
+	case "update_finding_report", "bind_finding_traffic", "report_finding":
 		return errors.New("历史整理禁止修改原始报告、上报或证据；只能写归并关系及统一报告")
 	case "merge_finding_records", "suggest_finding_merge":
 		checkIDs := a.ids()
@@ -587,19 +555,4 @@ func (s *Server) checkCaseReviewScope(ctx context.Context, name string, a findin
 		}
 	}
 	return nil
-}
-
-func (s *Server) queueFindingCaseReport(id int64) ([]map[string]any, error) {
-	members, _, err := s.m.pg.FindingCaseMembers(id, 1, 100000)
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]int64, 0, len(members))
-	for _, member := range members {
-		ids = append(ids, member.ID)
-	}
-	if len(ids) == 0 {
-		return nil, errors.New("漏洞组没有可用成员")
-	}
-	return s.queueFindingCaseReviewMode(ids, "report")
 }
