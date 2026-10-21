@@ -3,6 +3,8 @@ package intercept
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -69,7 +71,7 @@ func TestReviewInputExplicitBackgroundOnly(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if in.Version != 4 || in.WorkingDir != "/tmp/task-1" {
+			if in.Version != 5 || in.WorkingDir != "/tmp/task-1" {
 				t.Fatalf("wrong environment: %+v", in)
 			}
 			if source == BackgroundUserMessage {
@@ -109,6 +111,148 @@ func TestReviewInputBoundsAndInvalidContext(t *testing.T) {
 	}
 	if _, err := BuildReviewInput(t.Context(), "Read", json.RawMessage(`{"broken"`)); err == nil {
 		t.Fatal("accepted invalid current arguments")
+	}
+}
+
+func TestReviewInputCapturesCompleteScript(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cleanup.py")
+	content := "import os\nos.remove('/srv/production/orders.csv')\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in, err := BuildReviewInput(WithReviewWorkingDirectory(t.Context(), dir), "Bash", json.RawMessage(`{"command":"python3 ./cleanup.py"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.Version != 5 || in.ScriptCaptureStatus != "complete" || len(in.Scripts) != 1 || in.Scripts[0].Path != path || in.Scripts[0].Source != "file" || in.Scripts[0].Content != content || in.Scripts[0].SHA256 == "" || in.Scripts[0].Truncated {
+		t.Fatalf("script snapshot missing: %+v", in)
+	}
+}
+
+func TestReviewInputDoesNotTreatShellTestAsScript(t *testing.T) {
+	command := `echo "PWD=$(pwd)"; ls -la /app/data/sessions/conv-473 2>&1 | head -50; if [ -n "${TOKEN:-}" ]; then echo "TOKEN is set"; else echo "TOKEN not set"; fi; env | grep -iE 'token|proxy|traffic|target|10\\.211' | sed 's/=.*/=<redacted>/'`
+	args, _ := json.Marshal(map[string]string{"command": command})
+	in, err := BuildReviewInput(WithReviewWorkingDirectory(t.Context(), "/tmp"), "Bash", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.ScriptCaptureStatus != "not_applicable" || len(in.Scripts) != 0 {
+		t.Fatalf("plain shell command was misclassified as script: status=%q scripts=%+v", in.ScriptCaptureStatus, in.Scripts)
+	}
+}
+
+func TestReviewInputShellCommandCombinations(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "check.py"), []byte("print('ok')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, command, status string
+	}{
+		{name: "plain", command: "pwd", status: "not_applicable"},
+		{name: "pipeline", command: "env | grep TOKEN | sed 's/=.*/redacted/'", status: "not_applicable"},
+		{name: "substitution", command: "echo $(pwd)", status: "not_applicable"},
+		{name: "conditional", command: `if [ -n "${TOKEN:-}" ]; then echo set; fi`, status: "not_applicable"},
+		{name: "shell_inline", command: `bash -c 'echo safe; printf ok'`, status: "not_applicable"},
+		{name: "python_inline", command: `python3 -c 'print(1)'`, status: "not_applicable"},
+		{name: "stdin_script", command: "python3 -", status: "incomplete"},
+		{name: "source_missing", command: ". ./missing.sh", status: "incomplete"},
+		{name: "wrapped_script", command: "timeout 5 env MODE=test bash ./missing.sh", status: "incomplete"},
+		{name: "dynamic_entry", command: `${RUNNER} ./check.py`, status: "incomplete"},
+		{name: "redirect", command: "echo safe > output.txt", status: "not_applicable"},
+		{name: "script", command: "python3 ./check.py", status: "complete"},
+		{name: "missing_script", command: "bash ./missing.sh", status: "incomplete"},
+		{name: "dynamic_script", command: `python3 "$SCRIPT_PATH"`, status: "incomplete"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args, _ := json.Marshal(map[string]string{"command": tc.command})
+			in, err := BuildReviewInput(WithReviewWorkingDirectory(t.Context(), dir), "Bash", args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if in.ScriptCaptureStatus != tc.status {
+				t.Fatalf("status=%q want %q scripts=%+v", in.ScriptCaptureStatus, tc.status, in.Scripts)
+			}
+		})
+	}
+}
+
+func TestIncompleteScriptPolicy(t *testing.T) {
+	incomplete := ReviewInput{ScriptCaptureStatus: "incomplete"}
+	for _, tc := range []struct {
+		name, policy, action, wantAction string
+	}{
+		{name: "explicit human review", policy: "ask", action: "allow", wantAction: "ask"},
+		{name: "model review", policy: "model", action: "allow", wantAction: "allow"},
+		{name: "model deny remains deny", policy: "model", action: "deny", wantAction: "deny"},
+		{name: "model ask remains ask", policy: "model", action: "ask", wantAction: "ask"},
+		{name: "complete allow remains allow", policy: "ask", action: "allow", wantAction: "allow"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := incomplete
+			if tc.name == "complete allow remains allow" {
+				input.ScriptCaptureStatus = "complete"
+			}
+			got := applyIncompleteScriptPolicy(input, Decision{Action: tc.action}, tc.policy)
+			if got.Action != tc.wantAction {
+				t.Fatalf("action=%q want %q", got.Action, tc.wantAction)
+			}
+		})
+	}
+}
+
+func TestReviewInputResolvesCdAndSourceScript(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "login.sh")
+	if err := os.WriteFile(path, []byte("TOKEN=$(curl https://example.test/login)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := "cd " + dir + " && source login.sh"
+	args, _ := json.Marshal(map[string]string{"command": command})
+	in, err := BuildReviewInput(WithReviewWorkingDirectory(t.Context(), "/tmp/other"), "Bash", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.ScriptCaptureStatus != "complete" || len(in.Scripts) != 1 || in.Scripts[0].Path != path || !strings.Contains(in.Scripts[0].Content, "TOKEN") {
+		t.Fatalf("cd/source script was not captured: %+v", in)
+	}
+}
+
+func TestReviewInputMarksMissingScriptIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	in, err := BuildReviewInput(WithReviewWorkingDirectory(t.Context(), dir), "Bash", json.RawMessage(`{"command":"bash ./missing.sh"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.ScriptCaptureStatus != "incomplete" || len(in.Scripts) != 1 || in.Scripts[0].ReadError == "" {
+		t.Fatalf("missing script not recorded: %+v", in)
+	}
+}
+
+func TestReviewInputMarksDynamicScriptPathIncomplete(t *testing.T) {
+	in, err := BuildReviewInput(WithReviewWorkingDirectory(t.Context(), t.TempDir()), "Bash", json.RawMessage(`{"command":"python3 \"$SCRIPT_PATH\""}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.ScriptCaptureStatus != "incomplete" || len(in.Scripts) != 1 || in.Scripts[0].ReadError == "" {
+		t.Fatalf("dynamic script path was treated as safe: %+v", in)
+	}
+}
+
+func TestReviewInputMarksOversizedScriptIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large.sh")
+	if err := os.WriteFile(path, []byte(strings.Repeat("echo x\n", maxReviewScriptBytes)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in, err := BuildReviewInput(WithReviewWorkingDirectory(t.Context(), dir), "Bash", json.RawMessage(`{"command":"./large.sh"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.ScriptCaptureStatus != "incomplete" || len(in.Scripts) != 1 || !in.Scripts[0].Truncated || in.Scripts[0].Content != "" {
+		t.Fatalf("oversized script not bounded: %+v", in.Scripts)
 	}
 }
 
@@ -154,7 +298,7 @@ func TestAutomaticAllowRetainsActualReviewContext(t *testing.T) {
 	reason := "实际操作：读取测试文件；成功后的后果：返回文件内容；命中规则：A5"
 	a := auditFor(ctx, Decision{Action: "allow", Message: reason, ModelInput: raw, ModelInputDigest: digestInput(raw)}, args, "allowed")
 	var saved ReviewInput
-	if json.Unmarshal(a.ModelInput, &saved) != nil || saved.Background == nil || saved.Background.Text != "请读取刚创建的文件" || saved.Version != 4 || a.Correlation != "exact" || a.ToolUseID != "current" || a.InitialReason != reason {
+	if json.Unmarshal(a.ModelInput, &saved) != nil || saved.Background == nil || saved.Background.Text != "请读取刚创建的文件" || saved.Version != 5 || a.Correlation != "exact" || a.ToolUseID != "current" || a.InitialReason != reason {
 		t.Fatal("automatic allow lost the model's input or explanation")
 	}
 	if a.Context != nil || a.UserMessage != "" {

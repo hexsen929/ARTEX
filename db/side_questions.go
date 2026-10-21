@@ -19,7 +19,9 @@ var ErrSideParentGone = errors.New("旁路父会话已删除或归档")
 func lockSideParent(ctx context.Context, tx *sql.Tx, p sidequestion.Parent) error {
 	var id int64
 	var err error
-	if p.ConversationID > 0 {
+	if p.ApprovalID > 0 {
+		err = tx.QueryRowContext(ctx, `SELECT id FROM intercept_pending WHERE id=$1 FOR SHARE`, p.ApprovalID).Scan(&id)
+	} else if p.ConversationID > 0 {
 		err = tx.QueryRowContext(ctx, `SELECT id FROM conversations WHERE id=$1 FOR SHARE`, p.ConversationID).Scan(&id)
 	} else {
 		err = tx.QueryRowContext(ctx, `SELECT id FROM tasks WHERE id=$1 AND exploration_id=$2 AND deleted_at IS NULL AND archived_at IS NULL FOR SHARE`, p.TaskID, p.ExplorationID).Scan(&id)
@@ -53,10 +55,10 @@ func (d *DB) SaveSideSnapshot(ctx context.Context, s sidequestion.Snapshot) erro
 	if err = lockSideParent(ctx, tx, s.Parent); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO side_question_sessions(session_key,conversation_id,task_id,exploration_id,intent_id,run_id,version,snapshot)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(session_key) DO UPDATE SET run_id=EXCLUDED.run_id,version=EXCLUDED.version,snapshot=EXCLUDED.snapshot
+	_, err = tx.ExecContext(ctx, `INSERT INTO side_question_sessions(session_key,conversation_id,task_id,exploration_id,intent_id,approval_id,run_id,version,snapshot)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(session_key) DO UPDATE SET run_id=EXCLUDED.run_id,version=EXCLUDED.version,snapshot=EXCLUDED.snapshot
 WHERE (side_question_sessions.run_id,side_question_sessions.version)<(EXCLUDED.run_id,EXCLUDED.version)`,
-		s.Parent.Key(), nullableSideID(s.Parent.ConversationID), nullableSideID(s.Parent.TaskID), nullableSideID(s.Parent.ExplorationID), nullableSideID(s.Parent.IntentID), s.RunID, s.Version, string(jsonbClean(b)))
+		s.Parent.Key(), nullableSideID(s.Parent.ConversationID), nullableSideID(s.Parent.TaskID), nullableSideID(s.Parent.ExplorationID), nullableSideID(s.Parent.IntentID), nullableSideID(s.Parent.ApprovalID), s.RunID, s.Version, string(jsonbClean(b)))
 	if err != nil {
 		return err
 	}

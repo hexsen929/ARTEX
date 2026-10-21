@@ -39,12 +39,14 @@ var BuildVersion = "dev"
 // Server exposes the ARTEX backend over a JSON HTTP API for the shadcn/ui
 // frontend.
 type Server struct {
-	m      *Manager
-	engine *Engine
-	ctx    context.Context
+	scheduleMu sync.Mutex
+	m          *Manager
+	engine     *Engine
+	ctx        context.Context
 
-	skillDir string // root directory for skill subdirectories
-	jwtKey   []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
+	skillDir  string // root directory for skill subdirectories
+	jwtKey    []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
+	basicAuth basicAuthGate
 
 	// concMu serializes concurrency-cap decisions (admission + reconcile) so a
 	// scheduler tick and an HTTP settings change / task creation can't both count
@@ -101,6 +103,9 @@ type Server struct {
 	provCacheMu   sync.Mutex
 	provByProfile map[int64]*provEntry
 	provCacheGen  uint64
+	// Quota histories survive provider/agent cache invalidation. Key 0 belongs
+	// to the non-persisted global config; persisted profiles use their DB IDs.
+	requestLimiters map[int64]*agent.RequestLimiter
 
 	// llmHealth is the process-wide circuit-breaker state for LLM failover (轮询).
 	// It deliberately lives OUTSIDE the provider caches: rebuilding the chain
@@ -131,6 +136,8 @@ type provEntry struct {
 // taskID + mergeable let the drainer coalesce several event triggers (finding/goal)
 // from the SAME task into one conversation before it starts (interval fires don't merge).
 type triggeredRun struct {
+	conversationID int64 // pre-created manual finding review; never coalesced
+
 	agentKey  string
 	title     string
 	message   string // 事件正文(触发语 + 工具/入参/返回等);不含任务描述/目标头
@@ -152,6 +159,11 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
 	s.initSideQuestions()
+	if m.pg != nil {
+		if err := s.basicAuth.load(m.pg); err != nil {
+			log.Fatalf("[auth] load HTTP Basic Auth: %v", err)
+		}
+	}
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
 	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。
 	s.applyRetryPolicy()
@@ -226,8 +238,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			log.Printf("[retester] seed: %v", err)
 		}
 		go s.evidenceStore().RunGC(s.ctx)
-		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
-		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
+		s.seedPythonInterpreter() // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
+		// Calendar scheduler starts after persisted tasks are restored.
 		// 漏洞 IM 推送投递引擎。与 Scheduler 并列但独立：推送的实时性要求(3s)
 		// 与触发器的业务节奏不同，且两者失败互不牵连——推送卡住不该影响 agent 触发。
 		go newNotifier(s).Run(s.ctx)
@@ -255,6 +267,10 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	s.restoreTaskRuntimes()
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()
+	if m.pg != nil {
+		s.seedCredentialProcessor()
+		go s.runCredentialProcessor()
+	}
 	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
 	return s
 }
@@ -281,6 +297,7 @@ func (s *Server) restoreTaskRuntimes() {
 			s.engine.startDeadlineCoordinator(s.ctx, t)
 		}
 	}
+	go newScheduler(s).Run(s.ctx)
 	// Restore every task that had already been admitted before shutdown. Starting
 	// only the active UI task left other non-queued tasks counted as concurrency
 	// occupants without live loops, which could permanently block the persistent
@@ -436,7 +453,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	}
 	if prov == nil {
 		var err error
-		prov, err = cfg.NewProvider()
+		prov, err = cfg.NewProviderWithLimiter(s.requestLimiterForProfile(0))
 		if err != nil {
 			return err
 		}
@@ -571,29 +588,49 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 	if !ok {
 		return nil, agent.Config{}, false
 	}
-	prov, err := cfg.NewProvider()
-	if err != nil {
-		log.Printf("[engine] build provider for LLM profile %d failed: %v", id, err)
-		return nil, agent.Config{}, false
-	}
-	// Wrap with recorder, tagged with this profile's name.
-	if p, _ := s.m.pg.ProfileByID(id); p != nil {
-		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
-		prov = bindSideProvider(prov, cfg, id, p.Name)
-	}
+	profile, _ := s.m.pg.ProfileByID(id)
 	s.provCacheMu.Lock()
 	if generation != s.provCacheGen {
 		s.provCacheMu.Unlock()
 		return s.providerForProfile(id)
 	}
 	if e := s.provByProfile[id]; e != nil { // lost the race → keep the winner
-		prov, cfg = e.prov, e.cfg
-	} else {
-		s.provByProfile[id] = &provEntry{prov: prov, cfg: cfg}
-		log.Printf("[engine] built provider for LLM profile %d (%s / %s)", id, cfg.Provider(), cfg.Model)
+		s.provCacheMu.Unlock()
+		return e.prov, e.cfg, true
 	}
+	// Building the HTTP client does not perform network I/O. Keep this step
+	// under the generation lock so a stale build cannot overwrite the retained
+	// limiter's settings after a newer configuration has already been installed.
+	prov, err := cfg.NewProviderWithLimiter(s.requestLimiterForProfileLocked(id))
+	if err != nil {
+		s.provCacheMu.Unlock()
+		log.Printf("[engine] build provider for LLM profile %d failed: %v", id, err)
+		return nil, agent.Config{}, false
+	}
+	if profile != nil {
+		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profile.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
+		prov = bindSideProvider(prov, cfg, id, profile.Name)
+	}
+	s.provByProfile[id] = &provEntry{prov: prov, cfg: cfg}
+	log.Printf("[engine] built provider for LLM profile %d (%s / %s)", id, cfg.Provider(), cfg.Model)
 	s.provCacheMu.Unlock()
 	return prov, cfg, true
+}
+
+func (s *Server) requestLimiterForProfile(id int64) *agent.RequestLimiter {
+	s.provCacheMu.Lock()
+	defer s.provCacheMu.Unlock()
+	return s.requestLimiterForProfileLocked(id)
+}
+
+func (s *Server) requestLimiterForProfileLocked(id int64) *agent.RequestLimiter {
+	if s.requestLimiters == nil {
+		s.requestLimiters = make(map[int64]*agent.RequestLimiter)
+	}
+	if s.requestLimiters[id] == nil {
+		s.requestLimiters[id] = &agent.RequestLimiter{}
+	}
+	return s.requestLimiters[id]
 }
 
 // chatAgentForProfile returns a ChatAgent built from a specific LLM profile, cached
@@ -656,6 +693,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/init", s.authInit)
 	mux.HandleFunc("POST /api/auth/login", s.authLogin)
 	mux.HandleFunc("POST /api/auth/change-password", s.authChangePassword)
+	mux.HandleFunc("GET /api/basic-auth/check", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /api/settings/basic-auth", s.getBasicAuthSettings)
+	mux.HandleFunc("PUT /api/settings/basic-auth", s.saveBasicAuthSettings)
 
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/stats", s.stats)
@@ -665,6 +708,8 @@ func (s *Server) Handler() http.Handler {
 
 	// 页面一键更新。走的是默认的 JWT 鉴权（auth.go 只放行 /api/auth/* 和
 	// /api/health），所以这几个改动程序自身的接口天然需要登录。
+	mux.HandleFunc("GET /api/update/settings", s.getUpdateSettings)
+	mux.HandleFunc("PUT /api/update/settings", s.putUpdateSettings)
 	mux.HandleFunc("GET /api/update/check", s.updateCheck)
 	mux.HandleFunc("POST /api/update/apply", s.updateApply)
 	mux.HandleFunc("POST /api/update/rollback", s.updateRollback)
@@ -672,6 +717,16 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/tasks", s.listTasks)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
+	mux.HandleFunc("GET /api/schedules", s.listSchedules)
+	mux.HandleFunc("POST /api/schedules", s.createSchedule)
+	mux.HandleFunc("GET /api/schedules/{id}", s.getSchedule)
+	mux.HandleFunc("PATCH /api/schedules/{id}", s.updateSchedule)
+	mux.HandleFunc("PATCH /api/schedules/{id}/remark", s.updateScheduleMetadata)
+	mux.HandleFunc("PATCH /api/schedules/{id}/metadata", s.updateScheduleMetadata)
+	mux.HandleFunc("DELETE /api/schedules/{id}", s.deleteSchedule)
+	mux.HandleFunc("POST /api/schedules/{id}/pause", s.pauseSchedule)
+	mux.HandleFunc("POST /api/schedules/{id}/resume", s.resumeSchedule)
+	mux.HandleFunc("POST /api/schedules/{id}/run-now", s.runScheduleNow)
 	mux.HandleFunc("GET /api/task-categories", s.pgListTaskCategories)
 	mux.HandleFunc("POST /api/task-categories", s.pgCreateTaskCategory)
 	mux.HandleFunc("PATCH /api/task-categories/{id}", s.pgRenameTaskCategory)
@@ -755,6 +810,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)
 	mux.HandleFunc("GET /api/exploration/findings/groups", s.findingGroups)
+	mux.HandleFunc("GET /api/exploration/finding-cases", s.listFindingCases)
+	mux.HandleFunc("POST /api/exploration/finding-cases", s.mergeFindingCase)
+	mux.HandleFunc("GET /api/exploration/finding-cases/{id}", s.getFindingCase)
+	mux.HandleFunc("GET /api/exploration/finding-cases/{id}/members", s.getFindingCaseMembers)
+	mux.HandleFunc("DELETE /api/exploration/finding-cases/{id}/members/{fid}", s.removeFindingCaseMember)
+	mux.HandleFunc("PUT /api/exploration/finding-cases/{id}/report", s.updateCaseReport)
+	mux.HandleFunc("GET /api/exploration/finding-case-suggestions", s.caseSuggestions)
+	mux.HandleFunc("POST /api/exploration/finding-case-suggestions/{id}", s.resolveCaseSuggestion)
+	mux.HandleFunc("POST /api/exploration/finding-case-review", s.reviewFindingCases)
+	mux.HandleFunc("GET /api/exploration/finding-case-review", s.caseReviewRuns)
 	mux.HandleFunc("GET /api/exploration/findings/asset-tree", s.findingAssetTree)
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
 	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
@@ -797,6 +862,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/llm/records/tasks", s.pgLLMTasks)
 	mux.HandleFunc("GET /api/llm/records/by-model", s.pgTokenByModel) // 按模型聚合本任务 token 用量
 	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
+	mux.HandleFunc("GET /api/tasks/{id}/intelligence", s.listIntelligence)
+	mux.HandleFunc("GET /api/tasks/{id}/intelligence/{intelID}", s.getIntelligence)
+	mux.HandleFunc("PATCH /api/tasks/{id}/intelligence/{intelID}", s.updateIntelligence)
+	mux.HandleFunc("POST /api/tasks/{id}/intelligence/{intelID}/credentials/retry", s.retryCredentials)
+	mux.HandleFunc("GET /api/tasks/{id}/intelligence/{intelID}/traffic/{trafficID}", s.credentialTrafficDetail)
+	mux.HandleFunc("GET /api/assets/{id}/intelligence/{intelID}/traffic/{trafficID}", func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("scope", "assets")
+		s.credentialTrafficDetail(w, r)
+	})
+	mux.HandleFunc("GET /api/assets/{id}/intelligence", func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("scope", "assets")
+		s.listIntelligence(w, r)
+	})
+	mux.HandleFunc("GET /api/assets/{id}/intelligence/{intelID}", func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("scope", "assets")
+		s.getIntelligence(w, r)
+	})
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
 	// 漏洞 IM 推送。渠道是「多实例 + 各自过滤规则」的资源，因此独立成一组
@@ -933,13 +1015,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/intercept/judge/usage", s.interceptJudgeUsage) // 兜底审批累计 token 用量
 
 	// /api/* goes through CORS + JWT; everything else is served by the embedded
-	// frontend (public — auth is enforced client-side and on the API). With the
+	// frontend (no JWT required; the optional Basic Auth gate wraps both). With the
 	// no-embed build the webui handler just 404s (run `next dev` separately).
 	api := cors(s.requireAuth(mux))
 	root := http.NewServeMux()
 	root.Handle("/api/", api)
 	root.Handle("/", s.webuiHandler())
-	return root
+	return s.requireBasicAuth(root)
 }
 
 // --- handlers ---
@@ -1040,6 +1122,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	list := s.m.List()
 	metrics, _ := s.m.PG().TaskListMetricsAll()
+	distinct, _ := s.m.pg.DistinctFindingStatsByTask()
 	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
 	dtos := make([]TaskDTO, 0, len(list))
 	for _, t := range list {
@@ -1056,6 +1139,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		dto.GoalsTotal = metric.Goals.Total
 		dto.GoalsMet = metric.Goals.Met
 		dto.InFlight = metric.RunningIntents
+		dto.DistinctFindings = distinct[t.ID]
 		dto.Findings = FindingSeverityDTO{
 			Critical: metric.Findings.Critical,
 			High:     metric.Findings.High,
@@ -1443,18 +1527,19 @@ func truncateReply(s string) string {
 }
 
 type createTaskReq struct {
-	Name                 string   `json:"name,omitempty"` // 可选任务名称;省略/空=未命名
-	CategoryID           *int64   `json:"category_id,omitempty"`
-	Description          string   `json:"description"`
-	Goal                 string   `json:"goal"`
-	LLMProfileID         *int64   `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
-	LLMProfileIDs        []int64  `json:"llm_profile_ids,omitempty"`   // 有序任务级配置链;第一项初始生效
-	SourceTaskIDs        []string `json:"source_task_ids,omitempty"`   // 仅直接、只读继承的来源任务
-	CompanyIDs           []int64  `json:"company_ids,omitempty"`       // 关联企业范围并快照关联当前企业资产;不复制资产或强制生成意图
-	TimeoutSeconds       int      `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
-	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
-	SeedFirstIntent      *bool    `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
-	CoverageEnabled      *bool    `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
+	Schedule             *scheduleRequest `json:"schedule,omitempty"`
+	Name                 string           `json:"name,omitempty"` // 可选任务名称;省略/空=未命名
+	CategoryID           *int64           `json:"category_id,omitempty"`
+	Description          string           `json:"description"`
+	Goal                 string           `json:"goal"`
+	LLMProfileID         *int64           `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
+	LLMProfileIDs        []int64          `json:"llm_profile_ids,omitempty"`   // 有序任务级配置链;第一项初始生效
+	SourceTaskIDs        []string         `json:"source_task_ids,omitempty"`   // 仅直接、只读继承的来源任务
+	CompanyIDs           []int64          `json:"company_ids,omitempty"`       // 关联企业范围并快照关联当前企业资产;不复制资产或强制生成意图
+	TimeoutSeconds       int              `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
+	PlanHeartbeatSeconds int              `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
+	SeedFirstIntent      *bool            `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
+	CoverageEnabled      *bool            `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
 	// InterceptRules 任务级资产拦截/允许规则(创建时录入,存 task_intercept_rules,不进全局表)。
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
 }
@@ -1508,8 +1593,19 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "任务级拦截规则无效："+err.Error())
 		return
 	}
+	var schedule *db.TaskScheduleInput
+	if req.Schedule != nil {
+		input := s.scheduleInput(*req.Schedule, nil)
+		input.TaskIDs = nil
+		if err := db.ValidateTaskScheduleInput(input); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		schedule = &input
+	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
-		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
+		Schedule: schedule,
+		Name:     strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
 		CoverageEnabled: req.CoverageEnabled,
@@ -1530,7 +1626,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[task] 新建任务 #%s «%s» 目标: %s", t.ID, req.Description, req.Goal)
 	// 共享的建后流程(seed + 种子意图 + 后台目标分解 + engine.Run),与 spawn_task 复用同一段。
 	// launchTask 内部异步,不阻塞 UI —— 目标分解在后台可见地进行。
-	s.launchTask(t, req.Description+" "+req.Goal, req.SeedFirstIntent != nil && *req.SeedFirstIntent)
+	if schedule == nil || schedule.StartImmediately {
+		s.launchTask(t, req.Description+" "+req.Goal, req.SeedFirstIntent != nil && *req.SeedFirstIntent)
+	} else {
+		s.engine.Pause(t.ID, agent.AbortPausedBySchedule)
+	}
 	writeJSON(w, 201, taskDTO(t, s.resolvedTaskStatus(t)))
 }
 
@@ -2052,6 +2152,11 @@ func (s *Server) findingStats(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	st.Distinct, err = s.m.pg.DistinctFindingStats("")
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
 	writeJSON(w, 200, st)
 }
 
@@ -2074,6 +2179,14 @@ func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 	}
 	assets := s.resolveAssetIDs(f.AssetIDs)
 	dto := findingFromDB(f, assets)
+	cid, err := s.m.pg.FindingCaseID(f.ID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if cid > 0 {
+		dto.CaseID = i64s(cid)
+	}
 	if contextTaskID := strings.TrimSpace(r.URL.Query().Get("context_task")); contextTaskID != "" {
 		contextTask := s.m.ResolveTask(contextTaskID)
 		if contextTask == nil {
@@ -2138,6 +2251,14 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var casePlan *findingCaseExportPlan
+	if q.Get("mode") == "consolidated" {
+		fs, casePlan, err = s.prepareFindingCaseExport(fs)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
 	stage, err := os.MkdirTemp("", "artex-finding-export-")
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -2147,6 +2268,13 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	if err = s.evidenceStore().StageFindingsExport(r.Context(), fs, stage, format == "md-zip"); err != nil {
 		evidenceError(w, err)
 		return
+	}
+	if casePlan != nil {
+		fs, err = s.consolidateFindingCaseExport(fs, casePlan, q.Get("include_originals") == "true")
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
 	}
 	now := time.Now()
 	stamp := now.Format("20060102-150405")
@@ -3290,19 +3418,22 @@ func (s *Server) settingsPayload() map[string]any {
 		concLimit = defaultConcurrencyLimit // 关闭时也回显一个合理默认值给 UI
 	}
 	return map[string]any{
-		"traffic_capture":          s.m.TrafficEnabled(),
-		"agent_traffic_binding":    s.m.pg.GetBool(settingAgentTrafficBinding, false),
-		"llm_record":               s.m.LLMRecordEnabled(),
-		"web_search_enabled":       on,
-		"web_search_backend":       backend,
-		"brave_key_set":            strings.TrimSpace(braveKey) != "",
-		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
-		"web_search_proxy":         proxy,                       // 独立出口代理(http/https/socks5)，空=直连
-		"global_proxy":             s.m.GlobalProxy(),           // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
-		"python_interpreter":       strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
-		"workers":                  s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
-		"task_concurrency_enabled": concOn,                      // 任务并发上限开关(默认关)
-		"task_concurrency_limit":   concLimit,                   // 同时运行任务上限(开启后默认5)
+		"traffic_capture":           s.m.TrafficEnabled(),
+		"agent_traffic_binding":     s.m.pg.GetBool(settingAgentTrafficBinding, false),
+		"task_intelligence_enabled": s.m.pg.GetBool(db.SettingTaskIntelligence, false),
+		db.SettingCredentialAgent:   s.m.pg.GetBool(db.SettingCredentialAgent, false),
+		db.SettingCredentialTraffic: s.m.pg.GetBool(db.SettingCredentialAgent, false) && s.m.pg.GetBool(db.SettingCredentialTraffic, false),
+		"llm_record":                s.m.LLMRecordEnabled(),
+		"web_search_enabled":        on,
+		"web_search_backend":        backend,
+		"brave_key_set":             strings.TrimSpace(braveKey) != "",
+		"tavily_key_set":            strings.TrimSpace(tavilyKey) != "",
+		"web_search_proxy":          proxy,                       // 独立出口代理(http/https/socks5)，空=直连
+		"global_proxy":              s.m.GlobalProxy(),           // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"python_interpreter":        strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
+		"workers":                   s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
+		"task_concurrency_enabled":  concOn,                      // 任务并发上限开关(默认关)
+		"task_concurrency_limit":    concLimit,                   // 同时运行任务上限(开启后默认5)
 		// LLM 轮询(故障转移)。默认关；开启后走全局激活配置的 agent 在当前配置不可用时
 		// 自动切到下一个配置。bind_fallback 仅在轮询开启时有意义(默认关)。
 		"llm_pool_enabled":       s.m.LLMPoolEnabled(),
@@ -3362,6 +3493,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TrafficCapture      *bool `json:"traffic_capture"`
 		AgentTrafficBinding *bool `json:"agent_traffic_binding"`
+		TaskIntelligence    *bool `json:"task_intelligence_enabled"`
+		CredentialAgent     *bool `json:"credential_agent_enabled"`
+		CredentialTraffic   *bool `json:"credential_traffic_binding"`
 		LLMRecord           *bool `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear.
@@ -3503,6 +3637,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		// Pinned tasks' planner/worker and per-profile chat agents hold providers
 		// built under the OLD switch state — drop them so they pick up the new one.
 		s.invalidateProfileAgents()
+	}
+	if req.TaskIntelligence != nil || req.CredentialAgent != nil || req.CredentialTraffic != nil {
+		if err := s.m.pg.SetIntelligenceSettings(r.Context(), req.TaskIntelligence, req.CredentialAgent, req.CredentialTraffic); err != nil {
+			intelligenceError(w, err)
+			return
+		}
 	}
 	if req.AgentTrafficBinding != nil {
 		if err := s.m.pg.SetBool(settingAgentTrafficBinding, *req.AgentTrafficBinding); err != nil {
@@ -3880,8 +4020,22 @@ func (s *Server) gc(w http.ResponseWriter, r *http.Request) {
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// Next dev and the Go SSE endpoint use different ports on the same
+		// loopback host. Allow the gate cookie only for that local pairing.
+		origin := r.Header.Get("Origin")
+		u, err := url.Parse(origin)
+		host, _, hostErr := net.SplitHostPort(r.Host)
+		if hostErr != nil {
+			host = r.Host
+		}
+		if err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() == host &&
+			(host == "localhost" || host == "127.0.0.1" || host == "::1") {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
+		w.Header().Add("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(204)
 			return

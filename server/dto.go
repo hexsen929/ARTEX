@@ -30,9 +30,12 @@ func rawString(raw json.RawMessage) string {
 
 // ---- Task (frontend "Task") ---- created_at as RFC3339, plus a derived status.
 type TaskDTO struct {
+	DistinctFindings *db.FindingDistinctStats `json:"distinct_findings,omitempty"`
+
 	ID                 string             `json:"id"`
 	ExplorationID      int64              `json:"exploration_id"`
 	Name               string             `json:"name"` // 可选任务名称;空=未命名
+	Remark             string             `json:"remark"`
 	CategoryID         *int64             `json:"category_id,omitempty"`
 	CategoryName       string             `json:"category_name,omitempty"`
 	Pinned             bool               `json:"pinned"`
@@ -113,6 +116,7 @@ func taskDTO(t *Task, status string) TaskDTO {
 		ID:                 t.ID,
 		ExplorationID:      t.ExpID,
 		Name:               lifecycle.Name,
+		Remark:             lifecycle.Remark,
 		CategoryID:         lifecycle.CategoryID,
 		CategoryName:       lifecycle.CategoryName,
 		Pinned:             lifecycle.PinnedAt > 0,
@@ -303,6 +307,9 @@ func coverageAssetRefDTO(ref db.AssetRef) CoverageAssetRefDTO {
 // ---- Finding (frontend "Finding") ----
 
 type FindingDTO struct {
+	CaseID    string  `json:"case_id,omitempty"`
+	MemberIDs []int64 `json:"member_ids,omitempty"`
+
 	TrafficCount          int                        `json:"traffic_count"`
 	EvidenceVersion       int64                      `json:"evidence_version"`
 	ReportEvidenceVersion int64                      `json:"report_evidence_version"`
@@ -456,6 +463,12 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		Evidence:  f.Evidence,
 		Report:    f.Report,
 		TS:        rfc3339(f.CreatedAt),
+	}
+	if f.ExportCaseID > 0 {
+		d.ID = "case:" + i64s(f.ExportCaseID)
+		d.FindingID = ""
+		d.CaseID = i64s(f.ExportCaseID)
+		d.MemberIDs = f.ExportMemberIDs
 	}
 	d.Assets = findingAssetDTOs(f.AssetIDs, assets)
 	if f.TaskID != nil {

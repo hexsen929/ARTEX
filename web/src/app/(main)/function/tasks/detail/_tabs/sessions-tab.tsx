@@ -50,7 +50,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSideQuestions } from "@/hooks/use-side-questions";
-import { api, sseUrl } from "@/lib/api";
+import { api, openSSE } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { MOCK } from "@/lib/mock/enabled";
 import { isBtwCommand } from "@/lib/side-questions";
@@ -478,9 +478,32 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
   );
 }
 
-export function SessionsTab({ taskId }: { taskId: string }) {
+export function SessionsTab({ taskId, requestedSession = "" }: { taskId: string; requestedSession?: string }) {
   const approvalFocus = useApprovalFocus({ taskId });
   const [selectedSessionId, setActiveId] = React.useState(MAIN_ID);
+  const [linkedSession, setLinkedSession] = React.useState<Session>();
+  const hasRequestedSession = React.useRef(false);
+  hasRequestedSession.current = /^(intent:[1-9]\d*|main:\d+|plan)$/.test(requestedSession);
+  React.useEffect(() => {
+    let session: Session | undefined;
+    if (/^intent:[1-9]\d*$/.test(requestedSession)) {
+      const id = requestedSession.slice(7);
+      session = {
+        id,
+        intent_id: id,
+        role: "worker",
+        title: `Worker #${id}`,
+        status: "done",
+        live: false,
+        last_activity: "",
+      };
+    } else if (/^main:\d+$/.test(requestedSession)) {
+      const seg = Number(requestedSession.slice(5));
+      session = { ...MAIN_SESSION, id: mainSessionId(seg), seg, title: mainSessionTitle(seg) };
+    } else if (requestedSession === "plan") session = PLANNER_SESSION;
+    setLinkedSession(session);
+    if (session) setActiveId(session.id);
+  }, [requestedSession]);
   const focusSession = React.useMemo<Session | undefined>(() => {
     const source = approvalFocus.state?.source;
     if (!source) return undefined;
@@ -887,7 +910,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     setSessionTokens({});
     setLLMResolutions(null);
     setSseLive(false);
-    setActiveId(MAIN_ID); // a stale worker id from the previous task must not leak in
+    if (!hasRequestedSession.current) setActiveId(MAIN_ID); // preserve an explicit session deep link
     setMainSegs([{ seq: 0, created_at: "" }]);
     setCurrentSeg(0);
     snapshotRef.current = 0;
@@ -949,7 +972,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         bootKey = mainSessionKey(ms.current);
         if (bootKey !== mainSessionKey(0)) loadingKeysRef.current.delete(mainSessionKey(0));
         loadingKeysRef.current.add(bootKey);
-        setActiveId(mainSessionId(ms.current));
+        if (!hasRequestedSession.current) setActiveId(mainSessionId(ms.current));
         patchStore(bootKey, (s) => ({ ...s, loading: true }));
         return api.activityHistory(taskId, bootKey, 0, PAGE);
       })
@@ -969,8 +992,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           };
         });
         // Open the single task SSE from the snapshot cursor.
-        const es = new EventSource(
-          sseUrl(`/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=${snapshotRef.current}`),
+        const es = openSSE(
+          `/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=${snapshotRef.current}`,
         );
         esRef.current = es;
         es.onopen = () => setSseLive(true);
@@ -1246,10 +1269,10 @@ export function SessionsTab({ taskId }: { taskId: string }) {
 
   const sessions = React.useMemo(() => {
     const items = [...mainSessions, { ...PLANNER_SESSION, live: plannerLive }, ...workerSessions, SYSTEM_SESSION];
-    const located = focusSession ?? retainedSession;
+    const located = focusSession ?? retainedSession ?? linkedSession;
     if (located && !items.some((s) => s.id === located.id)) items.push(located);
     return items;
-  }, [mainSessions, workerSessions, plannerLive, focusSession, retainedSession]);
+  }, [mainSessions, workerSessions, plannerLive, focusSession, retainedSession, linkedSession]);
 
   const grouped = {
     mainagent: sessions.filter((s) => s.role === "mainagent"),

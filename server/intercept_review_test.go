@@ -59,10 +59,10 @@ func TestReviewCompletionSendsCurrentCallWithoutHistory(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &fields); err != nil {
 		t.Fatal(err)
 	}
-	if len(fields) != 5 {
+	if len(fields) != 6 {
 		t.Fatalf("unexpected envelope keys: %s", body)
 	}
-	for _, key := range []string{"version", "working_directory", "background", "tool_name", "arguments"} {
+	for _, key := range []string{"version", "working_directory", "background", "script_capture_status", "tool_name", "arguments"} {
 		if _, ok := fields[key]; !ok {
 			t.Fatalf("missing %s", key)
 		}
@@ -70,7 +70,7 @@ func TestReviewCompletionSendsCurrentCallWithoutHistory(t *testing.T) {
 	if strings.Contains(body, "file created") || strings.Contains(body, `"path"`) {
 		t.Fatal("history leaked into actual model request")
 	}
-	if got.Version != 4 || got.Background == nil || got.Background.Source != intercept.BackgroundUserMessage || got.Background.Text != "清理本次测试文件" || got.WorkingDir != "/tmp/review-fixture" || string(got.Arguments) != string(args) || strings.Contains(body, "worker speculation") || strings.Contains(body, "GLOBAL_OVERVIEW_SENTINEL") {
+	if got.Version != 5 || got.Background == nil || got.Background.Source != intercept.BackgroundUserMessage || got.Background.Text != "清理本次测试文件" || got.WorkingDir != "/tmp/review-fixture" || string(got.Arguments) != string(args) || strings.Contains(body, "worker speculation") || strings.Contains(body, "GLOBAL_OVERVIEW_SENTINEL") {
 		t.Fatalf("wrong model input: %s", body)
 	}
 }

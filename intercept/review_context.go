@@ -8,6 +8,7 @@ import (
 )
 
 const reviewTextLimit = 4000
+const maxReviewScriptBytes = 1 << 20
 
 const BackgroundUserMessage = "user_message"
 
@@ -19,14 +20,30 @@ type ReviewBackground struct {
 	Truncated bool   `json:"truncated,omitempty"`
 }
 
+// ReviewScript is a bounded immutable snapshot of a script referenced by the
+// current tool call. The reviewer has no file tool or execution capability;
+// this snapshot is the only source-code evidence it can inspect.
+type ReviewScript struct {
+	Path      string `json:"path"`
+	Source    string `json:"source,omitempty"` // file | command; command files are not created yet
+	SHA256    string `json:"sha256,omitempty"`
+	Bytes     int64  `json:"bytes,omitempty"`
+	Content   string `json:"content,omitempty"`
+	Complete  bool   `json:"complete"`
+	Truncated bool   `json:"truncated,omitempty"`
+	ReadError string `json:"read_error,omitempty"`
+}
+
 // ReviewInput contains only the current call and explicitly selected background.
 // Execution history and call correlation belong to the separate audit record.
 type ReviewInput struct {
-	Version    int               `json:"version"`
-	WorkingDir string            `json:"working_directory,omitempty"`
-	Background *ReviewBackground `json:"background,omitempty"`
-	Tool       string            `json:"tool_name"`
-	Arguments  json.RawMessage   `json:"arguments"`
+	Version             int               `json:"version"`
+	WorkingDir          string            `json:"working_directory,omitempty"`
+	Background          *ReviewBackground `json:"background,omitempty"`
+	ScriptCaptureStatus string            `json:"script_capture_status,omitempty"`
+	Scripts             []ReviewScript    `json:"script_files,omitempty"`
+	Tool                string            `json:"tool_name"`
+	Arguments           json.RawMessage   `json:"arguments"`
 }
 
 type reviewContextKey struct{}
@@ -55,7 +72,7 @@ func BuildReviewInput(ctx context.Context, tool string, arguments json.RawMessag
 	if !json.Valid(arguments) {
 		return ReviewInput{}, fmt.Errorf("工具参数不是有效 JSON")
 	}
-	in := ReviewInput{Version: 4, Tool: tool, Arguments: append(json.RawMessage(nil), arguments...)}
+	in := ReviewInput{Version: 5, Tool: tool, Arguments: append(json.RawMessage(nil), arguments...)}
 	if env, ok := ctx.Value(reviewContextKey{}).(reviewEnvironment); ok {
 		in.WorkingDir = env.workingDir
 		background := env.background
@@ -66,5 +83,6 @@ func BuildReviewInput(ctx context.Context, tool string, arguments json.RawMessag
 			in.Background = &background
 		}
 	}
+	in.Scripts, in.ScriptCaptureStatus = captureScripts(in.WorkingDir, tool, arguments)
 	return in, nil
 }

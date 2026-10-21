@@ -20,9 +20,13 @@ type Parent struct {
 	TaskID         int64 `json:"task_id,omitempty"`
 	ExplorationID  int64 `json:"exploration_id,omitempty"`
 	IntentID       int64 `json:"intent_id,omitempty"`
+	ApprovalID     int64 `json:"approval_id,omitempty"`
 }
 
 func (p Parent) Key() string {
+	if p.ApprovalID > 0 {
+		return fmt.Sprintf("approval-%d", p.ApprovalID)
+	}
 	if p.ConversationID > 0 {
 		return fmt.Sprintf("conv-%d", p.ConversationID)
 	}

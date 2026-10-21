@@ -103,7 +103,7 @@ func TestWorkerReviewContextAcrossToolCalls(t *testing.T) {
 	}
 	first, second := inputs[0], inputs[1]
 	for _, in := range inputs {
-		if in.Version != 4 || in.Background != nil || in.WorkingDir != runDir {
+		if in.Version != 5 || in.Background != nil || in.WorkingDir != runDir {
 			t.Fatalf("unexpected Worker background: %+v", in)
 		}
 		raw, _ := json.Marshal(in)
@@ -131,10 +131,10 @@ func TestWorkerReviewContextAcrossToolCalls(t *testing.T) {
 			t.Fatalf("verdict lost model input: %+v err=%v", detail, err)
 		}
 		var saved intercept.ReviewInput
-		if json.Unmarshal(detail.Audit.ModelInput, &saved) != nil || saved.Background != nil || saved.Version != 4 {
+		if json.Unmarshal(detail.Audit.ModelInput, &saved) != nil || saved.Background != nil || saved.Version != 5 {
 			t.Fatal("stored Worker review input retained a background")
 		}
-		if row.Status == "allowed" && (detail.Audit.ExecutionStatus != "succeeded" || saved.Version != 4) {
+			if row.Status == "allowed" && (detail.Audit.ExecutionStatus != "succeeded" || saved.Version != 5) {
 			t.Fatal("automatic allow lost execution result or its original background snapshot")
 		}
 		if detail.Audit.Correlation != "exact" {

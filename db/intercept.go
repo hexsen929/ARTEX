@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -226,9 +227,12 @@ func scanInterceptApprovalRow(rows interface{ Scan(...any) error }, r *Intercept
 }
 
 // Keep legacy rows without decision_source consistent with their displayed source.
-const approvalDecisionSource = `COALESCE(NULLIF(ip.decision_source,''), CASE
- WHEN ip.rule_id IS NOT NULL THEN 'rule'
- WHEN ip.reason LIKE '[模型]%' THEN 'model' ELSE 'unknown' END)`
+const approvalDecisionSource = `CASE
+ WHEN ip.audit->>'decision_reason' LIKE '人工允许%' OR ip.audit->>'decision_reason' LIKE '人工拒绝%' THEN 'manual'
+ ELSE COALESCE(NULLIF(ip.decision_source,''), CASE
+   WHEN ip.rule_id IS NOT NULL THEN 'rule'
+   WHEN ip.reason LIKE '[模型]%' THEN 'model' ELSE 'unknown' END)
+ END`
 
 const approvalRowColumns = `ip.id, ip.rule_id, ip.conversation_id, ip.task_id, ip.agent_name,
        ip.tool_name, ip.tool_input, ip.status, ip.reason, ip.decided_at, ip.created_at, ` + approvalDecisionSource + `,
@@ -239,6 +243,7 @@ const approvalRowColumns = `ip.id, ip.rule_id, ip.conversation_id, ip.task_id, i
 const approvalRowJoins = `
 FROM intercept_pending ip
 LEFT JOIN conversations c ON c.id = ip.conversation_id
+LEFT JOIN tasks t ON t.id::text = ip.task_id
 LEFT JOIN intercept_rules ir ON ir.id = ip.rule_id`
 
 const approvalRowSelect = `SELECT ` + approvalRowColumns + approvalRowJoins
@@ -284,11 +289,14 @@ func (d *DB) ListAllIntercepts(limit int) ([]InterceptApprovalRow, error) {
 	return out, rows.Err()
 }
 
-// InterceptApprovalFilter combines exact status and decision-source filters.
+// InterceptApprovalFilter combines status, decision-source and literal substring search.
 // Empty fields include all values.
 type InterceptApprovalFilter struct {
 	Status         string
 	DecisionSource string
+	Search         string
+	CreatedFrom    string // inclusive UTC calendar date, YYYY-MM-DD
+	CreatedTo      string // inclusive UTC calendar date, YYYY-MM-DD
 }
 
 // ListAllInterceptsPage returns one 1-based page and the total matching count.
@@ -342,12 +350,53 @@ func (d *DB) listInterceptsPage(taskID string, page, size int, filter InterceptA
 	add("ip.task_id", taskID)
 	add("ip.status", filter.Status)
 	add(approvalDecisionSource, filter.DecisionSource)
+	if filter.CreatedFrom != "" {
+		args = append(args, filter.CreatedFrom)
+		conditions = append(conditions, "ip.created_at >= $"+fmt.Sprint(len(args))+"::date")
+	}
+	if filter.CreatedTo != "" {
+		args = append(args, filter.CreatedTo)
+		conditions = append(conditions, "ip.created_at < ($"+fmt.Sprint(len(args))+"::date + INTERVAL '1 day')")
+	}
+	search := strings.TrimSpace(filter.Search)
+	if strings.HasPrefix(search, "#") {
+		id, err := strconv.ParseInt(strings.TrimPrefix(search, "#"), 10, 64)
+		if err != nil || id <= 0 {
+			return nil, 0, fmt.Errorf("审批编号必须为 # 后接正整数")
+		}
+		add("ip.id", strconv.FormatInt(id, 10))
+	} else if search != "" {
+		// Treat SQL LIKE metacharacters literally, including URL percent escapes.
+		pattern := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(search)
+		args = append(args, "%"+pattern+"%")
+		like := "$" + fmt.Sprint(len(args))
+		conditions = append(conditions, `(
+      ip.id::text ILIKE `+like+`
+      OR ip.conversation_id::text ILIKE `+like+`
+      OR COALESCE(ip.task_id, '') ILIKE `+like+`
+      OR COALESCE(ip.agent_name, '') ILIKE `+like+`
+      OR COALESCE(ip.tool_name, '') ILIKE `+like+`
+      OR COALESCE(ip.tool_input::text, '') ILIKE `+like+`
+      OR COALESCE(ip.reason, '') ILIKE `+like+`
+      OR COALESCE(ip.audit::text, '') ILIKE `+like+`
+      OR COALESCE(c.title, '') ILIKE `+like+`
+      OR COALESCE(c.agent_key, '') ILIKE `+like+`
+      OR COALESCE(t.name, '') ILIKE `+like+`
+      OR COALESCE(t.description, '') ILIKE `+like+`
+      OR COALESCE(t.goal, '') ILIKE `+like+`
+      OR COALESCE(ir.name, '') ILIKE `+like+`
+    )`)
+	}
 	where := ""
 	if len(conditions) > 0 {
 		where = " WHERE " + strings.Join(conditions, " AND ")
 	}
 	var total int
-	if err := d.QueryRow("SELECT COUNT(*) FROM intercept_pending ip"+where, args...).Scan(&total); err != nil {
+	countFrom := "FROM intercept_pending ip"
+	if search != "" && !strings.HasPrefix(search, "#") {
+		countFrom = approvalRowJoins
+	}
+	if err := d.QueryRow("SELECT COUNT(*) "+countFrom+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 

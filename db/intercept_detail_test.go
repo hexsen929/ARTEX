@@ -49,7 +49,7 @@ func TestInterceptDetails(t *testing.T) {
 		var wg sync.WaitGroup
 		for range 8 {
 			wg.Go(func() {
-				ok, err := d.ResolveIntercept(id, "allowed", "allow", "人工允许执行")
+				ok, err := d.ResolveIntercept(id, "allowed", "allow", "人工允许执行", "manual")
 				if err != nil {
 					t.Error(err)
 				}
@@ -70,8 +70,15 @@ func TestInterceptDetails(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, _ := d.GetInterceptDetail(id)
-		if got.Audit.Output != "" {
-			t.Fatal("cross-run result attached")
+		if got.Audit.Output != "" || got.DecisionSource != "manual" {
+			t.Fatalf("manual decision source or cross-run result wrong: %+v", got)
+		}
+		if _, err := d.Exec(`UPDATE intercept_pending SET decision_source='' WHERE id=$1`, id); err != nil {
+			t.Fatal(err)
+		}
+		fallback, err := d.GetInterceptDetail(id)
+		if err != nil || fallback.DecisionSource != "manual" {
+			t.Fatalf("legacy manual source fallback lost: %+v %v", fallback, err)
 		}
 		if err := d.CompleteIntercept(id, "run", "call", "failed", "permission denied", true); err != nil {
 			t.Fatal(err)

@@ -9,12 +9,15 @@ import {
   ChevronRightIcon,
   FileTextIcon,
   FlaskConicalIcon,
+  FolderIcon,
+  FolderOpenIcon,
   RotateCcwIcon,
   ShieldAlertIcon,
   Trash2Icon,
 } from "lucide-react";
 
 import { CopyButton } from "@/components/copy-button";
+import { FindingCaseMembers, FindingSeverityCounts } from "@/components/finding-case-list";
 import { Markdown } from "@/components/markdown";
 import { StatusBadge } from "@/components/status-badge";
 import {
@@ -37,7 +40,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { statusMeta } from "@/lib/status";
-import type { ActiveFindingRetest, Finding, FindingStatus, Severity } from "@/lib/types";
+import type {
+  ActiveFindingRetest,
+  Finding,
+  FindingAsset,
+  FindingCaseListRow,
+  FindingStatus,
+  Severity,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
@@ -90,6 +100,10 @@ const COLUMN_COUNT = 9;
 
 interface FindingsTableProps {
   items: Finding[];
+  caseRows?: FindingCaseListRow[];
+  hideHeader?: boolean;
+  matchedIds?: number[];
+  presentation?: "records" | "task" | "asset";
   selectedIds: Set<string>;
   onToggleSelected: (id: string, checked: boolean) => void;
   onToggleSelectedPage: (ids: string[], checked: boolean) => void;
@@ -114,6 +128,10 @@ interface FindingsTableProps {
 // (勾选 / 行内展开 / 行内改名与改状态 / 复测 / 深入 / 删除),差异只在外层容器与分页。
 export function FindingsTable({
   items,
+  caseRows,
+  hideHeader = false,
+  matchedIds,
+  presentation = "records",
   selectedIds,
   onToggleSelected,
   onToggleSelectedPage,
@@ -140,37 +158,79 @@ export function FindingsTable({
     headerChecked = "indeterminate";
   }
 
+  const rows: FindingCaseListRow[] = caseRows ?? items.map((finding) => ({ finding, matched_ids: [] }));
+
+  const shared: Omit<FindingsTableProps, "items" | "caseRows"> = {
+    presentation,
+    selectedIds,
+    onToggleSelected,
+    onToggleSelectedPage,
+    expandedKey,
+    onToggleRow,
+    reports,
+    edit,
+    onEditChange,
+    saving,
+    onSave,
+    onStatusChange,
+    onRetest,
+    activeRetests,
+    onDeepen,
+    onDelete,
+  };
+
   return (
     /* 固定列宽保证展开内容不撑开表格；窄屏只在表格内部横向滚动。 */
     <Table className="min-w-[60rem] table-fixed">
-      <TableHeader>
-        <TableRow>
-          <TableHead className="w-8">
-            <Checkbox
-              checked={headerChecked}
-              onCheckedChange={(checked) => onToggleSelectedPage(selectableIds, checked === true)}
-              aria-label={selectAllLabel}
-            />
-          </TableHead>
-          <TableHead className="w-8" />
-          <TableHead className="w-20">严重度</TableHead>
-          <TableHead>漏洞名称</TableHead>
-          <TableHead className="w-44">资产</TableHead>
-          <TableHead className="w-28">状态</TableHead>
-          <TableHead className="w-32">所属任务</TableHead>
-          <TableHead className="w-24">时间</TableHead>
-          <TableHead className="w-48">操作</TableHead>
-        </TableRow>
-      </TableHeader>
+      {hideHeader ? (
+        <colgroup>
+          <col className="w-8" />
+          <col className="w-8" />
+          <col className="w-20" />
+          <col />
+          <col className="w-44" />
+          <col className="w-28" />
+          <col className="w-32" />
+          <col className="w-24" />
+          <col className="w-48" />
+        </colgroup>
+      ) : null}
+      {!hideHeader ? (
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-8">
+              <Checkbox
+                checked={headerChecked}
+                onCheckedChange={(checked) => onToggleSelectedPage(selectableIds, checked === true)}
+                aria-label={selectAllLabel}
+              />
+            </TableHead>
+            <TableHead className="w-8" />
+            <TableHead className="w-20">严重度</TableHead>
+            <TableHead>漏洞名称</TableHead>
+            <TableHead className="w-44">资产</TableHead>
+            <TableHead className="w-28">状态</TableHead>
+            <TableHead className="w-32">所属任务</TableHead>
+            <TableHead className="w-24">时间</TableHead>
+            <TableHead className="w-48">操作</TableHead>
+          </TableRow>
+        </TableHeader>
+      ) : null}
       <TableBody>
-        {items.map((f) => {
+        {rows.map((row) => {
+          if (row.case) return <FindingFolderTableRows key={`case:${row.case.id}`} row={row} shared={shared} />;
+          const f = row.finding;
+          if (!f) return null;
           const rowKey = findingRowKey(f);
           const open = expandedKey === rowKey;
           const retest = f.finding_id ? activeRetests[f.finding_id] : undefined;
           return (
             <React.Fragment key={rowKey}>
               <TableRow
-                className="cursor-pointer"
+                className={cn(
+                  "cursor-pointer",
+                  matchedIds && !matchedIds.includes(Number(f.finding_id)) && "bg-muted/30",
+                )}
                 role="button"
                 tabIndex={0}
                 aria-expanded={open}
@@ -213,28 +273,16 @@ export function FindingsTable({
                       <span className="truncate font-medium">{f.name || f.vulnclass || "未分类"}</span>
                     )}
                     <span className="truncate text-xs text-muted-foreground">{f.summary}</span>
+                    {matchedIds && !matchedIds.includes(Number(f.finding_id)) ? (
+                      <Badge variant="outline" className="w-fit">
+                        未命中当前筛选
+                      </Badge>
+                    ) : null}
                     <Badge variant="outline">流量证据 {f.traffic_count ?? 0} 条</Badge>
                   </div>
                 </TableCell>
                 <TableCell>
-                  {f.assets && f.assets.length > 0 ? (
-                    <div className="flex flex-wrap gap-1">
-                      {f.assets.slice(0, 3).map((a) => (
-                        <code
-                          key={a.id}
-                          className="max-w-full truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
-                          title={`${a.type} · ${a.label}`}
-                        >
-                          {a.label}
-                        </code>
-                      ))}
-                      {f.assets.length > 3 && (
-                        <span className="text-xs text-muted-foreground">+{f.assets.length - 3}</span>
-                      )}
-                    </div>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )}
+                  <FindingAssetLabels assets={f.assets} />
                 </TableCell>
                 <TableCell onClick={(e) => e.stopPropagation()}>
                   {f.finding_id ? (
@@ -441,7 +489,7 @@ export function FindingsTable({
             </React.Fragment>
           );
         })}
-        {items.length === 0 && (
+        {(caseRows ? caseRows.length : items.length) === 0 && (
           <TableRow>
             <TableCell colSpan={COLUMN_COUNT} className="py-12 text-center text-sm text-muted-foreground">
               没有匹配的发现。
@@ -450,5 +498,140 @@ export function FindingsTable({
         )}
       </TableBody>
     </Table>
+  );
+}
+
+// Ordinary reports and merged folders share one asset presentation, including
+// truncation and overflow counts, so labels align in every table view.
+function FindingAssetLabels({
+  assets = [],
+  totalCount = assets.length,
+}: {
+  assets?: FindingAsset[];
+  totalCount?: number;
+}) {
+  if (assets.length === 0) return <span className="text-muted-foreground">—</span>;
+  const visibleAssets = assets.slice(0, 3);
+  const remaining = Math.max(totalCount, assets.length) - visibleAssets.length;
+  return (
+    <div className="flex min-w-0 flex-wrap gap-1">
+      {visibleAssets.map((asset) => (
+        <code
+          key={asset.id}
+          className="max-w-full truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
+          title={`${asset.type} · ${asset.label}`}
+        >
+          {asset.label}
+        </code>
+      ))}
+      {remaining > 0 ? <span className="text-xs text-muted-foreground">+{remaining}</span> : null}
+    </div>
+  );
+}
+
+// Folder summaries occupy the same columns as the current view's ordinary rows.
+// Expanded members reuse those rows without a second heading or column header.
+function FindingFolderTableRows({
+  row,
+  shared,
+}: {
+  row: FindingCaseListRow;
+  shared: Omit<FindingsTableProps, "items" | "caseRows">;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const group = row.case;
+  if (!group) return null;
+  // Match the current table's ordinary rows, which display the task description.
+  const taskLabel = row.task_description;
+  const assets = row.assets ?? [];
+  const assetCount = row.asset_count ?? assets.length;
+  return (
+    <>
+      <TableRow className={cn(open && "bg-muted/60")}>
+        <TableCell />
+        <TableCell>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            aria-controls={`finding-table-members-${group.id}`}
+            aria-label={`${open ? "收起" : "展开"}${group.title}`}
+          >
+            <ChevronRightIcon className={cn("size-4 transition-transform", open && "rotate-90")} />
+          </Button>
+        </TableCell>
+        <TableCell>
+          <FindingSeverityCounts counts={group} />
+        </TableCell>
+        <TableCell>
+          <div className="flex min-w-0 items-start gap-2">
+            {open ? (
+              <FolderOpenIcon className="mt-0.5 size-4 shrink-0 text-primary" />
+            ) : (
+              <FolderIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+            )}
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <Link
+                className="truncate font-medium hover:text-primary hover:underline"
+                title={group.title}
+                href={`/function/findings/case?id=${group.id}`}
+              >
+                {group.title}
+              </Link>
+              <span className="truncate text-muted-foreground text-xs">
+                {group.count} 条上报 · {group.report_version !== group.version ? "统一报告待更新" : "统一报告已生成"}
+              </span>
+            </div>
+          </div>
+        </TableCell>
+        <TableCell>
+          <FindingAssetLabels assets={assets} totalCount={assetCount} />
+        </TableCell>
+        <TableCell>
+          <span className="text-muted-foreground" title="请查看成员各自的处置状态">
+            —
+          </span>
+        </TableCell>
+        <TableCell>
+          {group.task_id ? (
+            <Link
+              className="inline-flex max-w-full items-center gap-1 text-primary hover:underline"
+              title={taskLabel}
+              href={`/function/tasks/detail?id=${group.task_id}`}
+            >
+              <span className="truncate">{taskLabel}</span>
+              <ArrowUpRightIcon className="size-3 shrink-0" />
+            </Link>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </TableCell>
+        <TableCell className="text-muted-foreground text-xs tabular-nums">
+          {row.last_found_at ? fmtTime(row.last_found_at) : "—"}
+        </TableCell>
+        <TableCell>
+          <Button asChild size="sm" variant="ghost">
+            <Link href={`/function/findings/case?id=${group.id}`}>统一报告</Link>
+          </Button>
+        </TableCell>
+      </TableRow>
+      {open ? (
+        <TableRow>
+          <TableCell colSpan={COLUMN_COUNT} className="whitespace-normal bg-muted/20 px-4 py-4">
+            <section id={`finding-table-members-${group.id}`} aria-label={`${group.title}的原始上报`}>
+              <FindingCaseMembers
+                caseId={group.id}
+                version={group.version}
+                nested
+                renderRecords={(members) => (
+                  <FindingsTable {...shared} items={members} matchedIds={row.matched_ids} hideHeader />
+                )}
+              />
+            </section>
+          </TableCell>
+        </TableRow>
+      ) : null}
+    </>
   );
 }

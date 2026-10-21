@@ -7,14 +7,18 @@ import {
   CheckIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  ChevronUpIcon,
   ClipboardListIcon,
   CopyIcon,
   RefreshCwIcon,
+  SearchIcon,
   ShieldAlertIcon,
   XIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { DateSelect } from "@/components/date-select";
+import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TablePagination } from "@/components/table-pagination";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -22,9 +26,11 @@ import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { useSideQuestions } from "@/hooks/use-side-questions";
 import { api } from "@/lib/api";
 import type {
   InterceptApprovalFilter,
@@ -110,13 +116,16 @@ function StatusBadge({ status }: { status: string }) {
 
 function MatchCell({ row, showReason = true }: { row: InterceptApprovalRow; showReason?: boolean }) {
   const reason = row.reason?.replace(/^\[模型\]\s*/, "");
+  const decisionSource = source(row);
   return (
     <div className="flex min-w-0 flex-col gap-1">
-      {source(row) === "model" ? (
+      {decisionSource === "model" ? (
         <Badge variant="outline">
           <BotIcon />
           模型判定
         </Badge>
+      ) : decisionSource === "manual" ? (
+        <Badge variant="outline">人工判定</Badge>
       ) : (
         <span className="truncate">{row.rule_name || "规则未记录或已删除"}</span>
       )}
@@ -174,6 +183,72 @@ const executionLabels: Record<InterceptAudit["execution_status"], string> = {
   unknown: "执行结果未知",
 };
 
+function ReviewBackgroundBlock({ background }: { background?: InterceptReviewInput["background"] }) {
+  if (!background) return <p className="text-muted-foreground text-xs">本次审查未附带背景消息。</p>;
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      <CodeBlock
+        label={background.source === "user_message" ? "背景 · 用户消息" : "背景 · Worker 意图摘要（旧版）"}
+        text={background.text}
+        truncated={background.truncated}
+      />
+      <p className="text-muted-foreground text-xs">
+        {background.source === "user_message"
+          ? "取自当前用户消息。"
+          : "这是旧版发送的 Worker 意图摘要；新版 Worker 审查不再发送此内容。"}
+      </p>
+    </div>
+  );
+}
+
+function ScriptSnapshotSummary({ input }: { input: InterceptReviewInput }) {
+  const files = input.script_files ?? [];
+  if (!files.length) return null;
+  return (
+    <section className="flex min-w-0 flex-col gap-2 rounded-lg border bg-background p-3" aria-label="已附加脚本快照">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="font-medium text-sm">审查脚本快照</h3>
+        <Badge variant={input.script_capture_status === "incomplete" ? "destructive" : "secondary"}>
+          {input.script_capture_status === "incomplete" ? "读取不完整" : "已附加"}
+        </Badge>
+      </div>
+      {files.map((file) => (
+        <ScriptFileSnapshot key={file.path} file={file} />
+      ))}
+      <p className="text-muted-foreground text-xs">这是执行前实际发送给审查模型的脚本快照。</p>
+    </section>
+  );
+}
+
+function ScriptFileSnapshot({ file }: { file: NonNullable<InterceptReviewInput["script_files"]>[number] }) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="flex min-w-0 flex-col gap-2 overflow-visible">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        <code className="break-all">{file.path}</code>
+        {file.sha256 ? <span className="text-muted-foreground">SHA-256 {file.sha256.slice(0, 12)}…</span> : null}
+        {file.bytes != null ? <span className="text-muted-foreground">{file.bytes} 字节</span> : null}
+      </div>
+      {file.read_error ? <p className="text-destructive text-xs">{file.read_error}</p> : null}
+      {file.content ? (
+        <>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="self-start px-0"
+            aria-expanded={open}
+            onClick={() => setOpen((value) => !value)}
+          >
+            {open ? <ChevronUpIcon data-icon="inline-start" /> : <ChevronDownIcon data-icon="inline-start" />}
+            查看脚本内容
+          </Button>
+          {open ? <CodeBlock label="脚本内容（审查快照）" text={file.content} /> : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
   return (
     <section className="flex min-w-0 flex-col gap-4" aria-label="模型审查上下文">
@@ -189,22 +264,7 @@ function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
         text={JSON.stringify({ tool_name: input.tool_name, arguments: input.arguments }, null, 2)}
       />
       {input.version >= 2 ? (
-        input.background ? (
-          <div className="flex min-w-0 flex-col gap-2">
-            <CodeBlock
-              label={input.background.source === "user_message" ? "背景 · 用户消息" : "背景 · Worker 意图摘要（旧版）"}
-              text={input.background.text}
-              truncated={input.background.truncated}
-            />
-            <p className="text-muted-foreground text-xs">
-              {input.background.source === "user_message"
-                ? "取自当前用户消息。"
-                : "这是旧版发送的 Worker 意图摘要；新版 Worker 审查不再发送此内容。"}
-            </p>
-          </div>
-        ) : (
-          <p className="text-muted-foreground text-xs">本次审查未附带背景消息。</p>
-        )
+        <ReviewBackgroundBlock background={input.background} />
       ) : (
         <>
           {input.turn_input ? (
@@ -223,6 +283,40 @@ function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
         </>
       )}
       {input.working_directory ? <CodeBlock label="工作目录" text={input.working_directory} /> : null}
+      {input.script_files?.length ? (
+        <section className="flex min-w-0 flex-col gap-4" aria-label="脚本快照">
+          <div>
+            <h3 className="font-medium text-sm">脚本快照</h3>
+            <p className="text-muted-foreground text-xs">
+              这是审查前从当前命令或引用文件提取的脚本内容；不会在审查过程中执行脚本。
+            </p>
+          </div>
+          {input.script_files.map((file) => (
+            <div key={`${file.path}:${file.source ?? ""}:${file.sha256 ?? file.read_error ?? ""}`} className="flex min-w-0 flex-col gap-2 rounded-lg border p-3">
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                <span className="break-all font-mono">{file.path}</span>
+                {file.source ? <span className="text-muted-foreground">{file.source === "command" ? "命令内生成" : "引用文件"}</span> : null}
+                {file.sha256 ? <span className="text-muted-foreground">SHA-256 {file.sha256}</span> : null}
+                {file.bytes != null ? <span className="text-muted-foreground">{file.bytes} 字节</span> : null}
+              </div>
+              {file.content ? <CodeBlock label="脚本内容" text={file.content} /> : null}
+              {file.read_error ? (
+                <Alert variant="destructive">
+                  <AlertDescription>{file.read_error}</AlertDescription>
+                </Alert>
+              ) : null}
+              {file.truncated ? (
+                <p className="text-muted-foreground text-xs">脚本内容不完整，不能据此自动放行。</p>
+              ) : null}
+            </div>
+          ))}
+          {input.script_capture_status === "incomplete" ? (
+            <Alert variant="destructive">
+              <AlertDescription>无法完整读取当前执行脚本；默认继续交给模型审查，也可以在模型设置中选择转人工审查。</AlertDescription>
+            </Alert>
+          ) : null}
+        </section>
+      ) : null}
       {input.version >= 3 ? (
         <p className="text-muted-foreground text-xs">本次审查未发送历史调用或执行结果。</p>
       ) : (
@@ -301,6 +395,7 @@ export function ApprovalDetail({
   const [error, setError] = React.useState("");
   const [retry, setRetry] = React.useState(0);
   const [more, setMore] = React.useState(defaultExpanded);
+  const side = useSideQuestions(`/api/intercept/history/${row.id}`);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Status, refresh and retry invalidate details without closing the panel.
   React.useEffect(() => {
@@ -333,185 +428,207 @@ export function ApprovalDetail({
   if (row.status === "pending") execution = "尚未执行";
   if (audit && audit.correlation !== "exact" && audit.effective_action === "allow") execution = "未关联执行结果";
   const command = typeof row.tool_input?.command === "string" ? row.tool_input.command : undefined;
-  let initialLabel = source(row) === "model" ? "模型初判" : "规则初判";
+  let initialLabel = source(row) === "model" ? "模型初判" : source(row) === "manual" ? "人工判定" : "规则初判";
   if (audit?.model_fallback) initialLabel = "模型异常回退";
 
   return (
-    <div className="flex min-w-0 flex-col gap-4 p-3 sm:p-5">
-      <div className="grid min-w-0 gap-5 rounded-xl border bg-muted/20 p-4 lg:grid-cols-2">
-        <div className="flex min-w-0 flex-col gap-3">
-          <CodeBlock
-            label={`${current.agent_name || current.conv_agent_key || "Agent"} · 工具请求`}
-            text={JSON.stringify(row.tool_input ?? {}, null, 2)}
-          />
-          {command ? (
-            <Collapsible>
-              <CollapsibleTrigger asChild>
-                <Button variant="ghost" size="sm">
-                  <ChevronDownIcon data-icon="inline-start" />
-                  查看命令内容
-                </Button>
-              </CollapsibleTrigger>
-              <CollapsibleContent className="pt-2">
-                <CodeBlock label="命令内容" text={command} />
-              </CollapsibleContent>
-            </Collapsible>
-          ) : null}
-          <p className="text-muted-foreground text-xs">
-            执行结果：<span className="text-foreground">{detail ? execution : "加载中…"}</span>
-          </p>
-        </div>
-        <div className="flex min-w-0 flex-col gap-4 lg:border-l lg:pl-5">
-          <h3 className="font-medium text-muted-foreground text-xs">
-            {current.status === "pending" ? "审查状态" : "审批裁决"}
-          </h3>
-          <div className="flex flex-wrap items-center gap-2">
-            <StatusBadge status={current.status} />
-            <MatchCell row={current} showReason={false} />
+    <SideQuestionWorkspace
+      side={side}
+      label={`审批 #${row.id} · ${row.tool_name}`}
+      composerLayout="stacked"
+      placeholder="询问此审批中的脚本或审查理由…"
+      suggestions={[
+        "此脚本的作用是什么？",
+        "脚本会修改哪些文件或数据？",
+        "为什么这次被放行或拦截？",
+        "脚本中有哪些未确定行为？",
+      ]}
+      className={cn(side.open ? "min-h-[460px]" : "min-h-0")}
+      mainClassName="overflow-visible"
+    >
+      <div className="flex min-w-0 flex-col gap-4 p-3 sm:p-5">
+        <div className="grid min-w-0 gap-5 rounded-xl border bg-muted/20 p-4 lg:grid-cols-2">
+          <div className="flex min-w-0 flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-medium text-sm">审批上下文</span>
+              <SideQuestionButton side={side} />
+            </div>
+            <CodeBlock
+              label={`${current.agent_name || current.conv_agent_key || "Agent"} · 工具请求`}
+              text={JSON.stringify(row.tool_input ?? {}, null, 2)}
+            />
+            {command ? (
+              <Collapsible>
+                <CollapsibleTrigger asChild>
+                  <Button variant="ghost" size="sm">
+                    <ChevronDownIcon data-icon="inline-start" />
+                    查看命令内容
+                  </Button>
+                </CollapsibleTrigger>
+                <CollapsibleContent className="pt-2">
+                  <CodeBlock label="命令内容" text={command} />
+                </CollapsibleContent>
+              </Collapsible>
+            ) : null}
+            <p className="text-muted-foreground text-xs">
+              执行结果：<span className="text-foreground">{detail ? execution : "加载中…"}</span>
+            </p>
+            {audit?.model_input ? <ScriptSnapshotSummary input={audit.model_input} /> : null}
           </div>
-          <p className="whitespace-pre-wrap break-words text-sm leading-7 [overflow-wrap:anywhere]">
-            {current.reason?.replace(/^\[模型\]\s*/, "") || "未记录审批理由"}
-          </p>
-          {audit?.decision_reason ? <p className="text-sm">{audit.decision_reason}</p> : null}
-          {audit?.effective_action ? <p className="text-sm">最终动作：{actionLabels[audit.effective_action]}</p> : null}
-          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
-            <dt className="text-muted-foreground">来源</dt>
-            <dd className="break-words">
-              <ApprovalOrigin row={current} detail />
-            </dd>
-            <dt className="text-muted-foreground">申请时间</dt>
-            <dd>{fmtTime(row.created_at)}</dd>
-            <dt className="text-muted-foreground">决定时间</dt>
-            <dd>{fmtTime(current.decided_at)}</dd>
-            {audit?.rule_name ? (
-              <>
-                <dt className="text-muted-foreground">规则快照</dt>
-                <dd>{audit.rule_name}</dd>
-              </>
-            ) : null}
-            {audit?.profile_id ? (
-              <>
-                <dt className="text-muted-foreground">审批模型配置</dt>
-                <dd>#{audit.profile_id}</dd>
-              </>
-            ) : null}
-          </dl>
-          {!readOnly ? <DecisionActions row={current} busy={busy} decide={decide} /> : null}
-        </div>
-      </div>
-      {error ? (
-        <Alert variant="destructive">
-          <AlertDescription>
+          <div className="flex min-w-0 flex-col gap-4 lg:border-l lg:pl-5">
+            <h3 className="font-medium text-muted-foreground text-xs">
+              {current.status === "pending" ? "审查状态" : "审批裁决"}
+            </h3>
             <div className="flex flex-wrap items-center gap-2">
-              <span>详情加载失败：{error}</span>
-              <Button variant="outline" size="sm" onClick={() => setRetry((v) => v + 1)}>
-                重试详情
+              <StatusBadge status={current.status} />
+              <MatchCell row={current} showReason={false} />
+            </div>
+            <p className="whitespace-pre-wrap break-words text-sm leading-7 [overflow-wrap:anywhere]">
+              {current.reason?.replace(/^\[模型\]\s*/, "") || "未记录审批理由"}
+            </p>
+            {audit?.decision_reason ? <p className="text-sm">{audit.decision_reason}</p> : null}
+            {audit?.effective_action ? (
+              <p className="text-sm">最终动作：{actionLabels[audit.effective_action]}</p>
+            ) : null}
+            <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
+              <dt className="text-muted-foreground">来源</dt>
+              <dd className="break-words">
+                <ApprovalOrigin row={current} detail />
+              </dd>
+              <dt className="text-muted-foreground">申请时间</dt>
+              <dd>{fmtTime(row.created_at)}</dd>
+              <dt className="text-muted-foreground">决定时间</dt>
+              <dd>{fmtTime(current.decided_at)}</dd>
+              {audit?.rule_name ? (
+                <>
+                  <dt className="text-muted-foreground">规则快照</dt>
+                  <dd>{audit.rule_name}</dd>
+                </>
+              ) : null}
+              {audit?.profile_id ? (
+                <>
+                  <dt className="text-muted-foreground">审批模型配置</dt>
+                  <dd>#{audit.profile_id}</dd>
+                </>
+              ) : null}
+            </dl>
+            {!readOnly ? <DecisionActions row={current} busy={busy} decide={decide} /> : null}
+          </div>
+        </div>
+        {error ? (
+          <Alert variant="destructive">
+            <AlertDescription>
+              <div className="flex flex-wrap items-center gap-2">
+                <span>详情加载失败：{error}</span>
+                <Button variant="outline" size="sm" onClick={() => setRetry((v) => v + 1)}>
+                  重试详情
+                </Button>
+              </div>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        {!detail && !error ? <Skeleton className="h-8 w-60" /> : null}
+        {detail && !audit ? (
+          <Alert>
+            <AlertDescription>此记录未保存审批详情快照，无法还原当时的上下文、模型初判和执行输出。</AlertDescription>
+          </Alert>
+        ) : null}
+        {audit ? (
+          <Collapsible open={more} onOpenChange={setMore}>
+            <CollapsibleTrigger asChild>
+              <Button variant="ghost" size="sm">
+                <ChevronDownIcon data-icon="inline-start" className={cn(more && "rotate-180")} />
+                {more ? "收起上下文" : "查看上下文与执行结果"}
               </Button>
-            </div>
-          </AlertDescription>
-        </Alert>
-      ) : null}
-      {!detail && !error ? <Skeleton className="h-8 w-60" /> : null}
-      {detail && !audit ? (
-        <Alert>
-          <AlertDescription>此记录未保存审批详情快照，无法还原当时的上下文、模型初判和执行输出。</AlertDescription>
-        </Alert>
-      ) : null}
-      {audit ? (
-        <Collapsible open={more} onOpenChange={setMore}>
-          <CollapsibleTrigger asChild>
-            <Button variant="ghost" size="sm">
-              <ChevronDownIcon data-icon="inline-start" className={cn(more && "rotate-180")} />
-              {more ? "收起上下文" : "查看上下文与执行结果"}
-            </Button>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="pt-4">
-            <div className="flex min-w-0 flex-col gap-5">
-              {audit.model_input ? (
-                <ModelReviewContext input={audit.model_input} />
-              ) : (
-                <Alert>
-                  <AlertDescription>
-                    {audit.model_input_digest
-                      ? "此历史记录仅保存审查输入指纹，未保存输入原文，无法还原当时发给模型的上下文。这不代表审查时没有上下文；新产生的模型裁决会保留输入快照。"
-                      : "此记录没有保存模型审查输入，可能由规则直接裁决、模型调用前发生异常或产生于旧版本。"}
-                  </AlertDescription>
-                </Alert>
-              )}
-              {audit.user_message || audit.context?.length ? (
-                <Collapsible>
-                  <CollapsibleTrigger asChild>
-                    <Button variant="ghost" size="sm">
-                      <ChevronDownIcon data-icon="inline-start" />
-                      {audit.model_input && audit.model_input.version >= 3
-                        ? "查看会话审计片段（未发送模型）"
-                        : "查看会话审计片段"}
-                    </Button>
-                  </CollapsibleTrigger>
-                  <CollapsibleContent className="pt-3">
-                    <div className="flex min-w-0 flex-col gap-3">
-                      {audit.user_message ? (
-                        <CodeBlock
-                          label="会话当前轮输入（审计片段）"
-                          text={audit.user_message}
-                          truncated={audit.user_truncated}
-                        />
-                      ) : null}
-                      <section className="flex min-w-0 flex-col gap-3">
-                        <h3 className="font-medium text-muted-foreground text-xs">可见会话上下文</h3>
-                        <p className="text-muted-foreground text-xs">
-                          保存于 {fmtTime(audit.captured_at)} 的会话记录片段。模型实际使用的内容以“模型审查输入”为准。
-                        </p>
-                        {audit.context_truncated ? (
-                          <p className="text-muted-foreground text-xs">仅保存最近的上下文，部分内容已截断。</p>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="pt-4">
+              <div className="flex min-w-0 flex-col gap-5">
+                {audit.model_input ? (
+                  <ModelReviewContext input={audit.model_input} />
+                ) : (
+                  <Alert>
+                    <AlertDescription>
+                      {audit.model_input_digest
+                        ? "此历史记录仅保存审查输入指纹，未保存输入原文，无法还原当时发给模型的上下文。这不代表审查时没有上下文；新产生的模型裁决会保留输入快照。"
+                        : "此记录没有保存模型审查输入，可能由规则直接裁决、模型调用前发生异常或产生于旧版本。"}
+                    </AlertDescription>
+                  </Alert>
+                )}
+                {audit.user_message || audit.context?.length ? (
+                  <Collapsible>
+                    <CollapsibleTrigger asChild>
+                      <Button variant="ghost" size="sm">
+                        <ChevronDownIcon data-icon="inline-start" />
+                        {audit.model_input && audit.model_input.version >= 3
+                          ? "查看会话审计片段（未发送模型）"
+                          : "查看会话审计片段"}
+                      </Button>
+                    </CollapsibleTrigger>
+                    <CollapsibleContent className="pt-3">
+                      <div className="flex min-w-0 flex-col gap-3">
+                        {audit.user_message ? (
+                          <CodeBlock
+                            label="会话当前轮输入（审计片段）"
+                            text={audit.user_message}
+                            truncated={audit.user_truncated}
+                          />
                         ) : null}
-                        {audit.context?.length ? (
-                          audit.context.map((entry, index) => (
-                            <CodeBlock
-                              key={`${entry.kind}-${entry.tool_use_id || index}`}
-                              label={`${contextLabels[entry.kind] ?? entry.kind}${entry.tool ? ` · ${entry.tool}` : ""}${entry.is_error ? " · 异常" : ""}`}
-                              text={entry.text}
-                              truncated={entry.truncated}
-                            />
-                          ))
-                        ) : (
-                          <p className="text-muted-foreground text-sm">未记录可关联的上下文</p>
-                        )}
-                      </section>
-                    </div>
-                  </CollapsibleContent>
-                </Collapsible>
-              ) : null}
-              <CodeBlock
-                label={`${initialLabel}：${actionLabels[audit.initial_action] ?? audit.initial_action}`}
-                text={audit.initial_reason.replace(/^\[模型\]\s*/, "")}
-              />
-              <CodeBlock
-                label="执行输出"
-                text={audit.output ?? (audit.execution_status === "not_executed" ? "工具未执行。" : "尚无执行输出")}
-                truncated={audit.output_truncated}
-              />
-              {audit.correlation !== "exact" ? (
-                <Alert>
-                  <AlertDescription>
-                    {audit.correlation === "ambiguous"
-                      ? "存在相同参数的并发调用，无法唯一关联工具调用；本记录不展示推测的执行结果。"
-                      : "未记录可唯一关联的工具调用 ID。"}
-                  </AlertDescription>
-                </Alert>
-              ) : null}
-              <dl className="grid gap-2 text-muted-foreground text-xs [overflow-wrap:anywhere]">
-                <div>工具调用 ID：{audit.tool_use_id || "未记录"}</div>
-                <div>参数摘要 SHA-256：{audit.input_digest}</div>
-                <div>审查配置指纹 SHA-256：{audit.config_digest || "未记录"}</div>
-                {audit.model_input_digest ? <div>模型审查输入 SHA-256：{audit.model_input_digest}</div> : null}
-                {audit.execution_ended_at ? <div>结果记录时间：{fmtTime(audit.execution_ended_at)}</div> : null}
-              </dl>
-            </div>
-          </CollapsibleContent>
-        </Collapsible>
-      ) : null}
-    </div>
+                        <section className="flex min-w-0 flex-col gap-3">
+                          <h3 className="font-medium text-muted-foreground text-xs">可见会话上下文</h3>
+                          <p className="text-muted-foreground text-xs">
+                            保存于 {fmtTime(audit.captured_at)} 的会话记录片段。模型实际使用的内容以“模型审查输入”为准。
+                          </p>
+                          {audit.context_truncated ? (
+                            <p className="text-muted-foreground text-xs">仅保存最近的上下文，部分内容已截断。</p>
+                          ) : null}
+                          {audit.context?.length ? (
+                            audit.context.map((entry, index) => (
+                              <CodeBlock
+                                key={`${entry.kind}-${entry.tool_use_id || index}`}
+                                label={`${contextLabels[entry.kind] ?? entry.kind}${entry.tool ? ` · ${entry.tool}` : ""}${entry.is_error ? " · 异常" : ""}`}
+                                text={entry.text}
+                                truncated={entry.truncated}
+                              />
+                            ))
+                          ) : (
+                            <p className="text-muted-foreground text-sm">未记录可关联的上下文</p>
+                          )}
+                        </section>
+                      </div>
+                    </CollapsibleContent>
+                  </Collapsible>
+                ) : null}
+                <CodeBlock
+                  label={`${initialLabel}：${actionLabels[audit.initial_action] ?? audit.initial_action}`}
+                  text={audit.initial_reason.replace(/^\[模型\]\s*/, "")}
+                />
+                <CodeBlock
+                  label="执行输出"
+                  text={audit.output ?? (audit.execution_status === "not_executed" ? "工具未执行。" : "尚无执行输出")}
+                  truncated={audit.output_truncated}
+                />
+                {audit.correlation !== "exact" ? (
+                  <Alert>
+                    <AlertDescription>
+                      {audit.correlation === "ambiguous"
+                        ? "存在相同参数的并发调用，无法唯一关联工具调用；本记录不展示推测的执行结果。"
+                        : "未记录可唯一关联的工具调用 ID。"}
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
+                <dl className="grid gap-2 text-muted-foreground text-xs [overflow-wrap:anywhere]">
+                  <div>工具调用 ID：{audit.tool_use_id || "未记录"}</div>
+                  <div>参数摘要 SHA-256：{audit.input_digest}</div>
+                  <div>审查配置指纹 SHA-256：{audit.config_digest || "未记录"}</div>
+                  {audit.model_input_digest ? <div>模型审查输入 SHA-256：{audit.model_input_digest}</div> : null}
+                  {audit.execution_ended_at ? <div>结果记录时间：{fmtTime(audit.execution_ended_at)}</div> : null}
+                </dl>
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+        ) : null}
+      </div>
+    </SideQuestionWorkspace>
   );
 }
 
@@ -654,6 +771,9 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
   const [pageSize, setPageSize] = React.useState(20);
   const [total, setTotal] = React.useState(0);
   const [filter, setFilter] = React.useState<InterceptApprovalFilter>({});
+  const [searchText, setSearchText] = React.useState("");
+  const [fromDate, setFromDate] = React.useState("");
+  const [toDate, setToDate] = React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
   const [error, setError] = React.useState("");
@@ -663,7 +783,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
   const request = React.useRef(0);
   const decisionLock = React.useRef(false);
   const filterID = React.useId();
-  const filtered = Boolean(filter.status || filter.decision_source);
+  const filtered = Boolean(filter.status || filter.decision_source || filter.q || filter.from || filter.to);
 
   // A task can stay mounted while the user switches between task details.
   // Reset the cursor so the new scope always starts at its newest records.
@@ -681,7 +801,9 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         // filter. Older requests must remain actionable even when newer decisions
         // fill the page or a filter would hide them.
         const [history, pending] = await Promise.allSettled([
-          taskId ? api.interceptTaskPage(taskId, page, pageSize, filter) : api.interceptHistoryPage(page, pageSize, filter),
+          taskId
+            ? api.interceptTaskPage(taskId, page, pageSize, filter)
+            : api.interceptHistoryPage(page, pageSize, filter),
           api.interceptPending(),
         ]);
         if (id !== request.current) return;
@@ -731,12 +853,39 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
     // An in-flight response for the old filter must not repopulate the table.
     request.current++;
     setFilter(next);
+    setSearchText(next.q ?? "");
+    setFromDate(next.from ?? "");
+    setToDate(next.to ?? "");
     setPage(1);
     setRows([]);
     setTotal(0);
     setError("");
     setLoading(true);
   };
+
+  const submitSearch = () => {
+    const q = searchText.trim();
+    changeFilter({ ...filter, q: q || undefined });
+  };
+
+  const changeDate = (key: "from" | "to", value: string) => {
+    changeFilter({ ...filter, [key]: value || undefined });
+  };
+
+  React.useEffect(() => {
+    const q = searchText.trim();
+    if (q === (filter.q ?? "")) return;
+    const timer = setTimeout(() => {
+      request.current++;
+      setFilter((previous) => ({ ...previous, q: q || undefined }));
+      setPage(1);
+      setRows([]);
+      setTotal(0);
+      setError("");
+      setLoading(true);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchText, filter.q]);
 
   const decide: Decide = async (id, decision) => {
     if (decisionLock.current) return;
@@ -789,8 +938,55 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
           刷新
         </Button>
       </div>
-      <p className="text-muted-foreground text-sm">展开记录查看工具请求和审批裁决，以及当时的上下文与执行结果。</p>
+      <p className="text-muted-foreground text-sm">
+        展开记录查看工具请求和审批裁决，以及当时的上下文与执行结果。输入 #编号 可精确定位审批。
+      </p>
       <FieldGroup className="flex-row flex-wrap items-end gap-3" aria-label="审批记录筛选">
+        <Field className="w-full sm:min-w-80 sm:flex-1">
+          <FieldLabel htmlFor={`${filterID}-search`}>搜索审批内容</FieldLabel>
+          <div className="flex gap-2">
+            <div className="relative min-w-0 flex-1">
+              <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                id={`${filterID}-search`}
+                className="pl-8"
+                value={searchText}
+                maxLength={200}
+                placeholder="编号、标题、URL、命令或脚本内容"
+                onChange={(event) => setSearchText(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    submitSearch();
+                  }
+                }}
+              />
+            </div>
+            <Button type="button" variant="outline" onClick={submitSearch}>
+              搜索
+            </Button>
+          </div>
+        </Field>
+        <Field className="w-full sm:w-40">
+          <FieldLabel>审批时间从</FieldLabel>
+          <DateSelect
+            value={fromDate}
+            onValueChange={(value) => changeDate("from", value)}
+            optional
+            placeholder="选择开始日期"
+            aria-label="审批时间从"
+          />
+        </Field>
+        <Field className="w-full sm:w-40">
+          <FieldLabel>审批时间至</FieldLabel>
+          <DateSelect
+            value={toDate}
+            onValueChange={(value) => changeDate("to", value)}
+            optional
+            placeholder="选择结束日期"
+            aria-label="审批时间至"
+          />
+        </Field>
         <Field className="w-full sm:w-40">
           <FieldLabel htmlFor={`${filterID}-status`}>审批状态</FieldLabel>
           <Select
@@ -835,6 +1031,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
                 <SelectItem value="all">全部来源</SelectItem>
                 <SelectItem value="model">模型判定</SelectItem>
                 <SelectItem value="rule">规则判定</SelectItem>
+                <SelectItem value="manual">人工判定</SelectItem>
                 <SelectItem value="unknown">来源未知</SelectItem>
               </SelectGroup>
             </SelectContent>
@@ -857,7 +1054,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         </Alert>
       ) : null}
       {pending.length ? (
-        <section className="overflow-hidden rounded-xl border">
+        <section className="rounded-xl border">
           <div className="flex items-center gap-2 border-b bg-muted/40 px-4 py-3 font-medium text-sm">
             <ShieldAlertIcon className="size-4" />
             待处理（{pending.length}）<span className="text-muted-foreground text-xs">展开后允许或拒绝</span>
@@ -865,9 +1062,12 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
           <ApprovalTable rows={pending} busy={deciding} decide={decide} revision={revision} label="待处理审批" />
         </section>
       ) : null}
-      <section className="overflow-hidden rounded-xl border">
+      <section className="rounded-xl border">
         <div className="border-b px-4 py-3 font-medium text-sm">
           {filtered ? "筛选结果" : "全部记录"}（{total}）
+          {filter.q ? (
+            <span className="ml-2 break-all font-normal text-muted-foreground text-xs">搜索：{filter.q}</span>
+          ) : null}
         </div>
         {loading ? (
           <div className="flex flex-col gap-3 p-4">

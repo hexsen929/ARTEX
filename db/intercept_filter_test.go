@@ -1,7 +1,9 @@
 package db
 
 import (
+	"encoding/json"
 	"slices"
+	"strconv"
 	"testing"
 )
 
@@ -137,5 +139,29 @@ func TestInterceptApprovalFilters(t *testing.T) {
 		if r.RuleID != nil || r.DecisionSource != "rule" {
 			t.Fatal("deleted rule lost its source")
 		}
+	}
+
+	modelInput := json.RawMessage(`{"script_files":[{"path":"scripts/check.py","content":"https://example.test/a?x=100%"}]}`)
+	searchID, err := d.CreateDecidedIntercept(0, 0, scope, "search-agent", "Bash", []byte(`{"command":"python3 scripts/check.py"}`), "denied", "[模型] searched", &InterceptAudit{ModelInput: modelInput, Output: "response contains example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, total, err = d.ListTaskInterceptsPage(scope, 1, 20, InterceptApprovalFilter{Search: "example.test"})
+	if err != nil || total != 1 || len(rows) != 1 || rows[0].ID != searchID {
+		t.Fatalf("snapshot search total=%d rows=%d err=%v", total, len(rows), err)
+	}
+	rows, total, err = d.ListTaskInterceptsPage(scope, 1, 20, InterceptApprovalFilter{Search: "100%"})
+	if err != nil || total != 1 || len(rows) != 1 {
+		t.Fatalf("literal percent search total=%d rows=%d err=%v", total, len(rows), err)
+	}
+	rows, total, err = d.ListTaskInterceptsPage(scope, 1, 20, InterceptApprovalFilter{Search: "#" + strconv.FormatInt(searchID, 10)})
+	if err != nil || total != 1 || len(rows) != 1 || rows[0].ID != searchID {
+		t.Fatalf("id search total=%d rows=%d err=%v", total, len(rows), err)
+	}
+	rows, total, err = d.ListTaskInterceptsPage(scope, 1, 20, InterceptApprovalFilter{
+		Search: "example.test", CreatedFrom: "2099-01-01", CreatedTo: "2099-01-01",
+	})
+	if err != nil || total != 1 || len(rows) != 1 || rows[0].ID != searchID {
+		t.Fatalf("date search total=%d rows=%d err=%v", total, len(rows), err)
 	}
 }

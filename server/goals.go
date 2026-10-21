@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
@@ -107,9 +108,19 @@ func (s *Server) admitPausedTask(t *Task) (queued bool, err error) {
 	return s.admitTaskWhen(t, "resume", true)
 }
 
-func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued bool, err error) {
+func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (bool, error) {
+	return s.admitTaskWhenScheduled(t, mode, requirePaused, false)
+}
+func (s *Server) admitTaskWhenScheduled(t *Task, mode string, requirePaused, scheduled bool) (queued bool, err error) {
 	if t == nil {
 		return false, fmt.Errorf("task not found")
+	}
+	manualSchedule := requirePaused && !scheduled
+	if manualSchedule {
+		// Match the calendar tick's lock order: scheduleMu before concMu. The
+		// override must commit before another tick can decide to pause this task.
+		s.scheduleMu.Lock()
+		defer s.scheduleMu.Unlock()
 	}
 	if mode != "bootstrap" {
 		mode = "resume"
@@ -128,6 +139,15 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	}
 	defer s.engine.decInflight(t.ID)
 	lifecycle := t.lifecycleSnapshot()
+	if scheduled {
+		var managed bool
+		if err := s.m.pg.QueryRow(`SELECT schedule_paused FROM tasks WHERE id=$1`, t.ID).Scan(&managed); err != nil {
+			return false, err
+		}
+		if !managed {
+			return false, fmt.Errorf("人工暂停优先，计划不能恢复")
+		}
+	}
 	if requirePaused {
 		if isTerminalStatus(lifecycle.Status) {
 			return false, fmt.Errorf("终态任务不能执行继续")
@@ -136,6 +156,13 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 			return false, fmt.Errorf("仅已暂停的任务可以继续")
 		}
 		mode = s.resumeAdmissionMode(t)
+	}
+	var manualUntil *time.Time
+	if manualSchedule {
+		manualUntil, err = s.taskManualScheduleEnd(t.ID, time.Now())
+		if err != nil {
+			return false, err
+		}
 	}
 	wasTerminal := isTerminalStatus(lifecycle.Status)
 	wasPaused := lifecycle.Paused || s.engine.IsPaused(t.ID)
@@ -185,7 +212,7 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	if wasTerminal {
 		status = "running"
 	}
-	if err := s.m.ApplyTaskAdmission(t.ID, lifecycle.Status, status, shouldQueue, mode, wasQueued); err != nil {
+	if err := s.m.applyTaskAdmission(t.ID, lifecycle.Status, status, shouldQueue, mode, wasQueued, manualUntil); err != nil {
 		if !engineWasPaused && !wasPaused && !wasQueued {
 			s.engine.Resume(t)
 		}

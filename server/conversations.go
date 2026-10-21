@@ -503,7 +503,35 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 	}()
 	// Only the first turn executes a historical retest. Follow-up conversation
 	// turns may explain the sealed result; the result tool refuses to overwrite it.
-	finishStatus, finishReason := "failed", "复测未能启动"
+	finishStatus, finishReason := "failed", "Agent 未能启动"
+	if c.AgentKey == "reporter" {
+		manualReview, err := s.isHistoricalFindingReview(c.ID)
+		if err != nil {
+			finishReason = err.Error()
+			_, _ = s.m.pg.Exec(`UPDATE finding_case_review_runs SET state='failed',error=$2 WHERE conversation_id=$1`, c.ID, finishReason)
+			return
+		}
+		if manualReview {
+			ctx = agent.WithFindingCaseReview(ctx)
+		}
+		defer func() {
+			state := "done"
+			reason := ""
+			if finishStatus != "completed" || ctx.Err() != nil {
+				state = "failed"
+				reason = finishReason
+				if ctx.Err() != nil {
+					reason = "整理已停止或服务关闭"
+				}
+			}
+			if state == "done" && manualReview {
+				if err := s.validateFindingReviewCompletion(c.ID); err != nil {
+					state, reason = "failed", err.Error()
+				}
+			}
+			_, _ = s.m.pg.Exec(`UPDATE finding_case_review_runs SET state=$2,error=$3 WHERE conversation_id=$1 AND state='running'`, c.ID, state, reason)
+		}()
+	}
 	if c.AgentKey == db.FindingRetestAgentKey {
 		// Read without the run cancellation so an immediate stop still seals pending.
 		r, err := s.m.pg.FindingRetestForConversation(context.Background(), c.ID)
@@ -668,11 +696,17 @@ func (s *Server) runAndPump(agentKey string, item triggeredRun) {
 // Caller holds queueMu.
 func (s *Server) nextTriggerRun(agentKey string, cfg triggerBehavior) triggeredRun {
 	q := s.triggerQ[agentKey]
-	if cfg.runMode == "parallel" || cfg.mergeMode == "none" {
+	if q[0].conversationID > 0 || cfg.runMode == "parallel" || cfg.mergeMode == "none" {
 		s.triggerQ[agentKey] = q[1:]
 		return q[0]
 	}
-	if cfg.mergeMode == "all" {
+	hasManual := false
+	for _, item := range q {
+		if item.conversationID > 0 {
+			hasManual = true
+		}
+	}
+	if cfg.mergeMode == "all" && !hasManual {
 		s.triggerQ[agentKey] = q[:0:0]
 		return mergeAllRuns(q)
 	}
@@ -685,7 +719,7 @@ func (s *Server) nextTriggerRun(agentKey string, cfg triggerBehavior) triggeredR
 	group := []triggeredRun{head}
 	rest := q[:0:0] // keep non-matching items in order
 	for _, it := range q[1:] {
-		if it.mergeable && it.taskID == head.taskID {
+		if it.conversationID == 0 && it.mergeable && it.taskID == head.taskID {
 			group = append(group, it)
 		} else {
 			rest = append(rest, it)
@@ -798,12 +832,25 @@ func mergeAllRuns(items []triggeredRun) triggeredRun {
 func (s *Server) runTriggeredRun(item triggeredRun) {
 	defer func() {
 		if r := recover(); r != nil {
+			if item.conversationID > 0 {
+				_, _ = s.m.pg.Exec(`UPDATE finding_case_review_runs SET state='failed',error=$2 WHERE conversation_id=$1`, item.conversationID, fmt.Sprint(r))
+			}
 			log.Printf("[trigger] run for %s panicked: %v", item.agentKey, r)
 		}
 	}()
 	pg := s.m.pg
-	c, err := pg.CreateConversation(item.agentKey, firstLine(item.title, 60), nil)
-	if err != nil {
+	var c *db.Conversation
+	var err error
+	if item.conversationID > 0 {
+		c, err = pg.GetConversation(item.conversationID)
+		_, _ = pg.Exec(`UPDATE finding_case_review_runs SET state='running' WHERE conversation_id=$1`, item.conversationID)
+	} else {
+		c, err = pg.CreateConversation(item.agentKey, firstLine(item.title, 60), nil)
+	}
+	if err != nil || c == nil {
+		if item.conversationID > 0 {
+			_, _ = pg.Exec(`UPDATE finding_case_review_runs SET state='failed',error='整理会话不可用' WHERE conversation_id=$1`, item.conversationID)
+		}
 		log.Printf("[trigger] create conversation for %s failed: %v", item.agentKey, err)
 		return
 	}

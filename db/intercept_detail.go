@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -71,9 +72,19 @@ func (d *DB) GetInterceptDetail(id int64) (*InterceptDetail, error) {
 	return &out, nil
 }
 
-// ResolveIntercept atomically settles a pending request. A timeout cannot
-// overwrite a human decision and repeat decisions cannot rewrite history.
-func (d *DB) ResolveIntercept(id int64, status, action, reason string) (bool, error) {
+// ResolveIntercept atomically settles a pending request. An optional source is
+// persisted with the final decision; the HTTP approval path passes "manual",
+// while timeout/cancellation callers leave the original rule/model source.
+// A timeout cannot overwrite a human decision and repeat decisions cannot
+// rewrite history.
+func (d *DB) ResolveIntercept(id int64, status, action, reason string, source ...string) (bool, error) {
+	decisionSource := ""
+	if len(source) > 0 {
+		decisionSource = source[0]
+	}
+	if decisionSource != "" && decisionSource != "manual" {
+		return false, fmt.Errorf("无效审批来源 %q", decisionSource)
+	}
 	execution := "not_executed"
 	if action == "allow" {
 		execution = "awaiting_result"
@@ -85,10 +96,11 @@ func (d *DB) ResolveIntercept(id int64, status, action, reason string) (bool, er
 		return false, err
 	}
 	r, err := d.Exec(`UPDATE intercept_pending SET status=$2, decided_at=NOW(),
+		decision_source=CASE WHEN $5 <> '' THEN $5 ELSE decision_source END,
 		audit=CASE WHEN audit IS NULL THEN NULL ELSE audit || $3::jsonb ||
         CASE WHEN $4='allow' AND audit->>'correlation' IS DISTINCT FROM 'exact'
         THEN '{"execution_status":"unknown"}'::jsonb ELSE '{}'::jsonb END END
-        WHERE id=$1 AND status='pending'`, id, status, patch, action)
+		WHERE id=$1 AND status='pending'`, id, status, patch, action, decisionSource)
 	if err != nil {
 		return false, err
 	}

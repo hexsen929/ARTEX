@@ -4,11 +4,45 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 )
+
+func TestInterceptSearchFilterParams(t *testing.T) {
+	filter, err := interceptFilterParams(url.Values{"q": []string{"  https://example.test/a?x=1  "}})
+	if err != nil || filter.Search != "https://example.test/a?x=1" {
+		t.Fatalf("search=%q err=%v", filter.Search, err)
+	}
+	if _, err := interceptFilterParams(url.Values{"q": []string{"#0"}}); err == nil {
+		t.Fatal("zero approval id accepted")
+	}
+	if _, err := interceptFilterParams(url.Values{"q": []string{"#abc"}}); err == nil {
+		t.Fatal("non-numeric approval id accepted")
+	}
+	if _, err := interceptFilterParams(url.Values{"q": []string{strings.Repeat("x", 201)}}); err == nil {
+		t.Fatal("overlong search accepted")
+	}
+	filter, err = interceptFilterParams(url.Values{"from": []string{"2026-10-01"}, "to": []string{"2026-10-12"}})
+	if err != nil || filter.CreatedFrom != "2026-10-01" || filter.CreatedTo != "2026-10-12" {
+		t.Fatalf("date filter=%+v err=%v", filter, err)
+	}
+	if filter, err := interceptFilterParams(url.Values{"decision_source": []string{"manual"}}); err != nil || filter.DecisionSource != "manual" {
+		t.Fatalf("manual decision source rejected: %+v %v", filter, err)
+	}
+	for _, values := range []url.Values{
+		{"from": []string{"2026-10-1"}},
+		{"to": []string{"not-a-date"}},
+		{"from": []string{"2026-10-13"}, "to": []string{"2026-10-12"}},
+	} {
+		if _, err := interceptFilterParams(values); err == nil {
+			t.Fatalf("invalid date filter accepted: %v", values)
+		}
+	}
+}
 
 func TestInterceptFilterHTTP(t *testing.T) {
 	dsn, _, err := db.DSN()
@@ -54,7 +88,14 @@ func TestInterceptFilterHTTP(t *testing.T) {
 		if rec := do(base+"?status=denied&decision_source=model", false); rec.Code != 401 {
 			t.Fatalf("unprotected list: %d", rec.Code)
 		}
-		for _, query := range []string{"?status=invalid", "?decision_source=invalid", "?page=1&status=denied%27+OR+1%3D1--", "?size=20&decision_source=MODEL"} {
+		for _, query := range []string{
+			"?status=invalid",
+			"?decision_source=invalid",
+			"?page=1&status=denied%27+OR+1%3D1--",
+			"?size=20&decision_source=MODEL",
+			"?q=%23abc",
+			"?from=2026-10-13&to=2026-10-12",
+		} {
 			if rec := do(base+query, true); rec.Code != 400 {
 				t.Fatalf("invalid filter %s: %d %s", query, rec.Code, rec.Body.String())
 			}
