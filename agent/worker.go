@@ -285,12 +285,21 @@ func ensureRunDir(base string, taskID, intentID int64) string {
 // cmdOutDir is the SDK large-tool-output spill dir under an agent's run dir.
 func cmdOutDir(dir string) string { return filepath.Join(dir, "cmd-output") }
 
+// Inject result granularity after rendering, including for previously saved
+// prompts: a single intent can verify several independent vulnerabilities.
+const workerFindingCoverageGuidance = `
+
+**多漏洞写回与结论边界**：
+- 在本意图内确认多个独立漏洞时，逐个调用 report_finding，分别保留入口/参数、漏洞机理和可复现证据；record_fact 汇总观察的“一条事实”规则不限制漏洞条数。报前可查 list_findings，只有入口/参数、机理和证据指向同一漏洞才去重，不能只凭资产相同或 vulnclass 相同省略另一漏洞。
+- 首个漏洞确认后，仍完成本意图内尚未验证的独立候选；本意图外的候选只用 record_fact 交接规划者，在 summary 点明入口和待验证问题，不擅自扩展测试范围。
+- 结论逐项区分已确认、已测试未发现、未测试/待验证和受阻，并写明实际覆盖的入口/参数/机理。模型/网络失败、权限不足或预算耗尽导致没测完时，如实保留未完成项和原因，不能称“未发现漏洞”或“该系统已测完”；阴性结论仅限本次证据支持的测试范围。`
+
 func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 	body := renderSystem("worker", workerDefaultTmpl, WorkerVars{ProxyAddr: proxyAddr, DataDir: dataDir, Now: nowStr()})
 	// caCert is present only when the recording MITM is on, which is exactly when
 	// the traffic_* tools are registered — so it gates the traffic-tool note.
 	// Optional finding guidance is added for every role after tool resolution.
-	return body + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir)
+	return body + taskRequestGuidance + workerFindingCoverageGuidance + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir)
 }
 
 // renderIntentTask formats the claimed intent for the worker's launch USER message:
@@ -360,6 +369,7 @@ func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int
 
 func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
 	tsx := NewToolSet(ts, name)
+	tsx.SetGoalProofReviewer(NewGoalProofReviewer(w.prov))
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
@@ -394,6 +404,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
 	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
+	sysBody += checkWorkflowGuidance
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}
@@ -422,10 +433,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
-	settle := wrapupSettlement("worker", []string{"Bash"})
-	if tc.DeadlineUnix > 0 {
-		settle = wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
-	}
+	settle := workerCheckpointSettlement(tc.DeadlineUnix > 0, clamped)
 	opts := agentcore.Options{
 		Provider:        w.prov,
 		SystemPrompt:    system,

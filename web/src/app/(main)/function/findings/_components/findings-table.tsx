@@ -20,6 +20,7 @@ import { CopyButton } from "@/components/copy-button";
 import { FindingCaseMembers, FindingSeverityCounts } from "@/components/finding-case-list";
 import { Markdown } from "@/components/markdown";
 import { StatusBadge } from "@/components/status-badge";
+import { EvidenceAssessment } from "@/components/evidence-assessment";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -278,6 +279,7 @@ export function FindingsTable({
                         未命中当前筛选
                       </Badge>
                     ) : null}
+                    <EvidenceAssessment finding={f} />
                     <Badge variant="outline">流量证据 {f.traffic_count ?? 0} 条</Badge>
                   </div>
                 </TableCell>

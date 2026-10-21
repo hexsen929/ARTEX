@@ -93,6 +93,7 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		{`DELETE FROM task_llm_profiles WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_scope WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_intelligence WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM task_completions WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_constraints WHERE exploration_id=$1`, []any{expID}},
 		{`DELETE FROM activity WHERE exploration_id=$1`, []any{expID}},
 		{`DELETE FROM exploration_nodes WHERE exploration_id=$1`, []any{expID}},
@@ -295,6 +296,9 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	if err := restoreInterceptRows(tx, remappedTables["intercept_pending"]); err != nil {
 		return nil, err
 	}
+	if err := restoreTaskCompletion(tx, taskID, remappedTables["task_completions"]); err != nil {
+		return nil, err
+	}
 	warningsRaw, _ := json.Marshal(warnings)
 	if _, err := tx.Exec(`UPDATE task_archives SET warnings=$2,phase='database_restored',progress=85,error='' WHERE id=$1`, archiveID, string(warningsRaw)); err != nil {
 		return nil, err
@@ -365,7 +369,7 @@ func rowExists(tx *sql.Tx, table string, id int64) bool {
 func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	// json_populate_recordset inserts NULL for absent columns, bypassing SQL
 	// defaults. Preserve compatibility with v3 archives predating side memory.
-	if (table == "side_question_sessions" || table == "side_question_requests") && len(raw) > 0 {
+	if (table == "side_question_sessions" || table == "side_question_requests" || table == "exploration_nodes" || table == "findings") && len(raw) > 0 {
 		var rows []map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &rows); err != nil {
 			return err
@@ -374,9 +378,18 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		if table == "side_question_requests" {
 			field = "context_info"
 		}
+		fallback := json.RawMessage(`{}`)
+		if table == "exploration_nodes" {
+			field = "goal_audit"
+			fallback = json.RawMessage(`[]`)
+		}
+		if table == "findings" {
+			field = "evidence_audit"
+			fallback = json.RawMessage(`[]`)
+		}
 		for _, row := range rows {
 			if len(row[field]) == 0 || string(row[field]) == "null" {
-				row[field] = json.RawMessage(`{}`)
+				row[field] = fallback
 			}
 		}
 		var err error

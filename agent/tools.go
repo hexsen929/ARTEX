@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Autumn-27/artex/db"
 	acperm "github.com/Autumn-27/norma/permission"
@@ -52,6 +53,7 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
 	findingRecorder FindingRecorder
+	goalReviewer    GoalProofReviewer
 	as              *db.AssetStore   // asset store (optional; nil = asset tools not available)
 	cs              *db.CompanyStore // company store (optional)
 	ts              *db.ExplorationStore
@@ -66,10 +68,12 @@ type ToolSet struct {
 	// ownerNode is the exploration node that writes attach to: assets this run
 	// touches get anchored to it as lineage/provenance (NOT visibility — the asset
 	// graph is global and shared). Worker = its claimed intent; planner = begin root.
-	ownerNode int64
-	GoalMet   bool
-	Reason    string
-	writes    WriteCounts
+	ownerNode          int64
+	GoalMet            bool
+	Reason             string
+	completionProposal *CompletionProposal
+	completionResultMu sync.Mutex
+	writes             WriteCounts
 	// killWork, if set, terminates a running work by intent id (engine callback,
 	// wired by the planner). nil = the kill_work tool reports unavailable.
 	killWork func(intentID int64) error
@@ -358,6 +362,10 @@ func (t *ToolSet) graphOverview() actool.CoreTool {
 // an empty context and always needs this first).
 func (t *ToolSet) graphOverviewData() map[string]any {
 	out := map[string]any{}
+	out["completion_work_index"] = map[string]any{
+		"tool":        "list_remaining_work",
+		"instruction": "概览只展示部分意图。收官前用 list_remaining_work 逐页核查所有非 done 意图（含 paused/stopped/deleted），直到 has_more=false。",
+	}
 	// goals summary folded in so the planner needn't call list_goals each round.
 	goals, _ := t.ts.ListByKind(db.KindGoal, 100)
 	gsum := make([]map[string]any, 0, len(goals))
@@ -529,6 +537,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	if t.as != nil && t.ts != nil && t.taskID > 0 {
 		{
 			m := map[string]any{}
+			if scope, err := t.taskScopeContext(); err == nil {
+				m["scope"] = scope
+			}
 			if !t.coverageDisabled {
 				if cov, err := t.as.TaskCoverageWithSources(t.taskID); err == nil {
 					m["denominator"] = cov.Denominator
@@ -1024,19 +1035,31 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 
 // intentItem 是 add_intent 批量/单条的一条探索方向。
 type intentItem struct {
-	Summary   string            `json:"summary"`
-	AssetIDs  []json.RawMessage `json:"asset_ids"`
-	ParentIDs []json.RawMessage `json:"parent_ids"`
-	Priority  int               `json:"priority"`
+	Check          *db.CheckSpec     `json:"check"`
+	RetryOf        int64             `json:"retry_of"`
+	RecoveryChange string            `json:"recovery_change"`
+	Summary        string            `json:"summary"`
+	AssetIDs       []json.RawMessage `json:"asset_ids"`
+	ParentIDs      []json.RawMessage `json:"parent_ids"`
+	Priority       int               `json:"priority"`
 }
 
 // addOneIntent 创建一条意图节点并连上游血缘，返回 id。
 // 约束：意图只能锚在已确认知识上——每个 parent_id 必须是已存在的 fact/finding
 // 节点（不能挂在别的意图/目标/提示上）。顶层全新方向留空 parent_ids，兜底连 origin fact。
 // 这样"每个意图都连到 fact 节点、且是发现驱动而非凭空规划"从创建路径上被强制。
-func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
+func (t *ToolSet) addOneIntent(ctx context.Context, it intentItem) (int64, error) {
 	if strings.TrimSpace(it.Summary) == "" {
 		return 0, fmt.Errorf("summary 不能为空")
+	}
+	if it.Check == nil && it.RetryOf == 0 {
+		strict, err := t.ts.HasGoalContract()
+		if err != nil {
+			return 0, err
+		}
+		if strict {
+			return 0, fmt.Errorf("当前目标已保存检查契约；新增工作必须提供稳定 check.target/mechanism")
+		}
 	}
 	// 先校验锚点（建节点前，避免坏锚点留下孤儿意图）。
 	parents := pidList(it.ParentIDs)
@@ -1073,7 +1096,17 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
-	id, err := t.ts.AddIntent(payload, priority, anchors, "planner")
+	var id int64
+	var err error
+	if it.Check != nil || it.RetryOf > 0 {
+		check := db.CheckSpec{}
+		if it.Check != nil {
+			check = *it.Check
+		}
+		id, err = t.ts.AddCheckIntent(ctx, payload, priority, anchors, "planner", check, it.RetryOf, it.RecoveryChange)
+	} else {
+		id, err = t.ts.AddIntent(payload, priority, anchors, "planner")
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -1097,13 +1130,16 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
-			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
-			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
-			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
-			"priority":   intp("优先级 0-10，默认5"),
+			"intents":         map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"summary":         str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
+			"asset_ids":       map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
+			"parent_ids":      map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
+			"priority":        intp("优先级 0-10，默认5"),
+			"check":           obj(map[string]any{"target": str("稳定的规范化目标/接口"), "mechanism": str("稳定的检查机制；重建时不改名")}, "target", "mechanism"),
+			"retry_of":        idp("恢复的原意图 ID"),
+			"recovery_change": str("本次改变的条件/修复动作，重复检查必填"),
 		}),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Intents    []intentItem `json:"intents"`
 				intentItem              // 单条模式：顶层 summary/asset_ids/parent_ids/priority
@@ -1119,7 +1155,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			errs := map[string]string{}
 			createdAny := false
 			for i, it := range items {
-				id, err := t.addOneIntent(it)
+				id, err := t.addOneIntent(ctx, it)
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
 					continue
@@ -1160,47 +1196,71 @@ func (t *ToolSet) listGoals() actool.CoreTool {
 }
 
 func (t *ToolSet) proveGoal() actool.CoreTool {
-	return t.writeExpTool("prove_goal", "当你判断某个发现/事实证明了某个目标达成时调用：把证据节点连到目标节点，并标记目标 met。",
+	return t.writeExpTool("prove_goal", "提交本任务目标及证据供独立审核。保存的证据确实支持成果或指定检查时，原子保存理由、证明边并标 met；阴性检查不能证明成果取得。",
 		obj(map[string]any{
-			"goal_id":     idp("目标节点 id"),
-			"evidence_id": idp("证明它的发现/事实节点 id"),
-			"reason":      str("为什么这个证据满足该目标"),
-		}, "goal_id", "evidence_id"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			"goal_id":        idp("目标节点 id"),
+			"evidence_id":    idp("证明它的发现/事实节点 id"),
+			"reason":         str("为什么这个证据满足该目标"),
+			"remaining_work": completionDispositionSchema(),
+		}, "goal_id", "evidence_id", "reason"),
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
-				GoalID     json.RawMessage `json:"goal_id"`
-				EvidenceID json.RawMessage `json:"evidence_id"`
-				Reason     string          `json:"reason"`
+				GoalID     json.RawMessage            `json:"goal_id"`
+				EvidenceID json.RawMessage            `json:"evidence_id"`
+				Reason     string                     `json:"reason"`
+				Remaining  []db.CompletionDisposition `json:"remaining_work"`
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("无效参数"), nil
+			}
 			goal, ev := pid(a.GoalID), pid(a.EvidenceID)
-			if goal == 0 || ev == 0 {
-				return actool.Errorf("goal_id 和 evidence_id 必填"), nil
+			if goal == 0 || ev == 0 || strings.TrimSpace(a.Reason) == "" {
+				return actool.Errorf("goal_id、evidence_id 和非空 reason 必填"), nil
 			}
-			goalNode, err := t.ts.GetNode(goal)
-			if err != nil || goalNode == nil || goalNode.Kind != db.KindGoal {
-				return actool.Errorf("goal_id 必须是本任务的目标节点（关联任务目标只读）"), nil
+			if t.goalReviewer == nil {
+				return actool.Errorf("目标证据审核模型尚未就绪，不能标记达成"), nil
 			}
-			evidenceNode, err := t.ts.GetNodeWithSources(ev)
-			if err != nil || evidenceNode == nil || (evidenceNode.Kind != db.KindFact && evidenceNode.Kind != db.KindFinding) {
-				return actool.Errorf("evidence_id 必须是本任务或直接关联任务的事实/漏洞节点"), nil
+			snapshot, err := t.ts.GoalProofSnapshot(ctx, goal, ev)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
 			}
-			_ = t.ts.Link(ev, db.RelProves, goal)
-			_ = t.ts.SetNodeState(goal, "met")
-			// 每标记一个目标 met，就检查本任务是否【所有目标】都已 met；若是，自动判定
-			// 任务完成（置 GoalMet），无需再依赖模型显式调 goal_met。
-			if goals, err := t.ts.ListByKind(db.KindGoal, 1000); err == nil && len(goals) > 0 {
-				allMet := true
-				for _, g := range goals {
-					if g.State != "met" {
-						allMet = false
-						break
+			verdict, err := t.goalReviewer(ctx, snapshot, a.Reason)
+			if err != nil {
+				return actool.Errorf("目标证据审核失败，未修改判定: " + err.Error()), nil
+			}
+			if verdict.Supported == nil || strings.TrimSpace(verdict.Reason) == "" || (verdict.GoalType != "outcome" && verdict.GoalType != "inspection") {
+				return actool.Errorf("目标证据审核没有有效结论"), nil
+			}
+			var contract struct {
+				Type string `json:"goal_type"`
+			}
+			if json.Unmarshal(snapshot.Goal.Payload, &contract) != nil || (contract.Type != "" && contract.Type != verdict.GoalType) {
+				return actool.Errorf("审核不能更改已保存的目标类型"), nil
+			}
+			if err = t.ts.CommitGoalProof(ctx, snapshot, *verdict.Supported, t.worker, verdict.Reason); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if !*verdict.Supported {
+				t.completionResultMu.Lock()
+				t.GoalMet = false
+				t.Reason = "目标证据不足，必要工作仍须继续"
+				t.completionResultMu.Unlock()
+				return actool.Errorf("证据不能支持目标达成: " + verdict.Reason + "；目标未被本次审核标为 met，必要工作仍须继续。已有错误 met 可用 reopen_goal 纠正。"), nil
+			}
+			// This is a completion proposal; the independent review commits status.
+			t.completionResultMu.Lock()
+			t.GoalMet = false
+			t.completionResultMu.Unlock()
+			if counts, err := t.ts.GoalStateCounts(ctx); err == nil && counts.Total > 0 {
+				if counts.Total == counts.Met {
+					if t.completionProposal != nil {
+						t.completionProposal.setRemaining(a.Remaining)
 					}
-				}
-				if allMet {
+					t.completionResultMu.Lock()
 					t.GoalMet = true
-					t.Reason = fmt.Sprintf("所有 %d 个目标均已 met（最后由 goal %d 触发）", len(goals), goal)
-					return actool.Text(fmt.Sprintf("goal %d marked met；本任务所有目标均已达成，任务自动判定完成", goal)), nil
+					t.Reason = fmt.Sprintf("所有 %d 个目标均已 met（最后由 goal %d 触发）", counts.Total, goal)
+					t.completionResultMu.Unlock()
+					return actool.Text(fmt.Sprintf("goal %d marked met；本任务所有目标均已达成，仍须核验必要检查全部完成；剩余重复/无关意图用 prove_goal.remaining_work 逐项说明停止理由，可对已 met 目标再次调用", goal)), nil
 				}
 			}
 			return actool.Text(fmt.Sprintf("goal %d marked met", goal)), nil
@@ -1208,14 +1268,28 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 }
 
 func (t *ToolSet) goalMet() actool.CoreTool {
-	return writeTool("goal_met", "【立即结束整个任务】——仅当你确认任务的【全部目标都已真正达成、整体收官】时才调（注意是任务【整体】完成；仅仅达成了其中某一个目标/某一个 flag/某一个漏洞【不算】——那种情况用 prove_goal 标记该目标即可）。⚠️它不是用来“结束本轮规划”的：本轮没有新意图要派、或在等 worker 产出，都【直接结束本轮即可，不要调本工具】（0 个意图是完全正常的）。正常判定优先用 prove_goal 逐个证明目标；goal_met 只是绕过逐个证明、直接从全局收官的手段。",
-		obj(map[string]any{"reason": str("达成理由（必须是目标真正达成的证据，不能是“本轮无新方向”这类结束本轮的理由）")}, "reason"),
+	return writeTool("goal_met", "申请任务收官。全部目标须已证明达成，必要检查须完成。对剩余非 done 意图逐项说明为何重复或与目标无关；系统先收尾、再只读终验并提交。不能用错误、预算耗尽或受阻作为停止必要检查的理由。",
+		obj(map[string]any{"reason": str("全部目标已达成且必要检查已完成的依据"),
+			"remaining_work": map[string]any{"type": "array", "items": obj(map[string]any{
+				"intent_id": idp("剩余意图 ID"), "kind": map[string]any{"type": "string", "enum": []string{"duplicate", "irrelevant"}},
+				"reason": str("停止此检查的明确依据"), "reference_id": idp("duplicate 必填：已完成意图/事实/漏洞 ID"),
+			}, "intent_id", "kind", "reason")}}, "reason"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
-			var a struct{ Reason string }
-			_ = json.Unmarshal(in, &a)
+			var a struct {
+				Reason    string
+				Remaining []db.CompletionDisposition `json:"remaining_work"`
+			}
+			if err := json.Unmarshal(in, &a); err != nil || strings.TrimSpace(a.Reason) == "" {
+				return actool.Errorf("reason 必填，remaining_work 格式必须正确"), nil
+			}
+			if t.completionProposal != nil {
+				t.completionProposal.setRemaining(a.Remaining)
+			}
+			t.completionResultMu.Lock()
 			t.GoalMet = true
 			t.Reason = a.Reason
-			return actool.Text("acknowledged: goal marked met"), nil
+			t.completionResultMu.Unlock()
+			return actool.Text("已申请收官；尚未提交任务完成"), nil
 		})
 }
 
@@ -1287,9 +1361,14 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		}
 		result := struct {
 			*db.RecordedFinding
-			EvidenceStatus string `json:"evidence_status"`
-			EvidenceNote   string `json:"evidence_note,omitempty"`
+			EvidenceStatus     string `json:"evidence_status"`
+			EvidenceNote       string `json:"evidence_note,omitempty"`
+			EvidenceAssessment string `json:"evidence_assessment"`
 		}{RecordedFinding: recorded, EvidenceStatus: "bound"}
+		result.EvidenceAssessment = "needs_review"
+		if strings.TrimSpace(a.Evidence) == "" {
+			result.EvidenceAssessment = "needs_evidence"
+		}
 		if len(recorded.Traffic.Bindings) == 0 {
 			result.EvidenceStatus = "not_bound"
 			result.EvidenceNote = "漏洞已保存，未绑定流量。TCP/无包情形可正常继续；若已有核实的 HTTP 流量，请用可用的 bind_finding_traffic 或漏洞页面补绑，再完成证据交接。不要重复创建漏洞。"
@@ -1310,6 +1389,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 // factItem 是 record_fact 批量/单条的一条事实。
 type factItem struct {
 	Intelligence []db.IntelligenceInput `json:"intelligence"`
+	Checkpoint   *db.Checkpoint         `json:"checkpoint"`
 	Summary      string                 `json:"summary"`
 	Detail       string                 `json:"detail"`
 	Evidence     string                 `json:"evidence"`   // 一行关键证据（命令+关键输出行），支撑结论、便于事后核对
@@ -1320,7 +1400,7 @@ type factItem struct {
 
 // recordOneFact 写一条 fact 节点并连到意图（intent→yields→fact）。defaultIntent 为
 // 批量时的默认意图（本条未给 intent_id 时用）。
-func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error) {
+func (t *ToolSet) recordOneFact(ctx context.Context, it factItem, defaultIntent int64) (int64, error) {
 	if strings.TrimSpace(it.Summary) == "" {
 		return 0, fmt.Errorf("summary 不能为空")
 	}
@@ -1334,6 +1414,9 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 	if c := strings.TrimSpace(it.Confidence); c != "" {
 		payload["confidence"] = c
 	}
+	if it.Confidence != "" && it.Confidence != "observed" && it.Confidence != "inferred" {
+		return 0, fmt.Errorf("confidence 必须为 observed/inferred")
+	}
 	intent := pid(it.IntentID)
 	if intent <= 0 {
 		intent = defaultIntent
@@ -1345,11 +1428,17 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 		}
 	}
 	// a fact is its OWN node kind (distinct from a vuln finding).
-	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, pidList(it.AssetIDs))
+	var id int64
+	var err error
+	if it.Checkpoint != nil {
+		id, err = t.ts.RecordCheckFact(ctx, payload, intent, *it.Checkpoint, t.worker, pidList(it.AssetIDs))
+	} else {
+		id, err = t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, pidList(it.AssetIDs))
+	}
 	if err != nil {
 		return 0, err
 	}
-	if intent > 0 {
+	if intent > 0 && it.Checkpoint == nil {
 		_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> fact
 	}
 	t.writes.Facts++
@@ -1371,6 +1460,7 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 			"detail":     str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
 			"evidence":   str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
 			"confidence": str("observed（输出里直接看到）| inferred（据现象推断）。否定结论务必如实标注。"),
+			"checkpoint": checkpointSchema(),
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 id（可选，0/1/多个）：该事实涉及哪些资产"},
 		}),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
@@ -1378,7 +1468,9 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 				Facts    []factItem `json:"facts"`
 				factItem            // 单条模式 + 批量默认 intent_id
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("无效参数"), nil
+			}
 			batch := len(a.Facts) > 0
 			items := a.Facts
 			if !batch {
@@ -1389,7 +1481,7 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 			ids := make([]int64, len(items))
 			errs := map[string]string{}
 			for i, it := range items {
-				id, err := t.recordOneFact(it, defaultIntent)
+				id, err := t.recordOneFact(ctx, it, defaultIntent)
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
 					continue
@@ -1460,8 +1552,10 @@ func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
 }
 
 type goalItem struct {
-	Text      string `json:"text"`
-	VulnClass string `json:"vulnclass"`
+	GoalType       string   `json:"goal_type"`
+	RequiredChecks []string `json:"required_checks"`
+	Text           string   `json:"text"`
+	VulnClass      string   `json:"vulnclass"`
 }
 
 // addOneGoal 挂一条 goal 节点(open)到探索图:连到任务根(origin fact,rel spawns)。
@@ -1473,6 +1567,21 @@ func (t *ToolSet) addOneGoal(it goalItem) (int64, error) {
 		return 0, fmt.Errorf("text 不能为空")
 	}
 	payload := map[string]any{"text": text}
+	if it.GoalType != "inspection" && it.GoalType != "outcome" {
+		return 0, fmt.Errorf("新目标必须保存 goal_type=inspection/outcome，不能在审核时重新解释")
+	}
+	if it.GoalType == "inspection" && len(it.RequiredChecks) == 0 {
+		return 0, fmt.Errorf("检查目标必须保存 required_checks 的必要范围、机制及完成条件")
+	}
+	payload["goal_type"] = it.GoalType
+	if len(it.RequiredChecks) > 0 {
+		for _, check := range it.RequiredChecks {
+			if strings.TrimSpace(check) == "" {
+				return 0, fmt.Errorf("required_checks 不能含空项")
+			}
+		}
+		payload["required_checks"] = it.RequiredChecks
+	}
 	if vc := strings.TrimSpace(it.VulnClass); vc != "" {
 		payload["vulnclass"] = vc
 	}
@@ -1498,11 +1607,13 @@ func (t *ToolSet) setGoals() actool.CoreTool {
 			"★优先批量:多个目标放进 goals 数组一次提交,返回 ids 与之等长同序(失败项 id=0,详情见 errors)。单条则省略 goals 直接给顶层 text。\n"+
 			"vulnclass 可选:对应漏洞类(如 SQLi/IDOR),业务逻辑类目标留空。目标是否达成由系统判定标记 met,本工具只负责新增。",
 		obj(map[string]any{
-			"goals":     map[string]any{"type": "array", "description": "【优先用这个】要新增的目标数组,按顺序处理。每个元素:text(必填,一个独立可验证的最终目标)+ vulnclass(可选)。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"text":      str("[单条] 一个独立可验证的最终目标"),
-			"vulnclass": str("[单条] 对应漏洞类(若明确),如 SQLi/IDOR;业务逻辑目标可留空"),
+			"goals":           map[string]any{"type": "array", "description": "【优先用这个】要新增的目标数组,按顺序处理。每个元素:text(必填,一个独立可验证的最终目标)+ vulnclass(可选)。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"text":            str("[单条] 一个独立可验证的最终目标"),
+			"vulnclass":       str("[单条] 对应漏洞类(若明确),如 SQLi/IDOR;业务逻辑目标可留空"),
+			"goal_type":       map[string]any{"type": "string", "enum": []string{"inspection", "outcome"}},
+			"required_checks": map[string]any{"type": "array", "items": str("必要的对象/机制/数量与完成条件")},
 		}),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.ts == nil {
 				return actool.Errorf("set_goals 未启用: ExplorationStore 未初始化"), nil
 			}
@@ -1521,6 +1632,10 @@ func (t *ToolSet) setGoals() actool.CoreTool {
 			errs := map[string]string{}
 			var addedTexts []string
 			for i, it := range items {
+				if err := t.validateGoalRequest(ctx, it); err != nil {
+					errs[strconv.Itoa(i)] = err.Error()
+					continue
+				}
 				id, err := t.addOneGoal(it)
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
@@ -2056,7 +2171,7 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
 		t.expandDigest(),
-		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),
+		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.listRemainingWork(), t.addIntent(), t.proveGoal(), t.reopenGoal(), t.goalMet(),
 		t.killWorkTool(), t.steerWorkTool(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。
 		t.addFinding(),

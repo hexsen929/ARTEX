@@ -22,6 +22,9 @@ import type {
   FindingTrafficBinding,
   IntentAsset,
   ScopeRow,
+  SSSyncRequest,
+  SSSyncResult,
+  SSSyncRun,
   Task,
   TaskArchive,
   TaskAssetMutation,
@@ -48,6 +51,8 @@ const mockLLMRecords = structuredClone(D.llmRecords);
 const mockTaskTemplates = structuredClone(D.taskTemplates);
 const mockTaskCategories = structuredClone(D.taskCategories);
 const mockConversations = structuredClone(D.conversations);
+const mockSyncRuns = structuredClone(D.syncRuns);
+const mockSyncItems = structuredClone(D.syncItems);
 const mockRetests: FindingRetest[] = [];
 const mockRetestMessages: Record<number, Activity[]> = {};
 
@@ -2274,7 +2279,20 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   }
 
   // ── LLM ──
-  if (path === "/llm/records" && m === "GET") return { records: mockLLMRecords, total: mockLLMRecords.length };
+  if (path === "/llm/records" && m === "GET") {
+    const task = q.get("task");
+    const session = q.get("session");
+    const model = q.get("model");
+    const records = mockLLMRecords.filter(
+      (record) =>
+        (!task || record.task_id === task) &&
+        (!session || record.session_id.includes(session)) &&
+        (!model || record.model === model),
+    );
+    const page = Math.max(0, Number(q.get("page")) || 0);
+    const size = Math.max(1, Number(q.get("size")) || 50);
+    return { records: records.slice(page * size, (page + 1) * size), total: records.length };
+  }
   if (path === "/llm/records" && m === "DELETE") return { deleted: 0 };
   if (path === "/llm/records/tasks") {
     const counts = new Map<string, number>();
@@ -2416,7 +2434,79 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     return { exists: false, configured: false, enabled: false, reachable: false, tools: [] };
   if (path === "/sync/scopesentry/projects") return { projects: [], tag: {} };
   if (path === "/sync/scopesentry/tasks") return { tasks: [] };
-  if (path === "/sync/scopesentry/sync") return { synced: {}, companies: null, warnings: null, errors: null };
+  if (path === "/sync/scopesentry/history" && m === "GET") {
+    const page = Math.max(1, Number(q.get("page")) || 1);
+    const size = Math.max(1, Math.min(100, Number(q.get("size")) || 20));
+    return structuredClone({
+      runs: mockSyncRuns.slice((page - 1) * size, page * size),
+      total: mockSyncRuns.length,
+      page,
+      size,
+    });
+  }
+  if (seg[0] === "sync" && seg[1] === "scopesentry" && seg[2] === "history" && seg.length === 4 && m === "GET") {
+    const id = Number(seg[3]);
+    const run = mockSyncRuns.find((item) => item.id === id);
+    if (!run) throw new Error("同步历史不存在");
+    const page = Math.max(1, Number(q.get("page")) || 1);
+    const size = Math.max(1, Math.min(100, Number(q.get("size")) || 20));
+    const items = mockSyncItems[id] ?? [];
+    return structuredClone({
+      run,
+      items: items.slice((page - 1) * size, page * size),
+      total: items.length,
+      page,
+      size,
+    });
+  }
+  if (["/sync/scopesentry/sync", "/sync/scopesentry/jobs"].includes(path) && m === "POST") {
+    const request: SSSyncRequest = {
+      dimension: b.dimension === "task" ? "task" : "project",
+      targets: Array.isArray(b.targets) ? b.targets.map(String) : [],
+      asset_types: Array.isArray(b.asset_types) ? b.asset_types.map(String) : [],
+    };
+    if (!request.targets.length || !request.asset_types.length) throw new Error("请选择同步范围与资产类型");
+    const id = Math.max(700, ...mockSyncRuns.map((run) => run.id)) + 1;
+    const now = new Date().toISOString();
+    const reason = "演示环境未连接 ScopeSentry；仅生成演示历史，未执行同步或修改资产。";
+    const stats = {
+      fetched: 0,
+      written: 0,
+      created: 0,
+      updated: 0,
+      unchanged: 0,
+      skipped: 0,
+      failed: 0,
+      derived_ip_written: 0,
+      derived_ip_failed: 0,
+    };
+    const result: SSSyncResult = {
+      run_id: id,
+      status: "failed",
+      started_at: now,
+      finished_at: now,
+      synced: {},
+      companies: [],
+      warnings: [reason],
+      errors: [reason],
+      stats,
+      unique_assets: { total: 0, created: 0, updated: 0, unchanged: 0, direct: 0, derived: 0 },
+      targets: request.targets.flatMap((target) =>
+        request.asset_types.map((asset_type) => ({
+          target,
+          asset_type,
+          status: "failed" as const,
+          stats: { ...stats },
+          truncated: false,
+          error: reason,
+        })),
+      ),
+    };
+    const run: SSSyncRun = { id, status: "failed", started_at: now, finished_at: now, request, result };
+    mockSyncRuns.unshift(run);
+    mockSyncItems[id] = [];
+    return structuredClone(result);
+  }
 
   // ── skills ──
   if (path === "/skills" && m === "GET") return { skills: D.skills };

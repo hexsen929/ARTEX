@@ -45,6 +45,9 @@ export default function SystemSettingsPage() {
   const [pyInterp, setPyInterp] = React.useState("");
   const [workers, setWorkers] = React.useState("3");
   const [savingWorkers, setSavingWorkers] = React.useState(false);
+  const [reviewSeconds, setReviewSeconds] = React.useState("180");
+  const [reviewTurns, setReviewTurns] = React.useState("16");
+  const [savingReview, setSavingReview] = React.useState(false);
   // 操作约束注入范围(默认都开)。
   const [injectPlanner, setInjectPlanner] = React.useState(true);
   const [injectWorker, setInjectWorker] = React.useState(true);
@@ -67,6 +70,8 @@ export default function SystemSettingsPage() {
     setGlobalProxyInput(s.global_proxy ?? "");
     setPyInterp(s.python_interpreter ?? "");
     setWorkers(String(s.workers ?? 3));
+    setReviewSeconds(String(s.completion_review_seconds ?? 180));
+    setReviewTurns(String(s.completion_review_turns ?? 16));
     setInjectPlanner(s.constraints_inject_planner !== false);
     setInjectWorker(s.constraints_inject_worker !== false);
     setNoaCompaction(!!s.noa_compaction);
@@ -87,6 +92,31 @@ export default function SystemSettingsPage() {
       })
       .catch((e) => toast.error("保存失败：" + (e as Error).message))
       .finally(() => setSavingWorkers(false));
+  };
+
+  const saveReview = async () => {
+    const seconds = Number(reviewSeconds),
+      turns = Number(reviewTurns);
+    if (
+      !Number.isInteger(seconds) ||
+      seconds < 15 ||
+      seconds > 900 ||
+      !Number.isInteger(turns) ||
+      turns < 1 ||
+      turns > 64
+    ) {
+      toast.error("复核预算须为 15–900 秒，轮数须为 1–64");
+      return;
+    }
+    setSavingReview(true);
+    try {
+      apply(await api.setSettings({ completion_review_seconds: seconds, completion_review_turns: turns }));
+      toast.success("已保存复核预算，对下一次复核生效");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存失败");
+    } finally {
+      setSavingReview(false);
+    }
   };
 
   const savePython = () => {
@@ -773,6 +803,46 @@ export default function SystemSettingsPage() {
           </CardContent>
         </Card>
 
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="text-base">任务最终复核</CardTitle>
+            <CardDescription>
+              默认 180 秒、16
+              轮。排队、模型推理和证据读取共用本次预算；普通复核同时受任务截止时间限制。对下一次复核生效。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center gap-3">
+              <Label htmlFor="review-seconds">预算（秒）</Label>
+              <Input
+                id="review-seconds"
+                className="w-32"
+                type="number"
+                min={15}
+                max={900}
+                value={reviewSeconds}
+                disabled={!loaded || savingReview}
+                onChange={(event) => setReviewSeconds(event.target.value)}
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <Label htmlFor="review-turns">最多轮数</Label>
+              <Input
+                id="review-turns"
+                className="w-32"
+                type="number"
+                min={1}
+                max={64}
+                value={reviewTurns}
+                disabled={!loaded || savingReview}
+                onChange={(event) => setReviewTurns(event.target.value)}
+              />
+            </div>
+            <Button disabled={!loaded || savingReview} onClick={saveReview}>
+              {savingReview ? "正在保存…" : "保存"}
+            </Button>
+          </CardContent>
+        </Card>
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">

@@ -635,3 +635,37 @@ func (d *DB) MatchingFindingReportCount(filter FindingFilter) (int, error) {
 	err = d.QueryRow(`SELECT COUNT(*) FROM findings f LEFT JOIN tasks t ON t.id=f.task_id`+where, args...).Scan(&n)
 	return n, err
 }
+
+// FinishFindingCaseReview seals only an active selected review. A successful
+// model turn is not proof that its reports were saved. Check all outputs in one
+// database snapshot; pending duplicate suggestions deliberately do not block it.
+func (d *DB) FinishFindingCaseReview(ctx context.Context, conversationID int64, completed bool, reason string) error {
+	if !completed && strings.TrimSpace(reason) == "" {
+		reason = "报告整理未完成"
+	}
+	_, err := d.ExecContext(ctx, `
+		WITH result AS (
+			SELECT r.conversation_id, CASE
+				WHEN $2 <> '' THEN $2
+				WHEN r.task_id IS NULL OR NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=r.task_id)
+					THEN '来源任务已不可用'
+				WHEN jsonb_array_length(r.finding_ids)=0 OR EXISTS (
+					SELECT 1 FROM jsonb_array_elements_text(r.finding_ids) selected(id)
+					LEFT JOIN findings f ON f.id=selected.id::bigint
+					WHERE f.id IS NULL OR f.task_id IS DISTINCT FROM r.task_id
+						OR btrim(COALESCE(f.report,''))='' OR f.report_evidence_version<>f.evidence_version
+				) THEN '独立报告未生成或证据版本已过期，请重新整理'
+				WHEN EXISTS (
+					SELECT 1 FROM finding_case_members m JOIN finding_cases c ON c.id=m.case_id
+					WHERE c.active AND m.finding_id IN (
+						SELECT id::bigint FROM jsonb_array_elements_text(r.finding_ids) selected(id)
+					) AND (btrim(c.report)='' OR c.report_version<>c.version)
+				) THEN '统一报告未生成或版本已过期，请重新生成'
+				ELSE '' END AS error
+			FROM finding_case_review_runs r WHERE r.conversation_id=$1 AND r.state='running'
+		)
+		UPDATE finding_case_review_runs r
+		SET state=CASE WHEN result.error='' THEN 'done' ELSE 'failed' END, error=result.error
+		FROM result WHERE r.conversation_id=result.conversation_id`, conversationID, reason)
+	return err
+}

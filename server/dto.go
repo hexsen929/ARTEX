@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
@@ -43,6 +44,7 @@ type TaskDTO struct {
 	Description        string             `json:"description"`
 	Goal               string             `json:"goal"`
 	Status             string             `json:"status"` // created | running | paused | done | failed
+	Completion         *TaskCompletionDTO `json:"completion,omitempty"`
 	CreatedAt          string             `json:"created_at"`
 	CreatedUnix        int64              `json:"created_unix"`       // created_at as unix seconds (for run-duration calc)
 	CompletedAt        string             `json:"completed_at"`       // RFC3339 finish time (done/failed); "" if unfinished
@@ -121,8 +123,8 @@ func taskDTO(t *Task, status string) TaskDTO {
 		CategoryName:       lifecycle.CategoryName,
 		Pinned:             lifecycle.PinnedAt > 0,
 		PinnedAt:           completedRFC(lifecycle.PinnedAt),
-		Description:        t.Description,
-		Goal:               t.Goal,
+		Description:        lifecycle.Description,
+		Goal:               lifecycle.Goal,
 		Status:             status,
 		CreatedAt:          rfc3339(time.Unix(t.CreatedAt, 0)),
 		CreatedUnix:        t.CreatedAt,
@@ -214,27 +216,38 @@ func taskNodeDTO(n *db.Node) TaskNodeDTO {
 // GoalDTO is a goal node with its payload unpacked into text/vulnclass — the shape
 // the 总览「目标管理」UI works with (vs TaskNodeDTO which carries raw payload JSON).
 type GoalDTO struct {
-	ID        string `json:"id"`
-	Text      string `json:"text"`
-	VulnClass string `json:"vulnclass,omitempty"`
-	State     string `json:"state"`
-	Origin    string `json:"origin,omitempty"`
-	TS        string `json:"ts"`
+	GoalType       string         `json:"goal_type,omitempty"`
+	RequiredChecks []string       `json:"required_checks,omitempty"`
+	ID             string         `json:"id"`
+	Text           string         `json:"text"`
+	VulnClass      string         `json:"vulnclass,omitempty"`
+	State          string         `json:"state"`
+	Origin         string         `json:"origin,omitempty"`
+	TS             string         `json:"ts"`
+	ContentVersion int            `json:"content_version"`
+	Audit          []db.GoalAudit `json:"audit,omitempty"`
 }
 
 func goalDTO(n *db.Node) GoalDTO {
+	var audit []db.GoalAudit
+	_ = json.Unmarshal(n.GoalAudit, &audit)
 	var p struct {
-		Text      string `json:"text"`
-		VulnClass string `json:"vulnclass"`
+		Text           string   `json:"text"`
+		VulnClass      string   `json:"vulnclass"`
+		GoalType       string   `json:"goal_type"`
+		RequiredChecks []string `json:"required_checks"`
 	}
 	_ = json.Unmarshal(n.Payload, &p)
 	return GoalDTO{
-		ID:        i64s(n.ID),
-		Text:      p.Text,
-		VulnClass: p.VulnClass,
-		State:     n.State,
-		Origin:    n.Origin,
-		TS:        rfc3339(n.CreatedAt),
+		GoalType: p.GoalType, RequiredChecks: p.RequiredChecks,
+		ID:             i64s(n.ID),
+		Text:           p.Text,
+		VulnClass:      p.VulnClass,
+		State:          n.State,
+		Origin:         n.Origin,
+		TS:             rfc3339(n.CreatedAt),
+		ContentVersion: n.ContentVersion,
+		Audit:          audit,
 	}
 }
 
@@ -307,8 +320,9 @@ func coverageAssetRefDTO(ref db.AssetRef) CoverageAssetRefDTO {
 // ---- Finding (frontend "Finding") ----
 
 type FindingDTO struct {
-	CaseID    string  `json:"case_id,omitempty"`
-	MemberIDs []int64 `json:"member_ids,omitempty"`
+	EvidenceAssessment string  `json:"evidence_assessment"`
+	CaseID             string  `json:"case_id,omitempty"`
+	MemberIDs          []int64 `json:"member_ids,omitempty"`
 
 	TrafficCount          int                        `json:"traffic_count"`
 	EvidenceVersion       int64                      `json:"evidence_version"`
@@ -397,6 +411,10 @@ func findingDTO(n *db.Node) FindingDTO {
 		Evidence:  rawString(p.Evidence),
 		TS:        rfc3339(n.CreatedAt),
 	}
+	d.EvidenceAssessment = "needs_review"
+	if strings.TrimSpace(d.Evidence) == "" {
+		d.EvidenceAssessment = "needs_evidence"
+	}
 	if n.SourceTaskID > 0 {
 		d.SourceTaskID = i64s(n.SourceTaskID)
 	}
@@ -411,7 +429,7 @@ func findingDTO(n *db.Node) FindingDTO {
 // nodes with no row keep the 'pending' default and no finding_id (not editable).
 // assets pre-resolves the anchored asset rows for label rendering.
 func findingDTOsForTask(t *Task, in []*db.Node, meta map[int64]db.FindingMeta, assets map[int64]*db.Asset) []FindingDTO {
-	return findingDTOsForOwner(t.ID, t.Description, in, meta, assets)
+	return findingDTOsForOwner(t.ID, t.descriptionText(), in, meta, assets)
 }
 
 func findingDTOsForOwner(taskID, description string, in []*db.Node, meta map[int64]db.FindingMeta, assets map[int64]*db.Asset) []FindingDTO {
@@ -421,6 +439,9 @@ func findingDTOsForOwner(taskID, description string, in []*db.Node, meta map[int
 		d.TaskID = taskID
 		d.TaskDescription = description
 		if m, ok := meta[n.ID]; ok {
+			if m.EvidenceAssessment != "" {
+				d.EvidenceAssessment = m.EvidenceAssessment
+			}
 			d.FindingID = i64s(m.ID)
 			d.Status = m.Status
 			d.TrafficCount = m.TrafficCount
@@ -463,6 +484,13 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		Evidence:  f.Evidence,
 		Report:    f.Report,
 		TS:        rfc3339(f.CreatedAt),
+	}
+	d.EvidenceAssessment = "needs_review"
+	if strings.TrimSpace(f.Evidence) == "" {
+		d.EvidenceAssessment = "needs_evidence"
+	}
+	if f.EvidenceAssessment != "" {
+		d.EvidenceAssessment = f.EvidenceAssessment
 	}
 	if f.ExportCaseID > 0 {
 		d.ID = "case:" + i64s(f.ExportCaseID)

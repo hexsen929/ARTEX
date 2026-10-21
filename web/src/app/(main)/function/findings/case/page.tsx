@@ -8,6 +8,7 @@ import { toast } from "sonner";
 
 import { FindingCaseMembers, FindingCaseReviewPanel, FindingSeverityCounts } from "@/components/finding-case-list";
 import { Markdown } from "@/components/markdown";
+import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -108,6 +109,7 @@ function CaseDetail() {
         </Button>
         <h1 className="font-semibold text-xl">{c.title}</h1>
         <FindingSeverityCounts counts={c} />
+        {c.severity ? <StatusBadge domain="severity" value={c.severity} /> : <span>统一评级待评估</span>}
       </div>
       {error ? (
         <Alert>
@@ -136,7 +138,7 @@ function CaseDetail() {
           <Card>
             <CardHeader>
               <CardTitle>完整复现与修复报告</CardTitle>
-              <CardDescription>集中查看所有成员的复现步骤、证据与修复建议。</CardDescription>
+              <CardDescription>{c.severity_reason || "统一评级尚未完成"}</CardDescription>
             </CardHeader>
             <CardContent className="flex min-w-0 flex-col gap-4">
               {c.report_version !== c.version ? (
@@ -161,7 +163,7 @@ function CaseDetail() {
           <Card>
             <CardHeader>
               <CardTitle>原始报告和证据完整保留</CardTitle>
-              <CardDescription>各条原始上报保留各自的等级、报告和证据。</CardDescription>
+              <CardDescription>成员保留原评级；统一评级不覆盖原始记录。</CardDescription>
             </CardHeader>
             <CardContent>
               {!readOnly && selected.size > 0 ? (

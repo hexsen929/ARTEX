@@ -83,6 +83,10 @@ import type {
   SkillCall,
   SkillItem,
   SSProject,
+  SSSyncItem,
+  SSSyncRequest,
+  SSSyncResult,
+  SSSyncRun,
   SSTask,
   Stats,
   Task,
@@ -298,6 +302,22 @@ export const api = {
   tasks: () =>
     get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
   task: (id: string) => get<Task>(`/tasks/${encodeURIComponent(id)}`),
+  updateTaskEngagement: (
+    id: string,
+    change: {
+      goal: string;
+      description: string;
+      reason: string;
+      goals: { text: string; goal_type: "inspection" | "outcome"; vulnclass?: string; required_checks: string[] }[];
+      constraints: { kind: "allow" | "deny"; text: string }[];
+      scopes: { kind: string; value: string }[];
+    },
+  ) => put<{ ok: boolean; paused: boolean; note: string }>(`/tasks/${encodeURIComponent(id)}/engagement`, change),
+  retryTaskCompletion: (id: string, attemptId: number, reason: string) =>
+    post<{ requested: boolean }>(`/tasks/${encodeURIComponent(id)}/completion/retry`, {
+      attempt_id: attemptId,
+      reason,
+    }),
   createTask: (input: {
     name?: string;
     categoryId?: number;
@@ -450,13 +470,26 @@ export const api = {
   taskGoals: (id: string) =>
     get<{ goals: TaskGoal[] | null }>(`/tasks/${id}/goals`).then((response) => ({ goals: arr(response.goals) })),
   // 人工新增目标：写入图谱并通知 planner、复活任务。
-  addGoal: (id: string, text: string, vulnclass?: string) =>
-    post<TaskGoal>(`/tasks/${id}/goals`, { text, vulnclass: vulnclass ?? "" }),
+  addGoal: (
+    id: string,
+    text: string,
+    goalType: "inspection" | "outcome",
+    requiredChecks: string[],
+    vulnclass?: string,
+  ) =>
+    post<TaskGoal>(`/tasks/${id}/goals`, {
+      text,
+      goal_type: goalType,
+      required_checks: requiredChecks,
+      vulnclass: vulnclass ?? "",
+    }),
   // 人工修改目标文本（及 vulnclass）：通知 planner「由 old 变为 new」、复活任务。
   updateGoal: (id: string, goalId: string, text: string, vulnclass?: string) =>
     patch<TaskGoal>(`/tasks/${id}/goals/${goalId}`, { text, vulnclass: vulnclass ?? "" }),
   // 人工删除目标（硬删除）：通知 planner，删除不复活任务。
   deleteGoal: (id: string, goalId: string) => del<{ ok: boolean }>(`/tasks/${id}/goals/${goalId}`),
+  reopenGoal: (id: string, goalId: string, expectedVersion: number, reason: string) =>
+    post<TaskGoal>(`/tasks/${id}/goals/${goalId}/reopen`, { expected_version: expectedVersion, reason }),
 
   // ---- 操作约束管理（总览）----
   // 本任务全部操作约束（allow/deny）。
@@ -646,7 +679,10 @@ export const api = {
       `/exploration/finding-case-suggestions${task ? `?task_id=${encodeURIComponent(task)}` : ""}`,
     ),
   resolveFindingCaseSuggestion: (id: string, accept: boolean) =>
-    post<{ case_id: string }>(`/exploration/finding-case-suggestions/${id}`, { accept }),
+    post<{ case_id: string; report_queued: boolean; report_error?: string }>(
+      `/exploration/finding-case-suggestions/${id}`,
+      { accept },
+    ),
   reviewFindingCases: (ids: string[]) =>
     post<{ runs: { conversation_id: number; task_id: string }[] }>("/exploration/finding-case-review", {
       finding_ids: ids,
@@ -1205,6 +1241,15 @@ export const api = {
 
   // ---- tools (内置工具目录) ----
   tools: () => get<{ tools: Tool[] }>("/tools").then((r) => arr(r.tools)),
+  toolUsage: (taskId?: string) =>
+    get<{ usage: { tool: string; agent: string; outcome: string; calls: number }[] | null; history_note: string }>(
+      `/tools/usage${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`,
+    ).then((response) => {
+      if (!response || !("usage" in response) || (response.usage !== null && !Array.isArray(response.usage))) {
+        throw new Error("工具调用统计响应格式无效，请检查服务端版本或演示配置");
+      }
+      return { ...response, usage: arr(response.usage) };
+    }),
   saveTool: (key: string, patch: Pick<Tool, "description" | "schema" | "agents" | "enabled">) =>
     put<{ ok: boolean }>(`/tools/${key}`, patch),
   resetTool: (key: string) => post<{ ok: boolean }>(`/tools/${key}/reset`, {}),
@@ -1243,19 +1288,17 @@ export const api = {
     get<{ tasks: SSTask[] }>(
       `/sync/scopesentry/tasks?page=${page}&size=${size}${search ? `&search=${encodeURIComponent(search)}` : ""}`,
     ).then((r) => arr(r.tasks)),
-  ssSync: (body: {
-    dimension: "project" | "task";
-    targets: string[];
-    asset_types: string[];
-    create_company?: boolean;
-    page_size?: number;
-  }) =>
-    post<{
-      synced: Record<string, number>;
-      companies: string[] | null;
-      warnings: string[] | null;
-      errors: string[] | null;
-    }>("/sync/scopesentry/sync", body),
+  ssSync: (body: SSSyncRequest) => post<SSSyncResult>("/sync/scopesentry/sync", body),
+  ssStartSync: (body: SSSyncRequest) => post<SSSyncResult>("/sync/scopesentry/jobs", body),
+  ssResumeSync: (id: number) => post<SSSyncResult>(`/sync/scopesentry/history/${id}/resume`, {}),
+  ssSyncHistory: (page = 1, size = 20) =>
+    get<{ runs: SSSyncRun[]; total: number; page: number; size: number }>(
+      `/sync/scopesentry/history?page=${page}&size=${size}`,
+    ),
+  ssSyncHistoryDetail: (id: number, page = 1, size = 20, includeRaw = false) =>
+    get<{ run: SSSyncRun; items: SSSyncItem[]; total: number; page: number; size: number }>(
+      `/sync/scopesentry/history/${id}?page=${page}&size=${size}${includeRaw ? "&include_raw=1" : ""}`,
+    ),
 
   // ---- skills (文件系统) ----
   skills: () => get<{ skills: SkillItem[] }>("/skills").then((r) => arr(r.skills)),

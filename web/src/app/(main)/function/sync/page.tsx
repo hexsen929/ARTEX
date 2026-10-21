@@ -15,6 +15,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import type { SSProject, SSTask } from "@/lib/types";
+import { showSyncResult, SyncHistory, SyncResult } from "./sync-history";
 
 type SSStatus = {
   exists: boolean;
@@ -55,6 +56,9 @@ export default function AssetSyncPage() {
 function ScopeSentryPanel() {
   const [status, setStatus] = React.useState<SSStatus | null>(null);
   const [loadingStatus, setLoadingStatus] = React.useState(true);
+  const [historyRefresh, setHistoryRefresh] = React.useState(0);
+  const [syncing, setSyncing] = React.useState(false);
+  const refreshHistory = React.useCallback(() => setHistoryRefresh((value) => value + 1), []);
 
   const loadStatus = React.useCallback(() => {
     setLoadingStatus(true);
@@ -75,7 +79,7 @@ function ScopeSentryPanel() {
     <div className="space-y-4">
       <DataSourceCard status={status} loading={loadingStatus} onChanged={loadStatus} />
       {ready ? (
-        <SyncWorkbench />
+        <SyncWorkbench syncing={syncing} setSyncing={setSyncing} onSettled={refreshHistory} />
       ) : (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground text-sm">
@@ -83,6 +87,13 @@ function ScopeSentryPanel() {
           </CardContent>
         </Card>
       )}
+      <SyncHistory
+        refreshKey={historyRefresh}
+        canRetry={ready && !syncing}
+        onChanged={refreshHistory}
+        syncing={syncing}
+        onSyncingChange={setSyncing}
+      />
     </div>
   );
 }
@@ -215,7 +226,15 @@ function StatusBadge({ status, loading }: { status: SSStatus | null; loading: bo
 
 // ── 同步工作区（项目 / 任务维度）────────────────────────────────────────────────
 
-function SyncWorkbench() {
+function SyncWorkbench({
+  syncing,
+  setSyncing,
+  onSettled,
+}: {
+  syncing: boolean;
+  setSyncing: (value: boolean) => void;
+  onSettled: () => void;
+}) {
   const [dimension, setDimension] = React.useState<Dimension>("project");
   const [assetTypes, setAssetTypes] = React.useState<Record<string, boolean>>({
     subdomain: true,
@@ -231,7 +250,6 @@ function SyncWorkbench() {
   const [page, setPage] = React.useState(1);
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
 
-  const [syncing, setSyncing] = React.useState(false);
   const [result, setResult] = React.useState<Awaited<ReturnType<typeof api.ssSync>> | null>(null);
 
   const load = React.useCallback(() => {
@@ -271,19 +289,23 @@ function SyncWorkbench() {
     setSyncing(true);
     setResult(null);
     try {
-      const r = await api.ssSync({
+      const r = await api.ssStartSync({
         dimension,
         targets: [...selected],
+        target_ids:
+          dimension === "task"
+            ? Object.fromEntries(tasks.filter((task) => selected.has(task.name)).map((task) => [task.name, task.id]))
+            : undefined,
         asset_types: chosenTypes,
         create_company: dimension === "project" ? createCompany : false,
       });
-      setResult(r);
-      const total = Object.values(r.synced ?? {}).reduce((a, b) => a + b, 0);
-      toast.success(`同步完成，共入库 ${total} 条资产`);
+      setResult(r.status === "running" ? null : r);
+      showSyncResult(r);
     } catch (e) {
       toast.error(`同步失败：${(e as Error).message}`);
     } finally {
       setSyncing(false);
+      onSettled();
     }
   };
 
@@ -418,7 +440,7 @@ function SyncWorkbench() {
                   </>
                 ) : (
                   <>
-                    <TableHead>状态</TableHead>
+                    <TableHead>源任务扫描进度</TableHead>
                     <TableHead>时间</TableHead>
                   </>
                 )}
@@ -448,39 +470,5 @@ function SyncWorkbench() {
         {result && <SyncResult result={result} />}
       </CardContent>
     </Card>
-  );
-}
-
-function SyncResult({ result }: { result: Awaited<ReturnType<typeof api.ssSync>> }) {
-  const synced = result.synced ?? {};
-  const labels: Record<string, string> = { subdomain: "子域名", service: "服务", app: "App", ip: "IP" };
-  return (
-    <div className="space-y-2 rounded-md border bg-muted/40 p-3 text-sm">
-      <div className="flex flex-wrap gap-3">
-        {Object.entries(synced).map(([k, v]) => (
-          <Badge key={k} variant="secondary">
-            {labels[k] ?? k}: {v}
-          </Badge>
-        ))}
-      </div>
-      {result.companies && result.companies.length > 0 && (
-        <p className="text-muted-foreground">新建/更新企业：{result.companies.join("、")}</p>
-      )}
-      {result.warnings && result.warnings.length > 0 && (
-        <ul className="list-inside list-disc text-amber-600 dark:text-amber-500">
-          {result.warnings.map((wm) => (
-            <li key={wm}>{wm}</li>
-          ))}
-        </ul>
-      )}
-      {result.errors && result.errors.length > 0 && (
-        <ul className="list-inside list-disc text-destructive">
-          {result.errors.slice(0, 20).map((em) => (
-            <li key={em}>{em}</li>
-          ))}
-          {result.errors.length > 20 && <li>…共 {result.errors.length} 条错误</li>}
-        </ul>
-      )}
-    </div>
   );
 }

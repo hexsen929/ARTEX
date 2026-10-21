@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,6 +30,48 @@ func (s *Server) listGoals(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"goals": goalDTOs(goals)})
 }
 
+func (s *Server) reopenGoal(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	if !s.engine.beginTaskOperation(t.ID) {
+		writeErr(w, 409, "任务正在删除，不能纠正目标")
+		return
+	}
+	defer s.engine.decInflight(t.ID)
+	goalID, err := strconv.ParseInt(r.PathValue("gid"), 10, 64)
+	if err != nil || goalID <= 0 {
+		writeErr(w, 400, "bad goal id")
+		return
+	}
+	var input struct {
+		Version *int   `json:"expected_version"`
+		Reason  string `json:"reason"`
+	}
+	if json.NewDecoder(r.Body).Decode(&input) != nil || input.Version == nil || *input.Version < 0 || strings.TrimSpace(input.Reason) == "" {
+		writeErr(w, 400, "目标版本和纠错原因必填")
+		return
+	}
+	if err = t.Store.ReopenGoal(r.Context(), goalID, *input.Version, "human", strings.TrimSpace(input.Reason)); err != nil {
+		if errors.Is(err, db.ErrGoalProofChanged) {
+			writeErr(w, 409, err.Error())
+		} else {
+			writeErr(w, 500, err.Error())
+		}
+		return
+	}
+	t.NotifyGoal([]string{"原完成判定已纠正：" + input.Reason})
+	s.reviveTask(t)
+	node, err := t.Store.GetNode(goalID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, goalDTO(node))
+}
+
 // addGoal 人工新增一个目标:落库(挂到任务根 spawns 下)→ 记一条「新增了目标」触发唤醒
 // planner → 复活任务,让规划者据新目标重判是否达成。
 func (s *Server) addGoal(w http.ResponseWriter, r *http.Request) {
@@ -43,20 +86,17 @@ func (s *Server) addGoal(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.engine.decInflight(t.ID)
 
-	var body struct {
-		Text      string `json:"text"`
-		VulnClass string `json:"vulnclass"`
-	}
+	var body db.EngagementGoal
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, 400, "invalid JSON")
 		return
 	}
 	text := strings.TrimSpace(body.Text)
-	if text == "" {
-		writeErr(w, 400, "目标内容不能为空")
+	if err := body.Validate(); err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
-	payload := map[string]any{"text": text}
+	payload := map[string]any{"text": text, "goal_type": body.GoalType, "required_checks": body.RequiredChecks}
 	if vc := strings.TrimSpace(body.VulnClass); vc != "" {
 		payload["vulnclass"] = vc
 	}

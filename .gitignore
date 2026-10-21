@@ -5,6 +5,7 @@
 *.db-shm
 config.json
 scheduler_state.json
+transcripts/
 __pycache__/
 *.pyc
 *.pyo
@@ -19,6 +20,7 @@ web/public/demo-version.json
 *.local
 
 # development tools
+/.codegraph/
 .playwright-mcp/
 .playwright-cli/
 .idea/
@@ -26,7 +28,14 @@ web/public/demo-version.json
 *.swp
 *.swo
 
-# docs
+# Local logs, backups, and temporary files
+*.log
+*.bak
+*.tmp
+*~
+
+# Local documentation must not be published to the repository.
+/doc/
 /docs/
 
 # os
@@ -38,6 +47,10 @@ Thumbs.db
 
 # 内嵌前端的单二进制产物
 /artex
+/artex.exe
+/artex.exe.*
+/artex.*.exe
+/artex-*.zip
 # 一键更新在可执行文件旁留下的中间产物（暂存件 / 备份 / 失败版本 / 升级标记）
 /artex.new
 /artex.new.sha256
@@ -52,6 +65,8 @@ Thumbs.db
 
 # Docker 部署生成的本地环境（含密码/密钥，不提交）
 .env
+.env.*
+!.env.example
 
 # 调度器运行/模拟产生的事件日志（测试产物，不提交）
 *-events.csv

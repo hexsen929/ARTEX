@@ -27,7 +27,7 @@ type goalSpec struct {
 //
 // 异步(goroutine)所以调用方立即返回,两条路径行为一致:秒建任务、后台拆目标。
 func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
-	if !s.engine.beginTaskOperation(t.ID) {
+	if !s.engine.beginExecutionOperation(t.ID) {
 		return
 	}
 	s.seed(t, seedText)
@@ -69,6 +69,9 @@ func (s *Server) startTaskEngine(t *Task) {
 func (s *Server) occupiesConcurrencySlot(t *Task) bool {
 	if t == nil {
 		return false
+	}
+	if s.engine.isCompleting(t.ID) {
+		return true
 	}
 	lifecycle := t.lifecycleSnapshot()
 	if lifecycle.Queued || lifecycle.Paused || isTerminalStatus(lifecycle.Status) {
@@ -133,6 +136,9 @@ func (s *Server) admitTaskWhenScheduled(t *Task, mode string, requirePaused, sch
 	current, exists := s.m.Task(t.ID)
 	if !exists || current != t || s.engine.IsDeleting(t.ID) {
 		return false, fmt.Errorf("task is being deleted")
+	}
+	if s.engine.completionStalled(t.ID) {
+		return false, fmt.Errorf("旧执行尚未退出，收官已隔离；退出前不能继续任务")
 	}
 	if !s.engine.beginTaskOperation(t.ID) {
 		return false, fmt.Errorf("task is being deleted")
@@ -411,7 +417,7 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	s.engine.BeginLLMCall(t.ID)
 	goalRuntime := s.agentsForTask(t).runtime
-	decomposed := agent.DecomposeGoalsWithProvider(ctx, goalRuntime, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, goalRuntime.nonStreaming(), goalRuntime.maxTokens(), emit)
+	decomposed := agent.DecomposeGoalsWithProvider(ctx, goalRuntime, s.m.dir, t.goalText(), t.descriptionText(), as, t.Store, taskID, goalRuntime.nonStreaming(), goalRuntime.maxTokens(), emit)
 	s.engine.EndLLMCall(t.ID)
 	for _, g := range decomposed {
 		if strings.TrimSpace(g.Text) != "" {
@@ -422,10 +428,10 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 		// No decomposed goals (LLM error / no provider): use the raw task goal verbatim
 		// as a single goal so the task still has something to judge against. This is the
 		// only path that writes here — decomposed goals are already persisted by the tool.
-		if g := strings.TrimSpace(t.Goal); g != "" {
+		if g := strings.TrimSpace(t.goalText()); g != "" {
 			log.Printf("[goals] task %s: LLM 目标拆解无产出，回退为「原始目标作为单目标」", t.ID)
 			origin, _ := t.Store.OriginFactID()
-			id, _ := t.Store.AddNode(db.KindGoal, map[string]any{"text": g}, 0, "open", "system", nil)
+			id, _ := t.Store.AddNode(db.KindGoal, map[string]any{"text": g, "goal_contract_pending": true}, 0, "open", "system", nil)
 			if origin > 0 && id > 0 {
 				_ = t.Store.Link(origin, db.RelSpawns, id) // goal descends from the task root (origin fact)
 			}

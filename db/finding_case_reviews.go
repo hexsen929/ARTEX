@@ -19,7 +19,14 @@ type FindingCaseReviewReservation struct {
 
 // Reserve all source tasks atomically, so a concurrent click cannot start a
 // second review and a mixed-task request cannot partially enqueue its work.
-func (d *DB) CreateFindingCaseReviews(ctx context.Context, batches map[int64][]int64) ([]FindingCaseReviewReservation, error) {
+func (d *DB) CreateFindingCaseReviews(ctx context.Context, batches map[int64][]int64, modes ...string) ([]FindingCaseReviewReservation, error) {
+	mode := "historical"
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
+	if mode != "historical" && mode != "report" {
+		return nil, errors.New("无效报告整理模式")
+	}
 	tasks := make([]int64, 0, len(batches))
 	for task := range batches {
 		tasks = append(tasks, task)
@@ -67,7 +74,7 @@ func (d *DB) CreateFindingCaseReviews(ctx context.Context, batches map[int64][]i
 			if err := tx.QueryRow(`INSERT INTO conversations(agent_key,title) VALUES('reporter',$1) RETURNING id`, fmt.Sprintf("漏洞整理 · task#%d", task)).Scan(&conv); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(`INSERT INTO finding_case_review_runs(conversation_id,task_id,finding_ids) VALUES($1,$2,$3)`, conv, task, string(raw)); err != nil {
+			if _, err := tx.Exec(`INSERT INTO finding_case_review_runs(conversation_id,task_id,finding_ids,review_mode) VALUES($1,$2,$3,$4)`, conv, task, string(raw), mode); err != nil {
 				return err
 			}
 			out = append(out, FindingCaseReviewReservation{TaskID: task, ConversationID: conv, FindingIDs: ids})

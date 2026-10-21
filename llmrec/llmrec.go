@@ -191,6 +191,11 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 			// would zero out the input already counted at start (mirrors the SDK's own
 			// llm.Accumulator; see norma/llm/accumulate.go).
 			switch ev.Type {
+			case llm.SEContentBlockStart:
+				if recordBodies && ev.Block != nil {
+					textBuf.WriteString(ev.Block.Text)
+					thinkingBuf.WriteString(ev.Block.Thinking)
+				}
 			case llm.SETextDelta:
 				if recordBodies {
 					textBuf.WriteString(ev.Text)

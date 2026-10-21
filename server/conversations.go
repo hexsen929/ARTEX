@@ -529,7 +529,17 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 					state, reason = "failed", err.Error()
 				}
 			}
-			_, _ = s.m.pg.Exec(`UPDATE finding_case_review_runs SET state=$2,error=$3 WHERE conversation_id=$1 AND state='running'`, c.ID, state, reason)
+			sealCtx, cancelSeal := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancelSeal()
+			var sealErr error
+			if manualReview {
+				_, sealErr = s.m.pg.ExecContext(sealCtx, `UPDATE finding_case_review_runs SET state=$2,error=$3 WHERE conversation_id=$1 AND state='running'`, c.ID, state, reason)
+			} else {
+				sealErr = s.m.pg.FinishFindingCaseReview(sealCtx, c.ID, state == "done", reason)
+			}
+			if sealErr != nil {
+				log.Printf("[conv %d] seal finding review: %v", c.ID, sealErr)
+			}
 		}()
 	}
 	if c.AgentKey == db.FindingRetestAgentKey {

@@ -25,7 +25,7 @@ type findingReviewConclusion struct {
 
 func (s *Server) isHistoricalFindingReview(conv int64) (bool, error) {
 	var exists bool
-	err := s.m.pg.QueryRow(`SELECT EXISTS(SELECT 1 FROM finding_case_review_runs WHERE conversation_id=$1)`, conv).Scan(&exists)
+	err := s.m.pg.QueryRow(`SELECT EXISTS(SELECT 1 FROM finding_case_review_runs WHERE conversation_id=$1 AND review_mode='historical')`, conv).Scan(&exists)
 	return exists, err
 }
 

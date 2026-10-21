@@ -3,17 +3,23 @@
 # ARTEX
 
 AI 自主渗透测试系统（Go 后端 + Next.js 前端）
-
+hexsen929 维护的整合 fork。
 
 🌐 **在线 Demo**： [https://artex-demo-ruoji6.vercel.app/](https://artex-demo-ruoji6.vercel.app/)
 
-📦 **该仓库为ARTEX最后一个版本纯源码备份，docker部署源失效自行让AI本地构建即可**
+整合 RuoJi6/ARTEX 与 sharenjun/ARTEX-main 的 main 分支更新，保留原项目许可证与提交历史。
 
 </div>
 
-本仓库为独立维护的 [RuoJi6/ARTEX](https://github.com/RuoJi6/ARTEX)，保留 https://github.com/Autumn-27/ARTEX 的原始提交历史与 AGPL-3.0 许可证。程序发布包从本仓库 Releases 下载，Docker 镜像 [ruoji6/artex](https://hub.docker.com/r/ruoji6/artex) 由本仓库 GitHub Actions 构建并发布。
+本仓库为 [hexsen929/ARTEX](https://github.com/hexsen929/ARTEX)，更新来源为 [RuoJi6/ARTEX](https://github.com/RuoJi6/ARTEX) 与 [sharenjun/ARTEX-main](https://github.com/sharenjun/ARTEX-main)，保留原始提交历史与 AGPL-3.0 许可证。页面在线更新只读取本 fork 的 Releases；Docker 与 Demo 发布默认关闭。
 
 ---
+
+## v0.4.0 更新
+
+本次增加 ScopeSentry 后台同步历史、逐项失败重试、大批量分页恢复和原始 JSON 来源追踪；任务完成前评估剩余工作，并让 Worker 在限时收尾阶段保存已有结果。同步页和任务页展示对应进度、停止理由与未完成项，同时修复 Windows 证据保存、Python 工具及 Skill 路径兼容问题。
+
+完整功能变化、代码组织调整、验证范围和升级建议见 [v0.4.0 Release](https://github.com/sharenjun/ARTEX-main/releases/tag/v0.4.0)，历史版本见 [CHANGELOG](CHANGELOG.md)。
 
 ## 截图预览
 
@@ -63,6 +69,8 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 - 在「**资产同步**」页填 ScopeSentry 的地址与 API Key，接入数据源；
 - 按**项目**或**任务**维度选择要同步的目标与资产类型（域名 / 子域 / IP / 端口 / 站点 / 端点…）；
 - 一键导入并按公司资产范围归并，直接进入 ARTEX 的资产图供 agent 探索使用。
+- 后台任务持续运行，离开或刷新页面后可从历史记录查看逐类型进度、失败原因和源记录；支持恢复中断任务及仅重试失败记录。
+- 拉取记录数与独立资产变更分别统计，逐项提供原始 JSON 下载，避免把部分成功误认为全部完成。
 
 ---
 
@@ -98,7 +106,7 @@ Demo 只运行 `web/` 前端，构建时启用 `NEXT_PUBLIC_MOCK=1`，不需要 
 
 此后按正常流程发布更高版本即可自动更新 Demo。若 Demo 部署失败，已发布的程序包和镜像仍然有效，旧 Demo 通常继续提供服务；修复设置后单独重跑 `deploy-demo`，不必重新发布整个 Release。两个版本同时发布时，部署串行执行，并在构建前、上线前检查 latest，避免已过期的构建覆盖新版。
 
-这里采用发布流程直接调用部署 job，是因为使用 `GITHUB_TOKEN` 创建的 Release 不会继续触发另一个 `release: published` 工作流。`demo.yml` 也监听网页手工发布的 Release，经过同样的正式版、完整发布包和 latest 检查后部署；手工重试则运行 `deploy-demo`。
+这里采用发布流程直接调用部署 job，是因为使用 `GITHUB_TOKEN` 创建的 Release 不会继续触发另一个 `release: published` 工作流。本 fork 的 Demo 仅在 `DEPLOY_DEMO=true` 时启用；`demo.yml` 也监听网页手工发布的 Release，经过同样的正式版、完整发布包和 latest 检查后部署；手工重试则运行 `deploy-demo`。
 
 ---
 
@@ -106,10 +114,43 @@ Demo 只运行 `web/` 前端，构建时启用 `NEXT_PUBLIC_MOCK=1`，不需要 
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
 
+### 发布产物与平台支持
+
+Docker Hub 目标仓库示例为 `hexsen929/artex`。本 fork 默认不发布镜像，以下 Docker 命令需先完成自己的镜像发布；首次使用优先选择源码构建或本 fork 的 Releases：
+
+- 正式版本同时提供版本标签（例如 `vX.Y.Z`）和 `latest`；预发布只推版本标签，不覆盖 `latest`。
+- 每个镜像标签都是包含 **Linux AMD64 / ARM64** 的多架构清单，Docker 自动选择宿主机架构；不需要指定 `--platform`。
+- `docker-compose.yml` 同样不固定架构。可在 `.env` 用 `ARTEX_IMAGE` 自定义仓库，用 `ARTEX_TAG` 固定版本。
+
+```bash
+docker pull hexsen929/artex:latest
+# 查看标签内的架构清单：
+docker buildx imagetools inspect hexsen929/artex:latest
+```
+
+GitHub Release 的程序包为 `artex-X.Y.Z-系统-架构.zip`，每包包含内嵌前端的程序、对应系统的守护启动脚本、`skills`、示例配置及 README：
+
+| 系统 | 架构 | 文件后缀 |
+| --- | --- | --- |
+| Linux | AMD64 / ARM64 | `linux-amd64.zip` / `linux-arm64.zip` |
+| macOS | AMD64 / ARM64 | `darwin-amd64.zip` / `darwin-arm64.zip` |
+| Windows | AMD64 | `windows-amd64.zip` |
+
+同一 Release 附带覆盖这五个 zip 的 `SHA256SUMS`。下载程序包和清单到同一目录后可验证：
+
+```bash
+sha256sum --check SHA256SUMS  # Linux；需要同一版本的全部五个包
+shasum -a 256 -c SHA256SUMS  # macOS；需要同一版本的全部五个包
+```
+
+只下载当前平台时，可从清单中取对应的一行执行检查；Windows 可用 `Get-FileHash <程序包.zip> -Algorithm SHA256` 与清单对应值比对。
+
+仅在需要发布 Docker 时，设置仓库 Variable `PUBLISH_DOCKER=true`，并在 GitHub 仓库 Secrets 设置 `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`（对目标仓库有推送权限）。可用仓库 Variable `DOCKERHUB_IMAGE` 覆盖默认镜像仓库。推送 `vX.Y.Z` 或 `vX.Y.Z-rc.1` 标签会触发发布；CHANGELOG 必须包含该版本的非空说明，并用作 Release 正文。`doc/` 和 `docs/` 仅保存在本地，不提交到仓库；CI 会拒绝跟踪这两个目录的提交。流程验证测试布局、Linux 数据库竞态回归、Windows 兼容和前端，再构建五个平台、校验 zip、推送和检查双架构镜像，全部通过后创建 Release。本地可用 `ARTEX_BUILD_VERSION=vX.Y.Z ./build.sh --release` 生成全部程序包及校验清单。
+
 ### 方式一：一键安装脚本（推荐）
 
 ```bash
-git clone https://github.com/RuoJi6/ARTEX.git
+git clone https://github.com/hexsen929/ARTEX.git
 cd ARTEX
 ./install.sh
 ```
@@ -124,16 +165,16 @@ cd ARTEX
 ### 方式二：Docker Compose（手动）
 
 ```bash
-git clone https://github.com/RuoJi6/ARTEX.git
+git clone https://github.com/hexsen929/ARTEX.git
 cd ARTEX
 cp .env.example .env          # 填 POSTGRES_PASSWORD、可选 ANTHROPIC_API_KEY
-docker compose up -d          # 拉取 ruoji6/artex 镜像 + postgres
+docker compose up -d          # 拉取 hexsen929/artex 镜像 + postgres
 # → http://localhost:8787
 ```
 
 镜像已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
 
-`.env` 中默认 `ARTEX_IMAGE=ruoji6/artex`，`ARTEX_TAG=latest` 使用最新镜像，也可固定为 `v0.3.17`（完整镜像地址 `ruoji6/artex:v0.3.17`）。镜像支持 `linux/amd64` 和 `linux/arm64`，Docker 会自动选择与宿主机匹配的架构，ARM64 Kali 无需自行编译。初次部署请修改 `POSTGRES_PASSWORD`；运行服务无需配置 Docker Hub 发布 Token。
+`.env` 中默认 `ARTEX_IMAGE=hexsen929/artex`，`ARTEX_TAG=latest` 使用最新镜像，也可固定为 `v0.3.17`（完整镜像地址 `hexsen929/artex:v0.3.17`）。镜像支持 `linux/amd64` 和 `linux/arm64`，Docker 会自动选择与宿主机匹配的架构，ARM64 Kali 无需自行编译。初次部署请修改 `POSTGRES_PASSWORD`；运行服务无需配置 Docker Hub 发布 Token。
 
 远程 MCP 可在系统设置中选择 `http`（Streamable HTTP）或 `sse`（旧版 SSE）。
 旧版 SSE 服务通常使用 `GET /sse` 建立事件流，再通过服务返回的
@@ -142,7 +183,7 @@ docker compose up -d          # 拉取 ruoji6/artex 镜像 + postgres
 
 ### 方式三：下载预编译二进制（Releases）
 
-到本仓库的 [Releases](https://github.com/RuoJi6/ARTEX/releases) 下载对应平台的 zip，解压后得到 `artex` + `start.sh`（Windows 为 `start.bat`）+ `skills/` + `config.example.json`。Linux ARM64（包括 ARM64 Kali）选择 `linux-arm64`，x86_64 选择 `linux-amd64`：
+到本仓库的 [Releases](https://github.com/hexsen929/ARTEX/releases) 下载对应平台的 zip，解压后得到 `artex` + `start.sh`（Windows 为 `start.bat`）+ `skills/` + `config.example.json`。Linux ARM64（包括 ARM64 Kali）选择 `linux-arm64`，x86_64 选择 `linux-amd64`：
 
 ```bash
 cp config.example.json config.json   # 填好 database 连接
@@ -278,7 +319,7 @@ docker image prune -f          # 清理旧镜像（可选）
 
 ### 方式四：预编译二进制（Releases）
 
-到 [Releases](https://github.com/RuoJi6/ARTEX/releases) 下载新版本 zip，停掉旧进程后覆盖 `artex` 与 `skills/`（保留你的 `config.json` 与 `data/`），重启即可：
+到 [Releases](https://github.com/hexsen929/ARTEX/releases) 下载新版本 zip，停掉旧进程后覆盖 `artex` 与 `skills/`（保留你的 `config.json` 与 `data/`），重启即可：
 
 ```bash
 cp -r <解压目录>/skills ./ && cp <解压目录>/artex ./
@@ -374,11 +415,11 @@ server {
 
 ### 同一漏洞归并与统一报告
 
-发现页默认「按漏洞」。原始上报、按任务及按资产保留原来的表格、状态和操作按钮，仅已归并记录改为可展开的漏洞文件夹。同一任务内，Reporter 依据目标、接口参数、权限边界、根因及验证证据确认同一实际缺陷后形成文件夹；仅类型或名称相同不会作为自动归并依据。严重程度、接口、后端或读写影响不同仍可能是同一漏洞；反之，共用登录入口或令牌不能单独证明同一根因。有关联但共同根因无法确认时提交人工建议。文件夹的 `严/高/中/低` 数量按原始记录统计，例如 `0/1/1/1`；发现页的独立漏洞数按文件夹去重，等级数量按原始上报统计，列表及文件夹详情不显示统一评级标签。原始上报内容、评级、状态、报告及证据不被覆盖。
+发现页默认「按漏洞」。原始上报、按任务及按资产保留原来的表格、状态和操作按钮，仅已归并记录改为可展开的漏洞文件夹。同一任务内，Reporter 依据目标、接口参数、权限边界、根因及验证证据确认同一实际缺陷后形成文件夹；仅类型或名称相同不会作为自动归并依据。严重程度、接口、后端或读写影响不同仍可能是同一漏洞；反之，共用登录入口或令牌不能单独证明同一根因。有关联但共同根因无法确认时提交人工建议。文件夹的 `严/高/中/低` 数量按原始记录统计，例如 `0/1/1/1`；发现页的独立漏洞数按文件夹去重，等级数量按原始上报统计；文件夹详情保留统一评级与依据，原始评级不被覆盖。原始上报内容、评级、状态、报告及证据不被覆盖。
 
 点击箭头展开原始记录，点击文件夹标题查看统一报告、原始记录及归并历史。证据不足的建议需要点击「确认归并」；否决或移出后，这些关系不会被 Agent 自动再次归并。移出成员不删除原漏洞，不足两条时解散文件夹并保留历史。继承任务的漏洞组保持只读。
 
-新上报由现有 Reporter 生成独立报告并检查重复。升级首次补充 Reporter 的归并工具和运行指引，保留自定义提示词及触发设置；已删除或停用的 Reporter 不会重建、启用。历史记录不会自动扫描：展开并选择原始记录，点击「整理所选」，按任务分别排队执行，可查看执行记录及失败信息。同一任务已有排队或运行中的整理时拒绝重复提交。历史整理以只读方式复用原报告，禁止覆盖原报告或补绑证据；已有报告为空或过期时如实说明，单独通过报告撰写流程处理。结束前需提交每条所选记录的根因判断，检查读取范围、建议、统一报告完整性及版本，通过验收才显示完成。文件夹详情可重新生成统一报告；需要启用 Reporter 并配置可用模型。判断和写作会消耗模型 token，候选检索先分页返回摘要，详情证据按需读取，不重新探测目标。
+新上报由现有 Reporter 生成独立报告并检查重复。升级首次补充 Reporter 的归并工具和运行指引，保留自定义提示词及触发设置；已删除或停用的 Reporter 不会重建、启用。历史记录不会自动扫描：展开并选择原始记录，点击「整理所选」，按任务分别排队执行，可查看执行记录及失败信息。同一任务已有排队或运行中的整理时拒绝重复提交。历史整理以只读方式复用原报告，禁止覆盖原报告或补绑证据；已有报告为空或过期时如实说明，单独通过报告撰写流程处理。确认疑似重复后的报告队列使用独立的 `report` 模式，只能补全所选成员的报告与证据，保存版本一致的原报告和统一报告后才完成；历史整理使用 `historical` 模式并要求逐条根因验收。结束前需提交每条所选记录的根因判断，检查读取范围、建议、统一报告完整性及版本，通过验收才显示完成。文件夹详情可重新生成统一报告；需要启用 Reporter 并配置可用模型。判断和写作会消耗模型 token，候选检索先分页返回摘要，详情证据按需读取，不重新探测目标。
 
 成员、报告或证据变化后统一报告标记待更新，写入时校验实际读取版本。导出默认每组一份统一报告及未归并记录，可勾选「包含原始子报告」；统一报告未生成或过期时附明确说明及全部原始材料。原始上报显示所属任务、资产及时间；按任务先展开任务，再展开漏洞文件夹；按资产保留资产树，命中任一成员即展示整个文件夹，展开时标明未命中筛选的成员。折叠状态只读取轻量摘要，不加载成员报告。升级沿用启动时幂等数据库迁移，无需执行独立 SQL。
 
@@ -400,7 +441,11 @@ server {
 
 - 后端：`go run ./cmd/artex`（不带 `-tags embedui` 则不内嵌前端）
 - 前端：`cd web && npm run dev`（`/api` 反代到后端，带热更新）
-- 测试：`go test ./...`
+- Go 主模块测试：`go run ./tests/run.go`；主模块 + norma：`go run ./tests/run.go --all`
+- 指定包 / race：`go run ./tests/run.go -race ./sidequestion ./db ./server -run TestSide -count=1`
+- 前端测试：`cd web && npm test`（Node.js 22.6+，使用内置 TypeScript 类型擦除）
+- 发布脚本测试：`python tests/build_test.py`（需要 Bash；模拟 Go 编译，实际验证 zip 内容和 SHA256）
+- 测试目录与入口细节见 [`tests/README.md`](tests/README.md)。Go 测试文件放在各包的 `tests` 子目录，必须走 overlay 入口；直接 `go test ./...` 不会加载这些测试。
 - Mock 预览（无后端）：`cd web && NEXT_PUBLIC_MOCK=1 npm run dev`
 
 ---
