@@ -123,3 +123,51 @@ func TestRoundTripWithoutCaptureIsUnchanged(t *testing.T) {
 		t.Fatalf("body=%q", got)
 	}
 }
+
+func TestRoundTripAddsAnthropicContextAndUserAgentHeaders(t *testing.T) {
+	var gotBeta, gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBeta = r.Header.Get("anthropic-beta")
+		gotUA = r.Header.Get("User-Agent")
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	client, err := quotaAwareHTTPClientWithOptions("", "", true, UserAgentCodex)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	resp, err := client.Post(srv.URL+"/v1/messages", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_ = resp.Body.Close()
+	if gotBeta != anthropicContext1MBeta {
+		t.Fatalf("anthropic-beta=%q want %q", gotBeta, anthropicContext1MBeta)
+	}
+	if gotUA != UserAgentCodex {
+		t.Fatalf("User-Agent=%q want %q", gotUA, UserAgentCodex)
+	}
+}
+
+func TestRoundTripAppendsAnthropicBetaWithoutClobbering(t *testing.T) {
+	var got string
+	base := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		got = req.Header.Get("anthropic-beta")
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok")), Header: make(http.Header)}, nil
+	})
+	transport := quotaAwareTransport{base: base, anthropicContext1M: true}
+	req, err := http.NewRequest(http.MethodPost, "https://example.invalid/v1/messages", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("anthropic-beta", "existing-beta")
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if got != "existing-beta,"+anthropicContext1MBeta {
+		t.Fatalf("anthropic-beta=%q", got)
+	}
+}

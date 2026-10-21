@@ -59,7 +59,7 @@ func newLLMHealthRegistry(pg *db.DB) *llmpool.Registry {
 // (hence one rate limiter). Returns nil when the profile can't be built.
 func (s *Server) poolMember(p *db.LLMProfile, rank int) *llmpool.Member {
 	prov, cfg, ok := s.providerForProfile(p.ID)
-	if !ok {
+	if !ok || cfg.ConfigError != nil {
 		return nil
 	}
 	return &llmpool.Member{
@@ -128,6 +128,9 @@ func (s *Server) poolChain(headID int64, headProv llm.Provider, headCfg agent.Co
 // poolForActive wraps the globally-active provider in the failover chain. Returns
 // prov unchanged when failover is off or there's nothing to fall back to.
 func (s *Server) poolForActive(activeID int64, prov llm.Provider, cfg agent.Config) llm.Provider {
+	if cfg.ConfigError != nil {
+		return prov
+	}
 	pool := s.poolChain(activeID, prov, cfg)
 	if pool == nil {
 		return prov
@@ -145,6 +148,9 @@ func (s *Server) poolForActive(activeID int64, prov llm.Provider, cfg agent.Conf
 // are on; otherwise a bound profile stays exclusive (fails hard), which is the
 // default and the documented precedence.
 func (s *Server) poolForBinding(id int64, prov llm.Provider, cfg agent.Config) llm.Provider {
+	if cfg.ConfigError != nil {
+		return prov
+	}
 	if s.m == nil || !s.m.LLMPoolEnabled() || !s.m.LLMPoolBindFallback() {
 		return prov
 	}

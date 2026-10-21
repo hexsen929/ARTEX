@@ -51,7 +51,7 @@ while :; do
 	# 必须再 wait 一次才能拿到它真正的退出码。
 	wait "$child"
 	code=$?
-	if [ "$code" -gt 128 ]; then
+	if [ "$code" -gt 128 ] && kill -0 "$child" 2>/dev/null; then
 		wait "$child"
 		code=$?
 	fi

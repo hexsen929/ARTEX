@@ -1804,16 +1804,58 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	// would get wrong — legacy/partial clients that never send it stay streaming.
 	var body struct {
 		db.LLMProfile
-		APIKey    string `json:"api_key"`
-		Streaming *bool  `json:"streaming"`
+		APIKey                 string    `json:"api_key"`
+		Streaming              *bool     `json:"streaming"`
+		ModelInstructionsFile  *string   `json:"model_instructions_file"`
+		ModelInstructionsFiles *[]string `json:"model_instructions_files"`
+		CodexConfigFile        *string   `json:"codex_config_file"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
 	p := body.LLMProfile
+	s.modelInstructionsMu.Lock()
+	defer s.modelInstructionsMu.Unlock()
+	if p.ID != 0 && (body.ModelInstructionsFile == nil || body.ModelInstructionsFiles == nil || body.CodexConfigFile == nil) {
+		previous, err := pg.ProfileByID(p.ID)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if previous == nil {
+			writeErr(w, 404, "配置不存在")
+			return
+		}
+		if body.ModelInstructionsFile == nil {
+			p.ModelInstructionsFile = previous.ModelInstructionsFile
+		}
+		if body.ModelInstructionsFiles == nil {
+			p.ModelInstructionsFiles = append([]string{}, previous.ModelInstructionsFiles...)
+		}
+		if body.CodexConfigFile == nil {
+			p.CodexConfigFile = previous.CodexConfigFile
+		}
+	}
+	if body.ModelInstructionsFile != nil {
+		p.ModelInstructionsFile = *body.ModelInstructionsFile
+	}
+	if body.ModelInstructionsFiles != nil {
+		p.ModelInstructionsFiles = append([]string{}, (*body.ModelInstructionsFiles)...)
+	}
+	if body.CodexConfigFile != nil {
+		p.CodexConfigFile = *body.CodexConfigFile
+	}
 	p.APIKey = body.APIKey
 	p.Streaming = body.Streaming == nil || *body.Streaming
+	p.UserAgent = strings.TrimSpace(p.UserAgent)
+	if p.Format != "anthropic" {
+		p.Context1M = false
+	}
+	if err := s.validateProfileModelInstructions(&p); err != nil {
+		writeModelInstructionsError(w, err)
+		return
+	}
 	// 输出上限:负数无意义,归零(= 不发送该字段)。字段名开关只有 Chat Completions
 	// 用得上——anthropic 与 openai-responses 各自定死了字段名,存下来只会误导后续读者,
 	// 故非 openai 格式一律清空。未知取值同样清空,避免把 DB CHECK 的报错甩给用户。
@@ -1983,11 +2025,13 @@ func (s *Server) pgLLMPoolReset(w http.ResponseWriter, r *http.Request) {
 // the OpenAI path, it falls back to the OpenAI endpoint at the stripped root.
 func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Provider  string `json:"provider"` // "openai" | "anthropic"
-		BaseURL   string `json:"base_url"`
-		APIKey    string `json:"api_key"`
-		Proxy     string `json:"proxy"`
-		ProfileID *int64 `json:"profile_id"` // fallback: use stored key from this profile
+		Provider  string  `json:"provider"` // "openai" | "anthropic"
+		BaseURL   string  `json:"base_url"`
+		APIKey    string  `json:"api_key"`
+		Proxy     string  `json:"proxy"`
+		ProfileID *int64  `json:"profile_id"` // fallback: use stored key from this profile
+		Context1M *bool   `json:"context_1m"`
+		UserAgent *string `json:"user_agent"`
 	}
 	if err := decode(r, &req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1995,9 +2039,17 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 	}
 	// Resolve API key: form input > profile stored key.
 	apiKey := strings.TrimSpace(req.APIKey)
-	if apiKey == "" && req.ProfileID != nil {
+	if req.ProfileID != nil && (apiKey == "" || req.Context1M == nil || req.UserAgent == nil) {
 		if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
-			apiKey = p.APIKey
+			if apiKey == "" {
+				apiKey = p.APIKey
+			}
+			if req.Context1M == nil {
+				req.Context1M = &p.Context1M
+			}
+			if req.UserAgent == nil {
+				req.UserAgent = &p.UserAgent
+			}
 		}
 	}
 	if apiKey == "" {
@@ -2007,6 +2059,10 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 
 	baseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
 	provider := strings.TrimSpace(req.Provider)
+	userAgent := ""
+	if req.UserAgent != nil {
+		userAgent = agent.ResolveUserAgent(*req.UserAgent)
+	}
 
 	// Candidate endpoints to try in order. Some Anthropic-compatible providers
 	// (e.g. DeepSeek) implement /v1/messages under an /anthropic path but expose
@@ -2019,12 +2075,21 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 	bearerHdr := func() http.Header {
 		h := http.Header{}
 		h.Set("Authorization", "Bearer "+apiKey)
+		if userAgent != "" {
+			h.Set("User-Agent", userAgent)
+		}
 		return h
 	}
 	anthropicHdr := func() http.Header {
 		h := http.Header{}
 		h.Set("x-api-key", apiKey)
 		h.Set("anthropic-version", "2023-06-01")
+		if req.Context1M != nil && *req.Context1M {
+			h.Set("anthropic-beta", "context-1m-2025-08-07")
+		}
+		if userAgent != "" {
+			h.Set("User-Agent", userAgent)
+		}
 		return h
 	}
 

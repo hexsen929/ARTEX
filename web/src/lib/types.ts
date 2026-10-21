@@ -1063,6 +1063,22 @@ export interface NotificationDelivery {
 }
 
 // ---- LLM config ----
+export interface LLMInstructionFileInfo {
+  name: string;
+  path: string;
+  size: number;
+  exists: boolean;
+  error?: string;
+}
+
+export interface CodexInstructionsSource {
+  config_path: string;
+  model_instructions_file: string;
+  model_instructions_bytes: number;
+  developer_instructions_bytes: number;
+  has_model_instructions: boolean;
+}
+
 export interface LLMProfile {
   id: string;
   name: string;
@@ -1074,6 +1090,16 @@ export interface LLMProfile {
   rate_per_second: number;
   rate_per_minute: number;
   context_window_k?: number;
+  // Anthropic 1M context beta toggle.
+  context_1m?: boolean;
+  // Empty = Go transport default; otherwise a preset or custom raw value.
+  user_agent?: string;
+  // Codex 基础指令文件：空 = 默认。Agent Prompt 独立保留。
+  model_instructions_file?: string;
+  // 本配置已添加的文件名；文件正文保存在独立的文件仓库。
+  model_instructions_files?: string[];
+  // Codex config.toml 路径：空 = 不加载，与手选文件互斥。
+  codex_config_file?: string;
   // 思考开关(thinking.type): ""=不发送(默认) | "disabled"=关闭 | "enabled"=开启
   thinking_type?: string;
   // 思考强度: ""=不发送(默认) | "low"/"medium"/"high"/"xhigh"/"max"

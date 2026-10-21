@@ -48,6 +48,9 @@ type Server struct {
 	jwtKey    []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
 	basicAuth basicAuthGate
 
+	modelInstructionsDir string // blank resolves next to the executable; test override
+	modelInstructionsMu  sync.Mutex
+
 	// concMu serializes concurrency-cap decisions (admission + reconcile) so a
 	// scheduler tick and an HTTP settings change / task creation can't both count
 	// free slots off the same snapshot and over-promote past the limit.
@@ -345,6 +348,9 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
+	cfg.Context1M = p.Context1M
+	cfg.UserAgent = p.UserAgent
+	s.applyModelInstructionsConfig(&cfg, p.ModelInstructionsFile, p.CodexConfigFile)
 	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
 	cfg.Stream = p.Streaming
@@ -361,7 +367,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 }
 
 // saveLLMConfig persists the LLM config as the active "default" profile in PG.
-func (s *Server) saveLLMConfig(cfg agent.Config) error {
+func (s *Server) saveLLMConfig(cfg agent.Config, instructionFiles []string) error {
 	// cfg.Provider() already returns one of the three valid format strings
 	// (anthropic / openai / openai-responses), matching the DB CHECK constraint.
 	format := cfg.Provider()
@@ -387,14 +393,21 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 			}
 		}
 	}
-	newID, err := s.m.pg.SaveProfile(&db.LLMProfile{
+	p := &db.LLMProfile{
 		ID: id, Name: "default", Format: format, Model: cfg.Model, BaseURL: cfg.BaseURL, Proxy: cfg.Proxy,
 		APIKey: cfg.APIKey, RatePerSecond: cfg.RatePerSecond, RatePerMinute: cfg.RatePerMinute,
 		ContextWindowK: cfg.ContextWindowK, ThinkingType: cfg.ThinkingType, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
 		Priority: priority, PoolExclude: poolExclude, Streaming: streaming,
 		MaxTokens: maxTokens, MaxTokensField: maxTokensField, SessionHeaderKey: sessionHeaderKey,
-		Retry: retry,
-	})
+		Context1M: cfg.Context1M, UserAgent: cfg.UserAgent,
+		ModelInstructionsFile: instructionFilename(cfg.ModelInstructionsFile), ModelInstructionsFiles: instructionFiles,
+		CodexConfigFile: cfg.CodexConfigFile,
+		Retry:           retry,
+	}
+	if err := s.validateProfileModelInstructions(p); err != nil {
+		return err
+	}
+	newID, err := s.m.pg.SaveProfile(p)
 	if err != nil {
 		return err
 	}
@@ -448,14 +461,20 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	// and Agent bindings, otherwise each path owns a separate rate limiter.
 	if active, _ := s.m.pg.ActiveProfile(); active != nil {
 		if activeCfg, ok := s.loadProfileConfig(active.ID); ok && activeCfg == cfg {
-			prov, _, _ = s.providerForProfile(active.ID)
+			if selected, selectedCfg, ready := s.providerForProfile(active.ID); ready {
+				prov, cfg = selected, selectedCfg
+			}
 		}
 	}
 	if prov == nil {
 		var err error
 		prov, err = cfg.NewProviderWithLimiter(s.requestLimiterForProfile(0))
 		if err != nil {
-			return err
+			if cfg.ConfigError == nil && cfg.ModelInstructionsFile == "" && cfg.CodexConfigFile == "" {
+				return err
+			}
+			cfg.ConfigError = err
+			prov = agent.ErrorProvider(err)
 		}
 		// Non-persisted/env configs do not have a profile cache key.
 		s.cfgMu.Lock()
@@ -516,6 +535,9 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
+	cfg.Context1M = p.Context1M
+	cfg.UserAgent = p.UserAgent
+	s.applyModelInstructionsConfig(&cfg, p.ModelInstructionsFile, p.CodexConfigFile)
 	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
 	cfg.Stream = p.Streaming
@@ -575,7 +597,8 @@ func (s *Server) chatUnavailableReason() string {
 
 // providerForProfile returns a cached provider+cfg for a profile id, so every agent
 // bound/pinned to the same profile shares one provider instance (one rate limiter).
-// ok=false when the profile is missing/invalid → caller falls back to the global pair.
+// Missing/keyless profiles return ok=false. A selected instruction source that
+// cannot load returns an error provider, preserving the explicit profile binding.
 func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool) {
 	s.provCacheMu.Lock()
 	if e := s.provByProfile[id]; e != nil {
@@ -605,6 +628,10 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 	if err != nil {
 		s.provCacheMu.Unlock()
 		log.Printf("[engine] build provider for LLM profile %d failed: %v", id, err)
+		if cfg.ConfigError != nil || cfg.ModelInstructionsFile != "" || cfg.CodexConfigFile != "" {
+			cfg.ConfigError = err
+			return agent.ErrorProvider(err), cfg, true
+		}
 		return nil, agent.Config{}, false
 	}
 	if profile != nil {
@@ -792,6 +819,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/llm", s.getLLM)
 	mux.HandleFunc("POST /api/llm", s.setLLM)
 	mux.HandleFunc("POST /api/llm/test", s.testLLM)
+	mux.HandleFunc("GET /api/llm/instruction-files", s.listModelInstructions)
+	mux.HandleFunc("POST /api/llm/codex-config/inspect", s.inspectCodexConfig)
+	mux.HandleFunc("POST /api/llm/instruction-files", s.createModelInstructions)
+	mux.HandleFunc("GET /api/llm/instruction-files/{name}", s.readModelInstructions)
+	mux.HandleFunc("PUT /api/llm/instruction-files/{name}", s.updateModelInstructions)
+	mux.HandleFunc("DELETE /api/llm/instruction-files/{name}", s.deleteModelInstructions)
 
 	// asset system
 	mux.HandleFunc("GET /api/assets", s.listAssets)
@@ -1370,36 +1403,52 @@ func (s *Server) rerunBlocked(w http.ResponseWriter, r *http.Request) {
 
 // getLLM returns the current LLM config (key never exposed).
 func (s *Server) getLLM(w http.ResponseWriter, r *http.Request) {
+	instructionFiles := []string{}
+	if s.m != nil && s.m.pg != nil {
+		if p, err := s.m.pg.ActiveProfile(); err == nil && p != nil {
+			instructionFiles = append(instructionFiles, p.ModelInstructionsFiles...)
+		}
+	}
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 	writeJSON(w, 200, map[string]any{
-		"configured":       s.llmOn,
-		"provider":         s.llmCfg.Provider(),
-		"model":            s.llmCfg.Model,
-		"base_url":         s.llmCfg.BaseURL,
-		"proxy":            s.llmCfg.Proxy,
-		"key_set":          s.llmCfg.APIKey != "",
-		"rate_per_second":  s.llmCfg.RatePerSecond,
-		"rate_per_minute":  s.llmCfg.RatePerMinute,
-		"context_window_k": s.llmCfg.ContextWindowK,
-		"thinking_type":    s.llmCfg.ThinkingType,
-		"reasoning_effort": s.llmCfg.ReasoningEffort,
+		"configured":               s.llmOn,
+		"provider":                 s.llmCfg.Provider(),
+		"model":                    s.llmCfg.Model,
+		"base_url":                 s.llmCfg.BaseURL,
+		"proxy":                    s.llmCfg.Proxy,
+		"key_set":                  s.llmCfg.APIKey != "",
+		"rate_per_second":          s.llmCfg.RatePerSecond,
+		"rate_per_minute":          s.llmCfg.RatePerMinute,
+		"context_window_k":         s.llmCfg.ContextWindowK,
+		"context_1m":               s.llmCfg.Context1M,
+		"user_agent":               s.llmCfg.UserAgent,
+		"model_instructions_file":  instructionFilename(s.llmCfg.ModelInstructionsFile),
+		"model_instructions_files": instructionFiles,
+		"codex_config_file":        s.llmCfg.CodexConfigFile,
+		"thinking_type":            s.llmCfg.ThinkingType,
+		"reasoning_effort":         s.llmCfg.ReasoningEffort,
 	})
 }
 
 // setLLM configures the LLM at runtime. A blank api_key keeps the existing key.
 func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Provider        string  `json:"provider"`
-		Model           string  `json:"model"`
-		BaseURL         string  `json:"base_url"`
-		Proxy           string  `json:"proxy"`
-		APIKey          string  `json:"api_key"`
-		RatePerSecond   float64 `json:"rate_per_second"`
-		RatePerMinute   float64 `json:"rate_per_minute"`
-		ContextWindowK  int     `json:"context_window_k"`
-		ThinkingType    string  `json:"thinking_type"`
-		ReasoningEffort string  `json:"reasoning_effort"`
+		Provider               string    `json:"provider"`
+		Model                  string    `json:"model"`
+		BaseURL                string    `json:"base_url"`
+		Proxy                  string    `json:"proxy"`
+		APIKey                 string    `json:"api_key"`
+		RatePerSecond          float64   `json:"rate_per_second"`
+		RatePerMinute          float64   `json:"rate_per_minute"`
+		ContextWindowK         int       `json:"context_window_k"`
+		Context1M              bool      `json:"context_1m"`
+		UserAgent              string    `json:"user_agent"`
+		ModelInstructionsFile  *string   `json:"model_instructions_file"`
+		ModelInstructionsFiles *[]string `json:"model_instructions_files"`
+		CodexConfigFile        *string   `json:"codex_config_file"`
+		ThinkingType           string    `json:"thinking_type"`
+		ReasoningEffort        string    `json:"reasoning_effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1415,6 +1464,42 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg.ContextWindowK = k
 	}
+	cfg.Context1M = req.Context1M
+	cfg.UserAgent = req.UserAgent
+	instructionName := ""
+	instructionFiles := []string{}
+	if s.m != nil && s.m.pg != nil {
+		if p, err := s.m.pg.ActiveProfile(); err == nil && p != nil {
+			instructionName = p.ModelInstructionsFile
+			instructionFiles = append(instructionFiles, p.ModelInstructionsFiles...)
+			cfg.CodexConfigFile = p.CodexConfigFile
+		}
+	}
+	if req.ModelInstructionsFile != nil {
+		instructionName = *req.ModelInstructionsFile
+	}
+	if req.ModelInstructionsFiles != nil {
+		instructionFiles = append([]string{}, (*req.ModelInstructionsFiles)...)
+	}
+	if req.CodexConfigFile != nil {
+		cfg.CodexConfigFile = *req.CodexConfigFile
+	}
+	if !codexModelInstructionsEnabled(cfg.Provider(), cfg.UserAgent) {
+		instructionName = ""
+		cfg.CodexConfigFile = ""
+	}
+	pInstructions := &db.LLMProfile{Format: cfg.Provider(), UserAgent: cfg.UserAgent, ModelInstructionsFile: instructionName, ModelInstructionsFiles: instructionFiles, CodexConfigFile: cfg.CodexConfigFile}
+	s.modelInstructionsMu.Lock()
+	defer s.modelInstructionsMu.Unlock()
+	if err := s.validateProfileModelInstructions(pInstructions); err != nil {
+		writeModelInstructionsError(w, err)
+		return
+	}
+	s.applyModelInstructionsConfig(&cfg, instructionName, pInstructions.CodexConfigFile)
+	if cfg.ConfigError != nil {
+		writeErr(w, http.StatusBadRequest, cfg.ConfigError.Error())
+		return
+	}
 	if cfg.APIKey == "" {
 		s.cfgMu.Lock()
 		cfg.APIKey = s.llmCfg.APIKey // keep existing key if not re-entered
@@ -1429,7 +1514,7 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "provider init failed: "+err.Error())
 		return
 	}
-	if err := s.saveLLMConfig(cfg); err != nil {
+	if err := s.saveLLMConfig(cfg, instructionFiles); err != nil {
 		writeErr(w, 500, "persist provider failed: "+err.Error())
 		return
 	}
@@ -1449,16 +1534,20 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 // testLLM makes a real minimal completion to verify the config works.
 func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Provider         string `json:"provider"`
-		Model            string `json:"model"`
-		BaseURL          string `json:"base_url"`
-		Proxy            string `json:"proxy"`
-		APIKey           string `json:"api_key"`
-		ThinkingType     string `json:"thinking_type"`
-		ReasoningEffort  string `json:"reasoning_effort"`
-		ProfileID        *int64 `json:"profile_id"`         // 测已存 profile 时传入：api_key 为空则用它存的 key
-		Streaming        *bool  `json:"streaming"`          // 省略=流式，与保存 profile 时同一套默认
-		SessionHeaderKey string `json:"session_header_key"` // 非空=测试时也带该自定义会话头，值为一次性随机 session id
+		Provider              string  `json:"provider"`
+		Model                 string  `json:"model"`
+		BaseURL               string  `json:"base_url"`
+		Proxy                 string  `json:"proxy"`
+		APIKey                string  `json:"api_key"`
+		ThinkingType          string  `json:"thinking_type"`
+		ReasoningEffort       string  `json:"reasoning_effort"`
+		ProfileID             *int64  `json:"profile_id"`         // 测已存 profile 时传入：api_key 为空则用它存的 key
+		Streaming             *bool   `json:"streaming"`          // 省略=流式，与保存 profile 时同一套默认
+		SessionHeaderKey      string  `json:"session_header_key"` // 非空=测试时也带该自定义会话头，值为一次性随机 session id
+		Context1M             *bool   `json:"context_1m"`
+		UserAgent             *string `json:"user_agent"`
+		ModelInstructionsFile *string `json:"model_instructions_file"`
+		CodexConfigFile       *string `json:"codex_config_file"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1478,10 +1567,23 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	// 见 TestConnection)。opencode zen 等强制要求 x-opencode-session 的端点，缺了它
 	// 直接 400，必须在测试路径上也带上，否则"对话通、测试 400"。
 	cfg.SessionHeaderKey = req.SessionHeaderKey
+	if req.Context1M != nil {
+		cfg.Context1M = *req.Context1M
+	}
+	if req.UserAgent != nil {
+		cfg.UserAgent = *req.UserAgent
+	}
 	// API Key 解析优先级：表单输入 > 指定 profile 存的 key > 全局配置的 key。
 	// 已存 profile 的 key 不回传浏览器，所以测试已存配置时表单为空，需从 DB 取。
 	// 会话头名同理：表单未带时用已存 profile 的值兜底。
-	if req.ProfileID != nil && (cfg.APIKey == "" || cfg.SessionHeaderKey == "") {
+	instructionName := ""
+	if req.ModelInstructionsFile != nil {
+		instructionName = *req.ModelInstructionsFile
+	}
+	if req.CodexConfigFile != nil {
+		cfg.CodexConfigFile = *req.CodexConfigFile
+	}
+	if req.ProfileID != nil && (cfg.APIKey == "" || cfg.SessionHeaderKey == "" || req.UserAgent == nil || req.Context1M == nil || req.ModelInstructionsFile == nil || req.CodexConfigFile == nil) {
 		if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
 			if cfg.APIKey == "" {
 				cfg.APIKey = p.APIKey
@@ -1489,7 +1591,38 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 			if cfg.SessionHeaderKey == "" {
 				cfg.SessionHeaderKey = p.SessionHeaderKey
 			}
+			if req.UserAgent == nil {
+				cfg.UserAgent = p.UserAgent
+			}
+			if req.Context1M == nil {
+				cfg.Context1M = p.Context1M
+			}
+			if req.ModelInstructionsFile == nil {
+				instructionName = p.ModelInstructionsFile
+			}
+			if req.CodexConfigFile == nil {
+				cfg.CodexConfigFile = p.CodexConfigFile
+			}
 		}
+	}
+	if !codexModelInstructionsEnabled(cfg.Provider(), cfg.UserAgent) {
+		instructionName = ""
+		cfg.CodexConfigFile = ""
+	}
+	if cfg.CodexConfigFile != "" {
+		if instructionName != "" {
+			writeErr(w, http.StatusBadRequest, "Codex 配置指令与手动指令文件不能同时启用")
+			return
+		}
+		if _, err := validateCodexInstructionsSource(cfg.CodexConfigFile); err != nil {
+			writeModelInstructionsError(w, err)
+			return
+		}
+	}
+	s.applyModelInstructionsConfig(&cfg, instructionName, cfg.CodexConfigFile)
+	if cfg.ConfigError != nil {
+		writeErr(w, http.StatusBadRequest, cfg.ConfigError.Error())
+		return
 	}
 	if cfg.APIKey == "" {
 		s.cfgMu.Lock()

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/sidequestion"
@@ -41,7 +42,25 @@ type sideQuestionState struct {
 }
 
 func sideModel(cfg agent.Config, id int64, name string) sidequestion.Model {
-	b, _ := json.Marshal([]any{cfg.Format, cfg.BaseURL, cfg.Model, cfg.ThinkingType, cfg.ReasoningEffort, cfg.Stream, cfg.MaxTokensField, cfg.SessionHeaderKey})
+	instructionHash := ""
+	if cfg.ModelInstructionsFile != "" {
+		if content, err := config.ReadInstructionsTextFile(cfg.ModelInstructionsFile); err == nil {
+			sum := sha256.Sum256([]byte(content))
+			instructionHash = hex.EncodeToString(sum[:])
+		}
+	}
+	if cfg.CodexConfigFile != "" {
+		if loaded, err := config.LoadCodexInstructions(cfg.CodexConfigFile); err == nil {
+			raw, _ := json.Marshal([]string{loaded.ConfigPath, loaded.ModelInstructionsPath, loaded.BaseInstructions, loaded.DeveloperInstructions})
+			sum := sha256.Sum256(raw)
+			instructionHash = hex.EncodeToString(sum[:])
+		}
+	}
+	configError := ""
+	if cfg.ConfigError != nil {
+		configError = cfg.ConfigError.Error()
+	}
+	b, _ := json.Marshal([]any{cfg.Format, cfg.BaseURL, cfg.Model, cfg.ThinkingType, cfg.ReasoningEffort, cfg.Stream, cfg.MaxTokensField, cfg.SessionHeaderKey, cfg.Context1M, cfg.UserAgent, cfg.ModelInstructionsFile, instructionHash, cfg.CodexConfigFile, configError})
 	h := sha256.Sum256(b)
 	return sidequestion.Model{ProfileID: id, Name: name, Format: string(cfg.Format), Model: cfg.Model, Identity: hex.EncodeToString(h[:]), Streaming: cfg.Stream, WindowTokens: cfg.CompactionWindow()}
 }

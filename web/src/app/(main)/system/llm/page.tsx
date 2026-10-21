@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { ModelInstructionsFiles } from "@/components/model-instructions-files";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -56,6 +57,19 @@ const MAX_TOKENS_FIELD_HINTS: Record<string, string> = {
   anthropic: "仅 openai 格式可选。Anthropic 的字段名固定为 max_tokens。",
   "openai-responses": "仅 openai 格式可选。Responses API 的字段名固定为 max_output_tokens。",
 };
+const USER_AGENT_DEFAULT = "default";
+const USER_AGENT_PRESETS: { value: string; label: string }[] = [
+  { value: USER_AGENT_DEFAULT, label: "Go 默认（不覆盖）" },
+  { value: "codex", label: "Codex（Responses 兼容）" },
+  { value: "claude-code", label: "Claude Code" },
+  { value: "custom", label: "自定义" },
+];
+function userAgentPresetFor(value: string) {
+  if (value === "") return USER_AGENT_DEFAULT;
+  if (value === "codex") return "codex";
+  if (value === "claude-code") return "claude-code";
+  return "custom";
+}
 const EFFORT_LEVELS: { value: string; label: string }[] = [
   { value: NONE, label: "不发送（默认）" },
   { value: "low", label: "low" },
@@ -320,6 +334,13 @@ function ProfileSheet({
   const [rps, setRps] = React.useState("0");
   const [rpm, setRpm] = React.useState("0");
   const [cw, setCw] = React.useState("0"); // 上下文窗口(K tokens);0=默认200K
+  const [context1m, setContext1m] = React.useState(false);
+  const [userAgentPreset, setUserAgentPreset] = React.useState(USER_AGENT_DEFAULT);
+  const [userAgent, setUserAgent] = React.useState("");
+  const [modelInstructionsFile, setModelInstructionsFile] = React.useState("");
+  const [modelInstructionsFiles, setModelInstructionsFiles] = React.useState<string[]>([]);
+  const [codexConfigFile, setCodexConfigFile] = React.useState("");
+  const codexResponses = format === "openai-responses" && userAgentPreset === "codex";
   const [thinkingType, setThinkingType] = React.useState(NONE);
   const [effort, setEffort] = React.useState(NONE);
   const [priority, setPriority] = React.useState("0"); // 轮询顺位;越大越先
@@ -347,6 +368,13 @@ function ProfileSheet({
     setRps(String(profile?.rate_per_second ?? 0));
     setRpm(String(profile?.rate_per_minute ?? 0));
     setCw(String(profile?.context_window_k ?? 0));
+    const storedUA = profile?.user_agent?.trim() ?? "";
+    setContext1m(profile?.context_1m ?? false);
+    setUserAgent(storedUA);
+    setUserAgentPreset(userAgentPresetFor(storedUA));
+    setModelInstructionsFile(profile?.model_instructions_file ?? "");
+    setModelInstructionsFiles(profile?.model_instructions_files ?? []);
+    setCodexConfigFile(profile?.codex_config_file ?? "");
     setThinkingType(fromStore(profile?.thinking_type));
     setEffort(fromStore(profile?.reasoning_effort));
     setPriority(String(profile?.priority ?? 0));
@@ -369,7 +397,15 @@ function ProfileSheet({
     setLoadingModels(true);
     setModels([]);
     try {
-      const r = await api.fetchLLMModels(format, baseUrl, apiKey, proxy, profileId);
+      const r = await api.fetchLLMModels(
+        format,
+        baseUrl,
+        apiKey,
+        proxy,
+        profileId,
+        format === "anthropic" && context1m,
+        userAgent.trim(),
+      );
       if (r.ok && r.models && r.models.length > 0) {
         setModels(r.models);
         setModelsOpen(true);
@@ -401,6 +437,10 @@ function ProfileSheet({
         profileId,
         streaming,
         sessionHeaderKey.trim(),
+        format === "anthropic" && context1m,
+        userAgent.trim(),
+        codexResponses && !codexConfigFile.trim() ? modelInstructionsFile : "",
+        codexResponses ? codexConfigFile.trim() : "",
       );
       // 回复内容一并展示：看得见模型确实说了话，才算和会话里跑通是一回事。
       if (r.ok)
@@ -444,6 +484,11 @@ function ProfileSheet({
         // 后端也会再做一次同样的归一化，这里只是别让 UI 送出自相矛盾的值。
         max_tokens_field: format === "openai" ? toStore(maxTokensField) : "",
         session_header_key: sessionHeaderKey.trim(),
+        context_1m: format === "anthropic" && context1m,
+        user_agent: userAgent.trim(),
+        model_instructions_file: codexResponses && !codexConfigFile.trim() ? modelInstructionsFile : "",
+        model_instructions_files: modelInstructionsFiles,
+        codex_config_file: codexResponses ? codexConfigFile.trim() : "",
         retry,
       });
       if (isNew) toast.success(`已新建：${name.trim()}（在卡片上「设为激活」以启用）`);
@@ -635,6 +680,73 @@ function ProfileSheet({
           <div className="grid gap-3 rounded-lg border p-3">
             <div className="flex items-center justify-between gap-4">
               <div className="grid gap-0.5">
+                <Label className="text-sm">Anthropic 1M 上下文</Label>
+                <p className="text-muted-foreground text-xs">
+                  仅 Anthropic 格式生效，发送 context-1m-2025-08-07 beta header。需要模型与中转服务支持 1M。
+                </p>
+              </div>
+              <Switch
+                checked={format === "anthropic" && context1m}
+                onCheckedChange={setContext1m}
+                disabled={format !== "anthropic"}
+                aria-label="Anthropic 1M 上下文"
+              />
+            </div>
+            <div className="grid gap-2 border-t pt-3">
+              <Label className="text-sm">User-Agent</Label>
+              <Select
+                value={userAgentPreset}
+                onValueChange={(v) => {
+                  setUserAgentPreset(v);
+                  if (v === USER_AGENT_DEFAULT) setUserAgent("");
+                  else if (v === "codex" || v === "claude-code") setUserAgent(v);
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {USER_AGENT_PRESETS.map((o) => (
+                    <SelectItem key={o.value} value={o.value}>
+                      {o.value === "codex" && format !== "openai-responses" ? "Codex" : o.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {userAgentPreset === "custom" && (
+                <Input
+                  className="font-mono"
+                  placeholder="例如 MyClient/1.0"
+                  value={userAgent}
+                  onChange={(e) => setUserAgent(e.target.value)}
+                />
+              )}
+              <p className="text-muted-foreground text-xs">
+                默认保留 Go HTTP 客户端行为；预设发送带版本号的客户端标识。
+                {codexResponses &&
+                  " Codex 模式使用兼容请求格式，始终以流式连接上游；关闭流式时在本地汇总结果。输出上限由上游决定。"}
+              </p>
+            </div>
+          </div>
+
+          <ModelInstructionsFiles
+            key={profile?.id ?? "new"}
+            open={open}
+            enabled={codexResponses}
+            activeFile={modelInstructionsFile}
+            registeredFiles={modelInstructionsFiles}
+            codexConfigFile={codexConfigFile}
+            savedCodexConfigFile={profile?.codex_config_file ?? ""}
+            onChange={(active, files, codexConfig) => {
+              setModelInstructionsFile(active);
+              setModelInstructionsFiles(files);
+              setCodexConfigFile(codexConfig);
+            }}
+          />
+
+          <div className="grid gap-3 rounded-lg border p-3">
+            <div className="flex items-center justify-between gap-4">
+              <div className="grid gap-0.5">
                 <Label htmlFor="p-priority" className="text-sm">
                   轮询优先级
                 </Label>
@@ -664,9 +776,9 @@ function ProfileSheet({
               <div className="grid gap-0.5">
                 <Label className="text-sm">流式输出 · streaming</Label>
                 <p className="text-muted-foreground text-xs">
-                  开启（默认）走流式 SSE，有运行中实时进度与实时 token 计数。 关闭则走真·非流式（stream:false，
-                  一次性返回完整响应）——可绕开部分网关糟糕的 SSE 实现（空帧 / 思考字段丢帧），
-                  代价是失去运行中的实时进度。
+                  {codexResponses
+                    ? "开启时实时显示输出；关闭时在本地汇总后显示。Codex 接口始终使用流式 SSE 连接。"
+                    : "开启（默认）走流式 SSE，有运行中实时进度与实时 token 计数。关闭则走非流式（stream:false，一次性返回完整响应），可绕开部分网关的 SSE 问题，代价是失去运行中的实时进度。"}
                 </p>
               </div>
               <Switch checked={streaming} onCheckedChange={setStreaming} aria-label="流式输出" />
@@ -680,15 +792,16 @@ function ProfileSheet({
                   输出上限 · max tokens
                 </Label>
                 <p className="text-muted-foreground text-xs">
-                  单次回复最多生成多少 token，随每次请求发出。0（默认）= 不发送该字段，由服务端默认值决定。
-                  这与上面的「上下文窗口」是两回事：那是模型总容量，只在本地用来算压缩阈值。
-                  设太小会让推理模型在思考阶段就被截断，一个字答案都出不来。
+                  {codexResponses
+                    ? "Codex 模式不发送输出上限参数，单次回复上限由上游决定。"
+                    : "单次回复最多生成多少 token，随每次请求发出。0（默认）= 不发送该字段，由服务端默认值决定。上下文窗口用于本地压缩阈值；输出上限设太小会让推理模型在思考阶段就被截断。"}
                 </p>
               </div>
               <Input
                 id="p-max-tokens"
                 type="number"
                 min={0}
+                disabled={codexResponses}
                 className="w-28 shrink-0"
                 value={maxTokens}
                 onChange={(e) => setMaxTokens(e.target.value)}

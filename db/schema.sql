@@ -371,6 +371,13 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     rate_per_second  DOUBLE PRECISION NOT NULL DEFAULT 0,
     rate_per_minute  DOUBLE PRECISION NOT NULL DEFAULT 0,
     context_window_k INTEGER NOT NULL DEFAULT 0,
+    -- Anthropic 1M context beta toggle and outbound User-Agent override.
+    context_1m       BOOLEAN NOT NULL DEFAULT false,
+    user_agent       TEXT NOT NULL DEFAULT '',
+    -- 独立模型基础指令文件：只存文件名，多文件列表中仅一个启用；空=provider默认。
+    model_instructions_file  TEXT NOT NULL DEFAULT '',
+    model_instructions_files JSONB NOT NULL DEFAULT '[]'::jsonb,
+    codex_config_file TEXT NOT NULL DEFAULT '',
     -- 思考参数拆成两个独立字段：thinking_type=思考开关(''/disabled/enabled)，
     -- reasoning_effort=思考强度(''/low/medium/high/xhigh/max)，互不牵连。
     reasoning_effort TEXT NOT NULL DEFAULT '',
@@ -434,6 +441,13 @@ ALTER TABLE llm_profiles ADD  CONSTRAINT llm_profiles_max_tokens_check
     CHECK (max_tokens >= 0);
 -- 自定义会话头名；补旧库。默认 '' = 不发送，旧配置行为不变。
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS session_header_key TEXT NOT NULL DEFAULT '';
+-- Anthropic 1M context beta and outbound User-Agent; defaults preserve old behavior.
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS context_1m BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS user_agent TEXT NOT NULL DEFAULT '';
+-- Model base-instruction files are independent of Agent prompts. Add for old databases.
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS model_instructions_file TEXT NOT NULL DEFAULT '';
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS model_instructions_files JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS codex_config_file TEXT NOT NULL DEFAULT '';
 
 -- 单配置的重试覆盖（见 docs/LLM重试设计.md）。三组各自一对「次数 + 固定间隔」，
 -- 语义统一：次数 0=沿用全局默认、-1=关闭该层重试、>0=用该值；间隔 0=沿用该层的

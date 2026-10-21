@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/compaction"
@@ -58,10 +59,12 @@ type Config struct {
 	// 非流式(发 stream:false,一次性拿完整 JSON,走 Provider.Complete)。非流式可绕开
 	// 某些网关糟糕的 SSE 实现(空帧、思考字段丢帧),代价是失去运行中的实时进度/实时
 	// token 计数。映射为 agentcore.Options.NonStreaming = !Stream。
+	// The Codex Responses preset buffers SSE locally when Stream is false.
 	Stream bool
 	// MaxTokens 是单次回复的输出上限(token)。0 = 不发送该字段,由服务端默认值决定
 	// (历史行为)。与 ContextWindowK 不同:后者是模型总容量,只在本地用来算压缩阈值,
 	// 不出现在请求里;本值随每次请求发出。映射为 agentcore.Options.MaxTokens。
+	// Codex Responses does not send an output cap; the upstream controls it.
 	MaxTokens int
 	// MaxTokensField 选择 MaxTokens 用哪个请求字段名,仅对 format=openai 生效:
 	//   "" = max_tokens(默认); "max_completion_tokens" = 新字段。
@@ -74,6 +77,22 @@ type Config struct {
 	// 空 = 不发送。值由 transcript.WithSessionID 挂在请求 context 上,由 RoundTripper
 	// 读取填入,因此同一共享 provider 也能按会话发出不同的头值。
 	SessionHeaderKey string
+	// Context1M requests Anthropic's 1M context mode. It adds the documented
+	// context-1m beta header to Anthropic Messages requests only.
+	Context1M bool
+	// UserAgent overrides the outbound HTTP User-Agent. Empty preserves the
+	// transport's default; codex and claude-code select versioned presets.
+	// The codex preset also uses the Codex Responses wire format when applicable.
+	UserAgent string
+	// ModelInstructionsFile replaces the Codex mode's default model preamble.
+	// The agent's own system prompt remains a separate segment after it.
+	ModelInstructionsFile string
+	// CodexConfigFile opts into loading instruction settings from one Codex
+	// config.toml. It does not change the profile's endpoint, model or credentials.
+	CodexConfigFile string
+	// ConfigError retains a local configuration error at the provider boundary.
+	// It is not persisted; requests must fail instead of falling back silently.
+	ConfigError error
 	// Retry 是该配置解析后的重试参数(profile 覆盖 → 全局策略 → 内置默认,由
 	// server 侧解析)。三层的含义见 RetryConfig;零值 = 完全沿用内置默认。
 	Retry RetryConfig
@@ -106,6 +125,14 @@ const (
 	defaultWindowK = 200  // unset → assume a 200K window (Claude default)
 	minWindowK     = 32   // floor so effectiveWindow stays comfortably positive
 	maxWindowK     = 1000 // cap at 1M tokens (user request)
+)
+
+const (
+	// These presets use the client identifier/version syntax expected by relays.
+	// Profile values remain "codex" / "claude-code"; custom values pass through.
+	UserAgentCodex         = "codex_cli_rs/0.162.1"
+	UserAgentClaudeCode    = "claude-cli/2.1.109 (external, cli)"
+	anthropicContext1MBeta = "context-1m-2025-08-07"
 )
 
 // CompactionWindow returns the model context window in TOKENS for compaction
@@ -259,14 +286,51 @@ func (c Config) NewProvider() (llm.Provider, error) {
 // NewProviderWithLimiter reuses quota history across provider rebuilds. Callers
 // sharing a profile must retain the same limiter outside their provider cache.
 func (c Config) NewProviderWithLimiter(limiter *RequestLimiter) (llm.Provider, error) {
-	client, err := quotaAwareHTTPClient(c.Proxy, c.SessionHeaderKey)
+	if c.ConfigError != nil {
+		return nil, c.ConfigError
+	}
+	codexResponses := c.Format == llm.FormatOpenAIResponses && strings.EqualFold(strings.TrimSpace(c.UserAgent), "codex")
+	baseInstructions := ""
+	developerInstructions := ""
+	layeredInstructions := c.ModelInstructionsFile != "" || c.CodexConfigFile != ""
+	if layeredInstructions {
+		if !codexResponses {
+			return nil, fmt.Errorf("model instructions file requires OpenAI Responses with the Codex preset")
+		}
+		if c.ModelInstructionsFile != "" && c.CodexConfigFile != "" {
+			return nil, fmt.Errorf("select either a model instructions file or a Codex config.toml")
+		}
+		if c.CodexConfigFile != "" {
+			loaded, err := config.LoadCodexInstructions(c.CodexConfigFile)
+			if err != nil {
+				return nil, err
+			}
+			baseInstructions, developerInstructions = loaded.BaseInstructions, loaded.DeveloperInstructions
+		} else {
+			var err error
+			baseInstructions, err = readModelInstructionsFile(c.ModelInstructionsFile)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	client, err := quotaAwareHTTPClientWithOptions(c.Proxy, c.SessionHeaderKey, c.Format == llm.FormatAnthropic && c.Context1M, ResolveUserAgent(c.UserAgent))
 	if err != nil {
 		return nil, err
+	}
+	if codexResponses {
+		transport := client.Transport.(quotaAwareTransport)
+		transport.codexResponses = true
+		transport.modelInstructions = baseInstructions
+		transport.developerInstructions = developerInstructions
+		transport.layeredInstructions = layeredInstructions
+		client.Transport = transport
 	}
 	return c.newProvider(client, limiter)
 }
 
 func (c Config) newProvider(client *http.Client, limiter *RequestLimiter) (llm.Provider, error) {
+	codexResponses := c.Format == llm.FormatOpenAIResponses && strings.EqualFold(strings.TrimSpace(c.UserAgent), "codex")
 	if limiter == nil {
 		limiter = &RequestLimiter{}
 	}
@@ -293,9 +357,15 @@ func (c Config) newProvider(client *http.Client, limiter *RequestLimiter) (llm.P
 	lc.RetryInterval = c.Retry.ConnectInterval
 	lc.EmptyResponseRetries = c.Retry.EmptyAttempts
 	lc.EmptyResponseInterval = c.Retry.EmptyInterval
-	// Norma's limiter allows a full-window burst and excludes establishment
-	// retries. Enforce limits on HTTP attempts instead; do not also enable it.
-	return llm.NewProvider(lc)
+	// Retain RuoJi6 HTTP-attempt quotas around the local adapter.
+	provider, err := llm.NewProvider(lc)
+	if err != nil {
+		return nil, err
+	}
+	if codexResponses {
+		return codexResponsesProvider{Provider: provider}, nil
+	}
+	return provider, nil
 }
 
 // IsQuotaExhaustedMessage deliberately recognizes only explicit balance,
@@ -348,14 +418,38 @@ type quotaAwareTransport struct {
 	// carries; its value is the session id read from the request context. Empty
 	// disables it. See Config.SessionHeaderKey.
 	sessionHeaderKey string
+	// anthropicContext1M enables the Anthropic 1M context beta header.
+	anthropicContext1M bool
+	// userAgent, when non-empty, replaces the transport's default User-Agent.
+	userAgent string
+	// codexResponses adapts explicitly selected Codex Responses requests.
+	codexResponses        bool
+	modelInstructions     string
+	developerInstructions string
+	layeredInstructions   bool
 }
 
 func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Do not mutate the caller's headers or the body reused by SDK retries.
+	req = req.Clone(req.Context())
+	if t.codexResponses && req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/responses") {
+		if err := adaptCodexResponsesRequest(req, t.modelInstructions, t.developerInstructions, t.layeredInstructions); err != nil {
+			return nil, err
+		}
+	}
+	if t.anthropicContext1M && strings.Contains(req.URL.Path, "/messages") {
+		addHeaderToken(req.Header, "anthropic-beta", anthropicContext1MBeta)
+	}
+	if t.userAgent != "" {
+		req.Header.Set("User-Agent", t.userAgent)
+	}
 	// Custom session-id header: name is user-configured, value is THIS run's
 	// session id (norma stashes it on the context via transcript.WithSessionID).
 	// Stable across a session's turns and distinct across sessions — exactly what
 	// a session-keyed prompt cache wants. Skipped when no session id is present.
-	if t.sessionHeaderKey != "" {
+	// Codex already mapped its session-id to the UUID used by prompt_cache_key.
+	// Do not replace that protocol header with the host's raw session name.
+	if t.sessionHeaderKey != "" && !(t.codexResponses && strings.EqualFold(t.sessionHeaderKey, "session-id")) {
 		if sid := transcript.SessionIDFrom(req.Context()); sid != "" {
 			req.Header.Set(t.sessionHeaderKey, sid)
 		}
@@ -393,6 +487,50 @@ func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error
 	return resp, nil
 }
 
+func addHeaderToken(header http.Header, name, token string) {
+	parts := make([]string, 0, 2)
+	for _, value := range header.Values(name) {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			duplicate := false
+			for _, existing := range parts {
+				if strings.EqualFold(existing, part) {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				parts = append(parts, part)
+			}
+		}
+	}
+	for _, existing := range parts {
+		if strings.EqualFold(existing, token) {
+			header.Set(name, strings.Join(parts, ","))
+			return
+		}
+	}
+	header.Set(name, strings.Join(append(parts, token), ","))
+}
+
+// ResolveUserAgent expands a saved preset or preserves a custom HTTP value.
+// Model-list requests use the same resolution as completion requests.
+func ResolveUserAgent(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "default", "go", "go-http-client":
+		return ""
+	case "codex":
+		return UserAgentCodex
+	case "claude-code", "claude code", "claude_code":
+		return UserAgentClaudeCode
+	default:
+		return strings.TrimSpace(value)
+	}
+}
+
 // requestBodySnapshot copies an outgoing request body without consuming it.
 // norma builds every model request from a *bytes.Reader, so net/http populates
 // GetBody and the copy has no effect on what gets sent.
@@ -412,7 +550,13 @@ func requestBodySnapshot(req *http.Request) string {
 	return string(b)
 }
 
+// quotaAwareHTTPClient keeps the historical helper signature used by tests and
+// callers that only need proxy/session-header behavior.
 func quotaAwareHTTPClient(proxy, sessionHeaderKey string) (*http.Client, error) {
+	return quotaAwareHTTPClientWithOptions(proxy, sessionHeaderKey, false, "")
+}
+
+func quotaAwareHTTPClientWithOptions(proxy, sessionHeaderKey string, anthropicContext1M bool, userAgent string) (*http.Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	proxy = strings.TrimSpace(proxy)
 	if proxy == "" {
@@ -431,7 +575,12 @@ func quotaAwareHTTPClient(proxy, sessionHeaderKey string) (*http.Client, error) 
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
-	return &http.Client{Transport: quotaAwareTransport{base: transport, sessionHeaderKey: strings.TrimSpace(sessionHeaderKey)}}, nil
+	return &http.Client{Transport: quotaAwareTransport{
+		base:               transport,
+		sessionHeaderKey:   strings.TrimSpace(sessionHeaderKey),
+		anthropicContext1M: anthropicContext1M,
+		userAgent:          strings.TrimSpace(userAgent),
+	}}, nil
 }
 
 // logTestConnection prints the raw HTTP status code(s) and response body of a
