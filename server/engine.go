@@ -1200,31 +1200,22 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	}
 	// terminal分流：撞步数上限 ≠ 完成。max_turns→exhausted（规划者据此知道这个方向
 	// 试过但没真正做完、需换角度，而非当成已覆盖永久跳过）；出错→blocked；正常→done。
-	state := "done"
-	switch {
-	case reason == harness.ReasonSettlementRequested || e.isCompleting(t.ID):
-		state = "exhausted"
-	case err != nil:
-		state = "blocked"
-	case reason == harness.ReasonMaxTurns:
-		state = "exhausted"
-		log.Printf("[worker %s] intent %d 撞步数上限(exhausted)，本次写回 %s", name, intent.ID, wrote)
-	case reason == harness.ReasonTimeout:
-		state = "exhausted"
-		log.Printf("[worker %s] intent %d 运行超时(exhausted)，收尾后写回 %s", name, intent.ID, wrote)
+	state, failure := workerOutcome(reason, err, e.isCompleting(t.ID))
+	if failure.Kind == "settlement_timeout" {
+		log.Printf("[worker %s] intent %d 收尾预算耗尽(exhausted)，已保存产物保留、收尾未确认完成，本次写回 %s", name, intent.ID, wrote)
+	} else if err == nil && (reason == harness.ReasonTimeout || reason == harness.ReasonMaxTurns) {
+		log.Printf("[worker %s] intent %d 达到运行预算(exhausted)，收尾后写回 %s", name, intent.ID, wrote)
 	}
 	if state == "blocked" && isTaskLLMChainExhausted(err) {
 		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedLLMQuota)
 	} else {
-		failure := modelFailure(err)
 		if stateErr := t.Store.FinalizeIntentResult(intent.ID, state, failure.Kind, failure.Action); stateErr != nil {
 			log.Printf("[worker %s] task %s 意图 #%d 终态 %s 落库失败: %v", name, t.ID, intent.ID, state, stateErr)
 		} else if saved, readErr := t.Store.GetNode(intent.ID); readErr == nil && saved != nil {
 			state = saved.State
 		}
 	}
-	if err != nil && workCtx.Err() == nil && !modelFailure(err).Retryable && !e.IsPaused(t.ID) && !e.isSettling(t.ID) {
-		failure := modelFailure(err)
+	if err != nil && workCtx.Err() == nil && failure.Kind != "settlement_timeout" && !failure.Retryable && !e.IsPaused(t.ID) && !e.isSettling(t.ID) {
 		e.pauseForReview(t, "模型故障分类："+failure.Kind+"；恢复动作："+failure.Action+"；原错误已保存在运行记录")
 	}
 	log.Printf("[worker %s] task %s 意图 #%d 结束: %s (写回 %s)", name, t.ID, intent.ID, state, wrote)

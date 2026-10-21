@@ -66,7 +66,8 @@ type Worker struct {
 	// runTimeout is the wall-clock budget for the main exploration of one intent
 	// (0 = unlimited). When it fires, the run is cut and a settlement round is
 	// forced so already-identified facts get written back instead of being lost.
-	runTimeout time.Duration
+	runTimeout          time.Duration
+	settlementTimeoutFn func() time.Duration
 	// extraTools are host-provided tools (e.g. traffic query, oast) appended to
 	// the worker's graph write-back tools.
 	extraTools []actool.CoreTool
@@ -146,6 +147,19 @@ func (w *Worker) wantConstraints() bool { return w.injectConstraints == nil || w
 // so facts are never lost to a timeout. Safe to call before Execute.
 func (w *Worker) SetRunTimeout(run time.Duration) {
 	w.runTimeout = run
+}
+
+// Resolve the checkpoint-only deadline per run; changing settings must not
+// recreate providers or alter a run that is already in flight.
+func (w *Worker) SetSettlementTimeoutResolver(fn func() time.Duration) { w.settlementTimeoutFn = fn }
+
+func (w *Worker) settlementTimeout() time.Duration {
+	if w.settlementTimeoutFn != nil {
+		if d := w.settlementTimeoutFn(); d >= MinWorkerSettlementTimeout && d <= MaxWorkerSettlementTimeout {
+			return d
+		}
+	}
+	return DefaultWorkerSettlementTimeout
 }
 
 // settleWrapUpPrompt is injected by the SDK settlement phase when a worker hits its
@@ -433,7 +447,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
-	settle := workerCheckpointSettlement(tc.DeadlineUnix > 0, clamped)
+	settle := workerCheckpointSettlement(tc.DeadlineUnix > 0, clamped, w.settlementTimeout())
 	opts := agentcore.Options{
 		Provider:        w.prov,
 		SystemPrompt:    system,

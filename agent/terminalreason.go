@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -33,8 +34,8 @@ func (t *runTrace) done(id string) {
 var reasonHint = map[harness.TerminalReason]string{
 	harness.ReasonSettlementRequested: "收到任务收官请求，本轮仅整理并保存已有证据；未完成检查仍须经过终验，不能视为成功完成",
 	harness.ReasonCompleted:           "模型正常结束了本轮，但没有留下文字总结；事实和资产以本轮工具调用记录为准",
-	harness.ReasonMaxTurns:            "达到步数上限(MaxTurns)：SDK 已执行收尾并写回事实和资产，意图会标记为 exhausted，供规划者换方向继续，而不是作为失败处理",
-	harness.ReasonTimeout:             "达到单次运行的墙钟预算(MaxDuration)：到点会打断在跑的工具并就地进收尾，把已识别的事实和资产写回，意图会标记为 exhausted",
+	harness.ReasonMaxTurns:            "达到步数上限(MaxTurns)：转入受限收尾；已有写回保留，收尾是否完整须核对保存记录，意图标记为 exhausted 供规划者检查后继续",
+	harness.ReasonTimeout:             "达到单次运行的墙钟预算(MaxDuration)：转入受限收尾；已有写回保留，收尾是否完整须核对保存记录，未完成工作仍标记为 exhausted",
 	harness.ReasonModelError:          "模型或 API 调用失败（网络、鉴权、限流、供应商 5xx 等），重试用尽后意图标记为 blocked——传输层故障导致这条意图基本没真正探成；查其执行过程（get_worker_trace）后再决定重派或换法",
 	harness.ReasonBlockingLimit:       "上下文长度达到硬上限，请求在发出前被拦截；应收窄意图粒度或压缩工具返回",
 	harness.ReasonPromptTooLong:       "提示词过长且上下文压缩重试已经用尽，无法继续执行",
@@ -70,8 +71,16 @@ func terminalText(ctx context.Context, term *harness.Terminal, tr *runTrace) (st
 			stage = "工具执行阶段"
 		}
 		sum = "（运行被中断：" + short + "；停在" + stage + progressSuffix(term, tr) + "，未完成）"
-	} else if reason == harness.ReasonMaxTurns || reason == harness.ReasonTimeout {
-		sum = "（达到运行预算上限(" + string(reason) + ")，已收尾写回事实" + progressSuffix(term, tr) + "；本次无文字总结）"
+	} else if reason == harness.ReasonMaxTurns || reason == harness.ReasonTimeout || reason == harness.ReasonSettlementRequested {
+		if term.Err != nil {
+			phase := "收尾失败"
+			if errors.Is(term.Err, context.DeadlineExceeded) {
+				phase = "收尾阶段超时"
+			}
+			sum = "（运行进入收尾(" + string(reason) + ")，" + phase + progressSuffix(term, tr) + "；已保存记录保留，收尾未确认完成）"
+		} else {
+			sum = "（达到运行预算上限(" + string(reason) + ")，已结束收尾阶段" + progressSuffix(term, tr) + "；保存结果请核对记录）"
+		}
 	} else {
 		hint := terminalReasonHint(reason)
 		sum = "（无文字总结，终态 " + terminalReasonLabel(reason) + "：" + firstLine(hint, 80) + "）"
@@ -92,6 +101,12 @@ func terminalText(ctx context.Context, term *harness.Terminal, tr *runTrace) (st
 	}
 	if term.Err != nil {
 		fmt.Fprintf(&b, "- **底层错误**: `%v`\n", term.Err)
+	}
+	if term.Err != nil && (reason == harness.ReasonTimeout || reason == harness.ReasonMaxTurns || reason == harness.ReasonSettlementRequested) {
+		b.WriteString("- **收尾状态**: 未确认完成；仅已成功保存的记录有效，不代表全部检查完成。\n")
+		if strings.TrimSpace(term.Text) != "" {
+			b.WriteString("- **收尾前部分输出（不证明保存完整）**:\n\n" + term.Text + "\n\n")
+		}
 	}
 	if aborted && strings.TrimSpace(term.Text) != "" {
 		b.WriteString("- **取消前已生成的部分输出**:\n\n")

@@ -45,6 +45,8 @@ export default function SystemSettingsPage() {
   const [pyInterp, setPyInterp] = React.useState("");
   const [workers, setWorkers] = React.useState("3");
   const [savingWorkers, setSavingWorkers] = React.useState(false);
+  const [settlementSeconds, setSettlementSeconds] = React.useState("300");
+  const [savingSettlement, setSavingSettlement] = React.useState(false);
   const [reviewSeconds, setReviewSeconds] = React.useState("180");
   const [reviewTurns, setReviewTurns] = React.useState("16");
   const [savingReview, setSavingReview] = React.useState(false);
@@ -71,6 +73,7 @@ export default function SystemSettingsPage() {
     setPyInterp(s.python_interpreter ?? "");
     setWorkers(String(s.workers ?? 3));
     setReviewSeconds(String(s.completion_review_seconds ?? 180));
+    setSettlementSeconds(String(s.worker_settlement_seconds ?? 300));
     setReviewTurns(String(s.completion_review_turns ?? 16));
     setInjectPlanner(s.constraints_inject_planner !== false);
     setInjectWorker(s.constraints_inject_worker !== false);
@@ -92,6 +95,23 @@ export default function SystemSettingsPage() {
       })
       .catch((e) => toast.error("保存失败：" + (e as Error).message))
       .finally(() => setSavingWorkers(false));
+  };
+
+  const saveSettlement = async () => {
+    const seconds = Number(settlementSeconds);
+    if (!Number.isInteger(seconds) || seconds < 15 || seconds > 1800) {
+      toast.error("Worker 收尾预算须为 15–1800 秒");
+      return;
+    }
+    setSavingSettlement(true);
+    try {
+      apply(await api.setSettings({ worker_settlement_seconds: seconds }));
+      toast.success("已保存收尾预算，对下一次 Worker 运行生效");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存失败");
+    } finally {
+      setSavingSettlement(false);
+    }
   };
 
   const saveReview = async () => {
@@ -803,6 +823,26 @@ export default function SystemSettingsPage() {
           </CardContent>
         </Card>
 
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="text-base">Worker 收尾保存</CardTitle>
+            <CardDescription>
+              默认 300 秒。仅限制运行预算耗尽后的收尾阶段，不改变 Worker 主执行预算或收尾轮数。
+              收尾期间只允许保存已有结果，仍受任务截止时间、暂停和关闭约束；对下一次 Worker 运行生效。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center gap-3">
+              <Label htmlFor="worker-settlement-seconds">收尾预算（秒）</Label>
+              <Input id="worker-settlement-seconds" className="w-32" type="number" min={15} max={1800}
+                value={settlementSeconds} disabled={!loaded || savingSettlement}
+                onChange={(event) => setSettlementSeconds(event.target.value)} />
+            </div>
+            <Button disabled={!loaded || savingSettlement} onClick={saveSettlement}>
+              {savingSettlement ? "正在保存…" : "保存"}
+            </Button>
+          </CardContent>
+        </Card>
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>
             <CardTitle className="text-base">任务最终复核</CardTitle>

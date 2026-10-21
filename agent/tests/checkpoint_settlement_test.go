@@ -16,7 +16,7 @@ import (
 	"github.com/Autumn-27/norma/tool"
 )
 
-func TestWorkerSettlementSavesAssetsAfterOld30SecondWindow(t *testing.T) {
+func TestWorkerSettlementSavesAssetsAfterOld60SecondWindow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		calls, saved, probes := 0, 0, 0
 		provider := completionReviewProvider{stream: func(ctx context.Context, req llm.CompletionRequest, yield func(llm.StreamEvent, error) bool) {
@@ -27,7 +27,7 @@ func TestWorkerSettlementSavesAssetsAfterOld30SecondWindow(t *testing.T) {
 				}
 			}
 			if calls == 1 {
-				time.Sleep(35 * time.Second)
+				time.Sleep(75 * time.Second)
 				if ctx.Err() != nil {
 					yield(llm.StreamEvent{}, ctx.Err())
 					return

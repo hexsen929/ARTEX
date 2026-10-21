@@ -157,7 +157,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 				}
 				flush() // flush any trailing thinking / non-final text
 				sum, detail := terminal.Text, terminal.Text
-				if sum == "" || terminal.Reason == harness.ReasonAbortedTools || terminal.Reason == harness.ReasonAbortedStreaming {
+				if sum == "" || terminal.Reason == harness.ReasonAbortedTools || terminal.Reason == harness.ReasonAbortedStreaming || terminal.Err != nil && (terminal.Reason == harness.ReasonTimeout || terminal.Reason == harness.ReasonMaxTurns || terminal.Reason == harness.ReasonSettlementRequested) {
 					sum, detail = terminalText(ctx, &terminal, lastTool)
 				}
 				if errors.Is(terminal.Err, errEmptyModelResponse) {

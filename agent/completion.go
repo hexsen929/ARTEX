@@ -22,13 +22,22 @@ type CompletionProposal struct {
 	mu        sync.Mutex
 }
 
-func workerCheckpointSettlement(hasTaskDeadline, clamped bool) *harness.Settlement {
+const (
+	DefaultWorkerSettlementTimeout = 5 * time.Minute
+	MinWorkerSettlementTimeout     = 15 * time.Second
+	MaxWorkerSettlementTimeout     = 30 * time.Minute
+)
+
+func workerCheckpointSettlement(hasTaskDeadline, clamped bool, budget ...time.Duration) *harness.Settlement {
 	settle := wrapupSettlement("worker", []string{"Bash"})
 	if hasTaskDeadline {
 		settle = wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
 	}
 	settle.AllowedTools = append([]string(nil), workerCheckpointTools...)
-	settle.MaxDuration = 60 * time.Second
+	settle.MaxDuration = DefaultWorkerSettlementTimeout
+	if len(budget) > 0 && budget[0] >= MinWorkerSettlementTimeout && budget[0] <= MaxWorkerSettlementTimeout {
+		settle.MaxDuration = budget[0]
+	}
 	settle.RequestPrompt = "任务正在申请收官。立即停止新的探测、扩展和委派，仅整理已经获得的证据，使用 record_fact/report_finding/insert_assets 保存事实、漏洞和已识别资产；逐项说明已完成、未完成与受阻检查，然后结束。不要将被停止的检查写成已完成。"
 	return settle
 }

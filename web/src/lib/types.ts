@@ -984,6 +984,7 @@ export interface TrafficHost {
 
 // ---- App settings (runtime toggles) ----
 export interface Settings {
+  worker_settlement_seconds?: number;
   completion_review_seconds?: number;
   completion_review_turns?: number;
   traffic_capture: boolean;
