@@ -286,8 +286,8 @@ func TestSkipsMembersTooSmallForRequest(t *testing.T) {
 	}
 }
 
-// Everything tripped: probing the head beats stalling the engine outright.
-func TestAllTrippedStillProbesHead(t *testing.T) {
+// All open breakers must be respected until their cooling window expires.
+func TestAllTrippedFailsFastWithoutHTTP(t *testing.T) {
 	a, b := okProv("a", "a"), okProv("b", "b")
 	reg := NewRegistry(nil, nil)
 	reg.Trip(1, "402", true)
@@ -295,12 +295,10 @@ func TestAllTrippedStillProbesHead(t *testing.T) {
 	p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, reg)
 
 	got, err := drain(p.Stream(context.Background(), llm.CompletionRequest{}))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrExhausted) || got != "" || a.calls != 0 || b.calls != 0 {
+		t.Fatalf("open circuit sent request: text=%q err=%v calls=%d/%d", got, err, a.calls, b.calls)
 	}
-	if got != "a" || a.calls != 1 {
-		t.Fatalf("text=%q a.calls=%d — want the head probed as a last resort", got, a.calls)
-	}
+
 }
 
 func TestExhaustedChainReportsClearly(t *testing.T) {

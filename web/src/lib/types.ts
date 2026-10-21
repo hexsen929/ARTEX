@@ -414,6 +414,9 @@ export type HintState = "active" | "consumed";
 export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves" | "covers";
 
 export interface TaskNode {
+  verification_status?: FindingVerification;
+  blocked_reason?: string;
+  worker_result?: { code: string; message: string; at: string };
   id: string;
   type: ExploreKind;
   payload?: string;
@@ -472,6 +475,8 @@ export interface TaskConstraint {
 export type Severity = "critical" | "high" | "medium" | "low";
 
 // 漏洞处置状态:待处理 / 处理中 / 已确认 / 已处理 / 已修复 / 误报 / 忽略 / 重复 / 风险接受。
+export type FindingVerification = "confirmed" | "unverified" | "blocked" | "rejected" | "legacy";
+
 export type FindingStatus =
   | "pending"
   | "in_progress"
@@ -491,6 +496,8 @@ export interface FindingAsset {
 }
 
 export interface Finding {
+  verification_status?: FindingVerification;
+  verification_note?: string;
   case_id?: string;
   traffic_count?: number;
   evidence_version?: number;
@@ -553,6 +560,11 @@ export interface FindingDeepenResponse {
 
 // FindingStats 是发现全表聚合(统计卡 + 漏洞类型下拉),服务端计算,不受分页影响。
 export interface FindingStats {
+  verified?: number;
+  unverified?: number;
+  verification_blocked?: number;
+  rejected?: number;
+  legacy?: number;
   distinct?: FindingDistinctStats;
   total: number;
   pending: number;
@@ -575,6 +587,7 @@ export interface FindingTaskOption {
 
 // FindingQuery 是发现列表分页/筛选/排序参数。
 export interface FindingQuery {
+  verification?: "all" | FindingVerification;
   page: number;
   pageSize: number;
   severity?: "all" | Severity;

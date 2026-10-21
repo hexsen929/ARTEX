@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/config"
+	"github.com/Autumn-27/artex/llmguard"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/compaction"
@@ -363,9 +364,9 @@ func (c Config) newProvider(client *http.Client, limiter *RequestLimiter) (llm.P
 		return nil, err
 	}
 	if codexResponses {
-		return codexResponsesProvider{Provider: provider}, nil
+		return llmguard.Wrap(codexResponsesProvider{Provider: provider}), nil
 	}
-	return provider, nil
+	return llmguard.Wrap(provider), nil
 }
 
 // IsQuotaExhaustedMessage deliberately recognizes only explicit balance,
@@ -461,6 +462,9 @@ func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error
 	capt := llmrec.CaptureFrom(req.Context())
 	capt.SetRequest(requestBodySnapshot(req))
 
+	if err := llmguard.TakeHTTP(req.Context()); err != nil {
+		return nil, err
+	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil || resp == nil {
 		return resp, err
@@ -470,7 +474,7 @@ func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error
 	// capture before being replaced.
 	resp.Body = capt.TeeResponse(resp.StatusCode, resp.Body)
 
-	if resp.StatusCode != http.StatusTooManyRequests {
+	if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode != http.StatusServiceUnavailable {
 		return resp, nil
 	}
 	body, readErr := io.ReadAll(resp.Body)
@@ -480,7 +484,10 @@ func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if readErr != nil {
 		return resp, nil
 	}
-	if IsQuotaExhaustedMessage(string(body)) {
+	if resp.StatusCode == http.StatusServiceUnavailable && llmguard.MissingModel(string(body)) {
+		resp.StatusCode = http.StatusNotFound
+		resp.Status = "404 Not Found"
+	} else if resp.StatusCode == http.StatusTooManyRequests && IsQuotaExhaustedMessage(string(body)) {
 		resp.StatusCode = http.StatusPaymentRequired
 		resp.Status = "402 Payment Required"
 	}

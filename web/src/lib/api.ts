@@ -237,6 +237,7 @@ function findingFilterParams(q: Omit<FindingQuery, "page" | "pageSize">): URLSea
   const p = new URLSearchParams();
   if (q.severity && q.severity !== "all") p.set("severity", q.severity);
   if (q.status && q.status !== "all") p.set("status", q.status);
+  if (q.verification && q.verification !== "all") p.set("verification", q.verification);
   if (q.vulnclass && q.vulnclass !== "all") p.set("vulnclass", q.vulnclass);
   if (q.task && q.task !== "all") p.set("task_id", q.task);
   if (q.query?.trim()) p.set("q", q.query.trim());
@@ -770,6 +771,8 @@ export const api = {
   },
   // 漏洞链路:该漏洞节点回溯到任务初始节点的子图(节点 + 关系)。
   findingLineage: (id: string) => get<{ nodes: TaskNode[]; edges: Edge[] }>(`/exploration/findings/${id}/lineage`),
+  setFindingVerification: (id: string, status: string, note: string, version: number, additional_evidence?: string) =>
+    patch<Finding>(`/exploration/findings/${id}/verification`, { status, note, version, additional_evidence }),
   setFindingStatus: (id: string, status: FindingStatus) => patch<Finding>(`/exploration/findings/${id}`, { status }),
   setFindingSeverity: (id: string, severity: Severity) => patch<Finding>(`/exploration/findings/${id}`, { severity }),
   // 一次保存漏洞的名称/类别/严重等级(发现列表行内编辑用),只传出现的字段。
@@ -1130,8 +1133,7 @@ export const api = {
   }) => post<{ id: number }>("/llm/profiles", p),
   deleteLLMProfile: (id: string) => del<{ deleted: number }>(`/llm/profiles/${id}`),
   activateLLMProfile: (id: string) => post<{ ok: boolean }>("/llm/profiles/active", { id: Number(id) }),
-  llmInstructionFiles: () =>
-    get<{ directory: string; files: LLMInstructionFileInfo[] }>("/llm/instruction-files"),
+  llmInstructionFiles: () => get<{ directory: string; files: LLMInstructionFileInfo[] }>("/llm/instruction-files"),
   inspectCodexConfig: (path: string) => post<CodexInstructionsSource>("/llm/codex-config/inspect", { path }),
   createLLMInstructionFile: (name: string, content: string) =>
     post<{ file: LLMInstructionFileInfo }>("/llm/instruction-files", { name, content }),

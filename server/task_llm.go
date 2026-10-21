@@ -14,6 +14,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/llmguard"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/transcript"
@@ -235,6 +236,7 @@ func (r *taskLLMRuntime) Complete(ctx context.Context, req llm.CompletionRequest
 }
 
 func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest, hooks taskLLMStreamHooks) (llm.Message, string, llm.Usage, error) {
+	ctx = llmguard.WithBudget(ctx, llmguard.DefaultHTTPAttempts)
 	for {
 		selection, err := hooks.current()
 		if err != nil {
@@ -268,7 +270,7 @@ func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionReque
 		}
 		// profileID=0: 显式链已被清空;非额度错误:透传。二者都不改任务 failover 状态。
 		if selection.profileID == 0 || !isQuotaExhaustedError(callErr) {
-			return llm.Message{}, "", llm.Usage{}, callErr
+			return llm.Message{}, "", llm.Usage{}, &taskLLMError{taskID: taskID, cause: callErr}
 		}
 		transition, markErr := hooks.exhaust(selection, callErr)
 		if markErr != nil {
@@ -286,6 +288,7 @@ func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionReque
 
 func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest, hooks taskLLMStreamHooks) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
+		ctx := llmguard.WithBudget(ctx, llmguard.DefaultHTTPAttempts)
 		for {
 			selection, err := hooks.current()
 			if err != nil {
@@ -354,7 +357,7 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 						return
 					}
 				}
-				yield(llm.StreamEvent{}, streamErr)
+				yield(llm.StreamEvent{}, &taskLLMError{taskID: taskID, cause: streamErr})
 				return
 			}
 			transition, markErr := hooks.exhaust(selection, streamErr)
@@ -435,20 +438,7 @@ func isRetryableStreamError(err error) bool {
 	if isQuotaExhaustedError(err) {
 		return false
 	}
-	s := strings.ToLower(err.Error())
-	if strings.Contains(s, "too long") || strings.Contains(s, "context length") ||
-		strings.Contains(s, "context_length") || strings.Contains(s, "maximum context") ||
-		strings.Contains(s, "status 413") {
-		return false
-	}
-	for _, code := range []string{"status 400", "status 401", "status 403", "status 404", "status 422"} {
-		if strings.Contains(s, code) {
-			return false
-		}
-	}
-	// 其余(传输 reset/EOF/timeout、408/429/5xx、流内 error 事件如 anthropic
-	// overloaded_error 等)一律视为瞬时,允许重试。
-	return true
+	return llmguard.Retryable(err)
 }
 
 // CompactionWindow mirrors current()'s precedence so the context window always

@@ -16,7 +16,7 @@ func TestChatUnavailableReasonDistinguishesStates(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { m.Close() })
 	td := t.TempDir()
 	s := newTestServer(t, context.Background(), m, td, td, td)
 
@@ -66,7 +66,7 @@ func TestResolveChatAgentHonoursConversationProfile(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { m.Close() })
 	td := t.TempDir()
 	s := newTestServer(t, context.Background(), m, td, td, td)
 

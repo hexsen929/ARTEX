@@ -949,7 +949,14 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             {running.slice(0, 6).map((i) => (
               <div key={i.id} className="flex items-center gap-2 text-sm">
                 <StatusBadge domain="intent" value={i.state} />
-                <span className="min-w-0 flex-1 truncate">{i.payload}</span>
+                <div className="min-w-0 flex-1">
+                  <span className="block truncate">{i.payload}</span>
+                  {i.worker_result && (
+                    <p className="whitespace-normal text-xs text-muted-foreground">
+                      {i.worker_result.message} <code>{i.worker_result.code}</code>
+                    </p>
+                  )}
+                </div>
               </div>
             ))}
             {running.length === 0 && <p className="text-sm text-muted-foreground">暂无进行中意图</p>}
@@ -1018,7 +1025,14 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             {blocked.slice(0, 20).map((i) => (
               <div key={i.id} className="flex items-center gap-2 text-sm">
                 <StatusBadge domain="intent" value={i.state} />
-                <span className="min-w-0 flex-1 truncate">{i.payload}</span>
+                <div className="min-w-0 flex-1">
+                  <span className="block truncate">{i.payload}</span>
+                  {i.worker_result && (
+                    <p className="whitespace-normal text-xs text-muted-foreground">
+                      {i.worker_result.message} <code>{i.worker_result.code}</code>
+                    </p>
+                  )}
+                </div>
                 <Button
                   size="sm"
                   variant="ghost"

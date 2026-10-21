@@ -7,6 +7,7 @@ import Link from "next/link";
 import { ChevronRightIcon, FolderIcon, FolderOpenIcon } from "lucide-react";
 import { toast } from "sonner";
 
+import { FindingVerificationBadge } from "@/components/finding-verification";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -80,6 +81,7 @@ export function FindingCaseMemberRow({
       {onSelect && !f.inherited ? (
         <Checkbox checked={selected} onCheckedChange={(v) => onSelect(id, v === true)} aria-label={`选择上报 #${id}`} />
       ) : null}
+      <FindingVerificationBadge finding={f} />
       <StatusBadge domain="severity" value={f.severity} />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <Link

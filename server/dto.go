@@ -181,28 +181,47 @@ func trafficDTOs(ex []traffic.ExchangeMeta) []TrafficExchangeDTO {
 // ---- TaskNode (frontend "TaskNode") — frontier, intents, exploration graph nodes ----
 
 type TaskNodeDTO struct {
-	ID           string `json:"id"`
-	Type         string `json:"type"` // db Node.Kind
-	Payload      string `json:"payload,omitempty"`
-	Priority     int    `json:"priority"`
-	State        string `json:"state"`
-	Origin       string `json:"origin"`
-	TS           string `json:"ts"`
-	SourceTaskID string `json:"source_task_id,omitempty"`
-	Inherited    bool   `json:"inherited,omitempty"`
-	DeleteReason string `json:"delete_reason,omitempty"` // 意图假删除(state='deleted')时的删除原因
+	VerificationStatus string           `json:"verification_status,omitempty"`
+	WorkerResult       *db.WorkerResult `json:"worker_result,omitempty"`
+	ID                 string           `json:"id"`
+	Type               string           `json:"type"` // db Node.Kind
+	Payload            string           `json:"payload,omitempty"`
+	Priority           int              `json:"priority"`
+	State              string           `json:"state"`
+	Origin             string           `json:"origin"`
+	TS                 string           `json:"ts"`
+	SourceTaskID       string           `json:"source_task_id,omitempty"`
+	Inherited          bool             `json:"inherited,omitempty"`
+	BlockedReason      string           `json:"blocked_reason,omitempty"`
+	DeleteReason       string           `json:"delete_reason,omitempty"` // 意图假删除(state='deleted')时的删除原因
 }
 
 func taskNodeDTO(n *db.Node) TaskNodeDTO {
 	d := TaskNodeDTO{
-		ID:           i64s(n.ID),
-		Type:         n.Kind,
-		Payload:      rawString(n.Payload),
-		DeleteReason: n.DeleteReason,
-		Priority:     n.Priority,
-		State:        n.State,
-		Origin:       n.Origin,
-		TS:           rfc3339(n.CreatedAt),
+		ID:            i64s(n.ID),
+		Type:          n.Kind,
+		Payload:       rawString(n.Payload),
+		DeleteReason:  n.DeleteReason,
+		BlockedReason: n.BlockedReason,
+		Priority:      n.Priority,
+		State:         n.State,
+		Origin:        n.Origin,
+		TS:            rfc3339(n.CreatedAt),
+	}
+	var outcome struct {
+		WorkerResult *db.WorkerResult `json:"worker_result"`
+	}
+	_ = json.Unmarshal(n.Payload, &outcome)
+	d.WorkerResult = outcome.WorkerResult
+	if n.Kind == db.KindFinding {
+		var p struct {
+			Status string `json:"verification_status"`
+		}
+		_ = json.Unmarshal(n.Payload, &p)
+		d.VerificationStatus = p.Status
+		if d.VerificationStatus == "" {
+			d.VerificationStatus = db.VerificationLegacy
+		}
 	}
 	if n.SourceTaskID > 0 {
 		d.SourceTaskID = i64s(n.SourceTaskID)
@@ -307,8 +326,10 @@ func coverageAssetRefDTO(ref db.AssetRef) CoverageAssetRefDTO {
 // ---- Finding (frontend "Finding") ----
 
 type FindingDTO struct {
-	CaseID    string  `json:"case_id,omitempty"`
-	MemberIDs []int64 `json:"member_ids,omitempty"`
+	VerificationStatus string  `json:"verification_status"`
+	VerificationNote   string  `json:"verification_note"`
+	CaseID             string  `json:"case_id,omitempty"`
+	MemberIDs          []int64 `json:"member_ids,omitempty"`
 
 	TrafficCount          int                        `json:"traffic_count"`
 	EvidenceVersion       int64                      `json:"evidence_version"`
@@ -377,17 +398,20 @@ func assetLabel(a *db.Asset) string {
 // findingPayload mirrors the JSON written by the worker's report_finding tool
 // (agent/tools.go addFinding): {vulnclass, severity, summary, evidence:{by,poc}}.
 type findingPayload struct {
-	VulnClass string          `json:"vulnclass"`
-	Name      string          `json:"name"`
-	Severity  string          `json:"severity"`
-	Summary   string          `json:"summary"`
-	Evidence  json.RawMessage `json:"evidence"`
+	VerificationStatus string          `json:"verification_status"`
+	VerificationNote   string          `json:"verification_note"`
+	VulnClass          string          `json:"vulnclass"`
+	Name               string          `json:"name"`
+	Severity           string          `json:"severity"`
+	Summary            string          `json:"summary"`
+	Evidence           json.RawMessage `json:"evidence"`
 }
 
 func findingDTO(n *db.Node) FindingDTO {
 	var p findingPayload
 	_ = json.Unmarshal(n.Payload, &p)
 	d := FindingDTO{
+		VerificationStatus: p.VerificationStatus, VerificationNote: p.VerificationNote,
 		ID:        i64s(n.ID),
 		VulnClass: p.VulnClass,
 		Name:      p.Name,
@@ -396,6 +420,9 @@ func findingDTO(n *db.Node) FindingDTO {
 		Summary:   p.Summary,
 		Evidence:  rawString(p.Evidence),
 		TS:        rfc3339(n.CreatedAt),
+	}
+	if d.VerificationStatus == "" {
+		d.VerificationStatus = db.VerificationLegacy
 	}
 	if n.SourceTaskID > 0 {
 		d.SourceTaskID = i64s(n.SourceTaskID)
@@ -423,6 +450,7 @@ func findingDTOsForOwner(taskID, description string, in []*db.Node, meta map[int
 		if m, ok := meta[n.ID]; ok {
 			d.FindingID = i64s(m.ID)
 			d.Status = m.Status
+			d.VerificationStatus, d.VerificationNote = m.VerificationStatus, m.VerificationNote
 			d.TrafficCount = m.TrafficCount
 			d.Assets = findingAssetDTOs(m.AssetIDs, assets)
 		}
@@ -451,6 +479,7 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		status = db.FindingPending
 	}
 	d := FindingDTO{
+		VerificationStatus: f.VerificationStatus, VerificationNote: f.VerificationNote,
 		ID:           i64s(f.ID),
 		FindingID:    i64s(f.ID),
 		TrafficCount: f.TrafficCount, EvidenceVersion: f.EvidenceVersion, ReportEvidenceVersion: f.ReportEvidenceVersion,
@@ -463,6 +492,9 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		Evidence:  f.Evidence,
 		Report:    f.Report,
 		TS:        rfc3339(f.CreatedAt),
+	}
+	if d.VerificationStatus == "" {
+		d.VerificationStatus = db.VerificationLegacy
 	}
 	if f.ExportCaseID > 0 {
 		d.ID = "case:" + i64s(f.ExportCaseID)

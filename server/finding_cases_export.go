@@ -85,12 +85,20 @@ func (s *Server) consolidateFindingCaseExport(fs []*db.DBFinding, plan *findingC
 			composite := &db.DBFinding{ID: f.ID, ExportCaseID: c.ID, TaskID: c.TaskID, TaskDescription: f.TaskDescription, Name: title, VulnClass: "归并漏洞", Severity: sev, Status: f.Status, CreatedAt: c.CreatedAt, Report: c.Report, EvidenceVersion: c.Version, ReportEvidenceVersion: c.ReportVersion}
 			assets := map[int64]bool{}
 			var refs []string
+			verificationStates := map[string]bool{}
+			var verificationNotes []string
 			var evidence strings.Builder
 			for _, member := range fs {
 				if plan.membership[member.ID] != cid {
 					continue
 				}
 				composite.ExportMemberIDs = append(composite.ExportMemberIDs, member.ID)
+				v := member.VerificationStatus
+				if v == "" {
+					v = db.VerificationLegacy
+				}
+				verificationStates[v] = true
+				verificationNotes = append(verificationNotes, fmt.Sprintf("#%d %s：%s", member.ID, db.VerificationLabel(v), member.VerificationNote))
 				for _, aid := range member.AssetIDs {
 					if !assets[aid] {
 						assets[aid] = true
@@ -107,6 +115,13 @@ func (s *Server) consolidateFindingCaseExport(fs []*db.DBFinding, plan *findingC
 					composite.TrafficBindings = append(composite.TrafficBindings, b)
 				}
 			}
+			composite.VerificationStatus = db.VerificationUnverified
+			if len(verificationStates) == 1 {
+				for v := range verificationStates {
+					composite.VerificationStatus = v
+				}
+			}
+			composite.VerificationNote = strings.Join(verificationNotes, "；")
 			composite.Summary = fmt.Sprintf("漏洞文件夹 #%d；原始记录：%s。统一评级依据：%s", cid, strings.Join(refs, "；"), c.SeverityReason)
 			composite.TrafficCount = len(composite.TrafficBindings)
 			if stale || c.Report == "" {

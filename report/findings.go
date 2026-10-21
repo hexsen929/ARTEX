@@ -45,10 +45,14 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 
 	// 摘要:各严重等级计数。
 	counts := map[string]int{}
+	verificationCounts := map[string]int{}
 	for _, f := range items {
 		counts[f.Severity]++
+		verificationCounts[db.VerificationLabel(f.VerificationStatus)]++
 	}
 	b.WriteString("## 摘要\n\n")
+	fmt.Fprintf(&b, "验证状态（按导出记录计）：已确认 %d；待验证 %d；验证受阻 %d；已排除 %d；历史未复核 %d。严重等级统计包含所有状态，不等于确认漏洞数。\n\n", verificationCounts["已确认"], verificationCounts["待验证"], verificationCounts["验证受阻"], verificationCounts["已排除"], verificationCounts["历史未复核"])
+
 	b.WriteString("| 严重等级 | 数量 |\n| --- | --- |\n")
 	for _, s := range []struct{ key, label string }{
 		{"critical", "严重"}, {"high", "高危"}, {"medium", "中危"}, {"low", "低危"},
@@ -71,7 +75,8 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 		if f.VulnClass != "" {
 			fmt.Fprintf(&b, "- **类别**：%s\n", f.VulnClass)
 		}
-		fmt.Fprintf(&b, "- **状态**：%s\n", nz(f.Status, "pending"))
+		fmt.Fprintf(&b, "- **处理状态**：%s\n", nz(f.Status, "pending"))
+		fmt.Fprintf(&b, "- **验证状态**：%s\n- **验证说明**：%s\n", db.VerificationLabel(f.VerificationStatus), nz(f.VerificationNote, "未提供；需进一步复核"))
 		if desc := strings.TrimSpace(f.TaskDescription); desc != "" {
 			fmt.Fprintf(&b, "- **所属任务**：%s\n", desc)
 		}
@@ -101,7 +106,8 @@ func SingleFindingMarkdown(f *db.DBFinding, generatedAt time.Time) string {
 		fmt.Fprintf(&b, "- **类别**：%s\n", f.VulnClass)
 	}
 	fmt.Fprintf(&b, "- **严重等级**：%s\n", nz(f.Severity, "info"))
-	fmt.Fprintf(&b, "- **状态**：%s\n", nz(f.Status, "pending"))
+	fmt.Fprintf(&b, "- **处理状态**：%s\n", nz(f.Status, "pending"))
+	fmt.Fprintf(&b, "- **验证状态**：%s\n- **验证说明**：%s\n", db.VerificationLabel(f.VerificationStatus), nz(f.VerificationNote, "未提供；需进一步复核"))
 	if desc := strings.TrimSpace(f.TaskDescription); desc != "" {
 		fmt.Fprintf(&b, "- **所属任务**：%s\n", desc)
 	}
@@ -155,7 +161,7 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("\xEF\xBB\xBF") // UTF-8 BOM
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"ID", "名称", "类别", "严重等级", "状态", "所属任务", "发现时间", "概述", "流量证据数量", "流量证据ID"})
+	_ = w.Write([]string{"ID", "名称", "类别", "严重等级", "状态", "所属任务", "发现时间", "概述", "流量证据数量", "流量证据ID", "验证状态", "验证说明"})
 	for _, f := range items {
 		id := fmt.Sprintf("%d", f.ID)
 		if f.ExportCaseID > 0 {
@@ -170,7 +176,7 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 			f.TaskDescription,
 			f.CreatedAt.Format("2006-01-02 15:04:05"),
 			strings.TrimSpace(f.Summary),
-			fmt.Sprint(len(f.TrafficBindings)), findingTrafficIDs(f),
+			fmt.Sprint(len(f.TrafficBindings)), findingTrafficIDs(f), db.VerificationLabel(f.VerificationStatus), f.VerificationNote,
 		})
 	}
 	w.Flush()

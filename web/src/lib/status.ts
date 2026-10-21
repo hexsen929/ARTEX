@@ -63,10 +63,18 @@ const severity: Record<string, StatusMeta> = {
   low: { label: "低危", tone: "slate" },
 };
 
+const verification: Record<string, StatusMeta> = {
+  confirmed: { label: "已确认", tone: "green" },
+  unverified: { label: "待验证", tone: "amber" },
+  blocked: { label: "验证受阻", tone: "violet" },
+  rejected: { label: "已排除", tone: "slate" },
+  legacy: { label: "历史未复核", tone: "neutral" },
+};
+
 const finding: Record<string, StatusMeta> = {
   pending: { label: "待处理", tone: "amber" },
   in_progress: { label: "处理中", tone: "blue" },
-  confirmed: { label: "已确认", tone: "red" },
+  confirmed: { label: "待修复", tone: "red" },
   resolved: { label: "已处理", tone: "green" },
   fixed: { label: "已修复", tone: "green" },
   false_positive: { label: "误报", tone: "slate" },
@@ -117,6 +125,7 @@ const intelligence: Record<string, StatusMeta> = {
 };
 
 const maps = {
+  verification,
   intelligence,
   intent,
   task,

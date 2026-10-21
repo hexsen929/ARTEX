@@ -23,6 +23,31 @@ func findingTrafficBindingEnabled() bool {
 // all actual reporters (including Planner and custom chat agents) see the same
 // API contract. Disabled/unbound tools are never reintroduced here.
 func findingWorkflowTools(agentKey string, tools []actool.CoreTool) ([]actool.CoreTool, string) {
+	// Overlay only the new optional verification contract, including when persisted
+	// schemas predate this version. Never overwrite users' stored tool customizations.
+	tools = append([]actool.CoreTool(nil), tools...)
+	quality := ""
+	for i, tool := range tools {
+		if tool.Name() == "report_finding" {
+			raw, _ := json.Marshal(tool.InputSchema())
+			var schema map[string]any
+			if json.Unmarshal(raw, &schema) == nil {
+				props, _ := schema["properties"].(map[string]any)
+				if props == nil {
+					props = map[string]any{}
+					schema["properties"] = props
+				}
+				props["verification_status"] = map[string]any{"type": "string", "enum": []string{"confirmed", "unverified", "blocked", "rejected"}, "description": "默认待验证；确认需证据与确认依据；受阻不等于排除"}
+				props["verification_note"] = str("确认/排除依据，或缺少证据、受阻原因与后续验证方法")
+				tools[i] = DecorateTool(tool, tool.Description()+verificationGuidance, schema)
+			}
+			quality = verificationGuidance
+		}
+		if tool.Name() == "update_finding_report" || tool.Name() == "list_findings" || tool.Name() == "list_task_findings" {
+			quality = verificationGuidance
+		}
+	}
+
 	if !findingTrafficBindingEnabled() {
 		out := make([]actool.CoreTool, 0, len(tools))
 		for _, tool := range tools {
@@ -44,7 +69,7 @@ func findingWorkflowTools(agentKey string, tools []actool.CoreTool) ([]actool.Co
 			}
 			out = append(out, tool)
 		}
-		return out, ""
+		return out, quality
 	}
 	out := append([]actool.CoreTool(nil), tools...)
 	has := map[string]bool{}
@@ -63,9 +88,9 @@ func findingWorkflowTools(agentKey string, tools []actool.CoreTool) ([]actool.Co
 			out[i] = DecorateTool(tool, tool.Description()+note, tool.InputSchema())
 		}
 	}
-	guidance := ""
+	guidance := quality
 	if has["report_finding"] || has["add_task_hint"] || has["add_hint"] {
-		guidance = "\n\n**流量证据交接（可选）**：自动绑定默认由报告 Agent 在漏洞入库后、编写报告前完成。上报者应在 evidence 保留验证命令、关键输出、已有真实流量 ID 及其用途，任务中带 intent_id，便于报告 Agent 追溯；不必为了绑定额外查包。Auto / Planner 代为上报时不要丢弃执行者已有的引用。add_hint / add_task_hint 可用 traffic_refs 交接；显式即时绑定仍兼容 report_finding 的 traffic_refs / evidence_hint_id。TCP 或无包时正常登记，不能猜测 ID，也不能仅为补包重复探测。"
+		guidance += "\n\n**流量证据交接（可选）**：自动绑定默认由报告 Agent 在漏洞入库后、编写报告前完成。上报者应在 evidence 保留验证命令、关键输出、已有真实流量 ID 及其用途，任务中带 intent_id，便于报告 Agent 追溯；不必为了绑定额外查包。Auto / Planner 代为上报时不要丢弃执行者已有的引用。add_hint / add_task_hint 可用 traffic_refs 交接；显式即时绑定仍兼容 report_finding 的 traffic_refs / evidence_hint_id。TCP 或无包时正常登记，不能猜测 ID，也不能仅为补包重复探测。"
 		if has["add_task_hint"] && !has["add_hint"] {
 			guidance += "\n平台对话没有任务上下文时，不直接调用 report_finding；通过 add_task_hint 向已有对应任务交接，由任务 Agent 登记，并用 list_task_findings 核对结果。"
 		}

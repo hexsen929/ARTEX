@@ -185,8 +185,16 @@ const clockFmt = new Intl.DateTimeFormat("zh-CN", {
 });
 
 function NodeStateBadge({ node }: { node: TaskNode }) {
+  if (node.type === "finding")
+    return <StatusBadge domain="verification" value={node.verification_status || "legacy"} dot />;
   if (node.type === "goal") return <StatusBadge domain="goal" value={node.state} dot />;
-  if (node.type === "intent") return <StatusBadge domain="intent" value={node.state} dot />;
+  if (node.type === "intent")
+    return (
+      <span title={node.worker_result?.message || node.blocked_reason}>
+        <StatusBadge domain="intent" value={node.state} dot />
+        {node.worker_result && <span className="ml-2 text-xs text-muted-foreground">{node.worker_result.message}</span>}
+      </span>
+    );
   const meta = STATE_META[node.type]?.[node.state];
   if (!meta) return null;
   return (

@@ -10,6 +10,7 @@ import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
 import { FindingRetestPanel } from "@/components/finding-retest-panel";
+import { FindingVerificationEditor, FindingVerificationBadge } from "@/components/finding-verification";
 import { FindingTrafficPanel } from "@/components/finding-traffic-panel";
 import { Markdown } from "@/components/markdown";
 import { StatusBadge } from "@/components/status-badge";
@@ -154,6 +155,7 @@ function FindingDetailInner() {
           </h1>
           <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">#{finding.id}</code>
           <Separator orientation="vertical" className="mx-1 h-4" />
+          <FindingVerificationBadge finding={finding} />
           <StatusBadge domain="severity" value={finding.severity} dot />
           <StatusBadge domain="finding" value={finding.status} dot />
           {finding.inherited && finding.source_task_id && (
@@ -257,6 +259,10 @@ function FindingDetailInner() {
                       </SelectContent>
                     </Select>
                   )}
+                </FieldRow>
+
+                <FieldRow label="验证状态">
+                  <FindingVerificationEditor finding={finding} onUpdated={setFinding} />
                 </FieldRow>
 
                 {/* 处理状态 */}

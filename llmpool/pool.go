@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/Autumn-27/artex/llmguard"
 	"github.com/Autumn-27/norma/llm"
 )
 
@@ -82,6 +83,7 @@ func (p *Pool) Head() *Member { return p.members[0] }
 func (p *Pool) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
 	order := p.order(req)
 	return func(yield func(llm.StreamEvent, error) bool) {
+		ctx := llmguard.WithBudget(ctx, llmguard.DefaultHTTPAttempts)
 		var lastErr error
 		for i, m := range order {
 			emitted := false
@@ -115,10 +117,10 @@ func (p *Pool) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[
 			}
 		}
 		if lastErr == nil {
-			lastErr = ErrExhausted
+			lastErr = p.unavailableError(req)
 		}
 		log.Printf("[llmpool] 轮询链已耗尽(%d 个配置全部失败)，最后错误：%s", len(order), trimErr(lastErr))
-		yield(llm.StreamEvent{}, fmt.Errorf("%w：%v", ErrExhausted, lastErr))
+		yield(llm.StreamEvent{}, fmt.Errorf("%w：%w", ErrExhausted, lastErr))
 	}
 }
 
@@ -128,6 +130,7 @@ func (p *Pool) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[
 // tried without risk of duplicated output. Mirrors Stream's health-tripping and
 // chain-exhaustion behavior.
 func (p *Pool) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	ctx = llmguard.WithBudget(ctx, llmguard.DefaultHTTPAttempts)
 	order := p.order(req)
 	var lastErr error
 	for i, m := range order {
@@ -139,7 +142,6 @@ func (p *Pool) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Mes
 		if !shouldFailover(ctx, err) {
 			// Non-failover error (e.g. ctx cancel, deterministic 4xx): surface as-is
 			// without tripping health, matching Stream's non-failover path.
-			p.health.Pass(m.ID)
 			return llm.Message{}, "", llm.Usage{}, err
 		}
 		lastErr = err
@@ -154,17 +156,15 @@ func (p *Pool) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Mes
 		}
 	}
 	if lastErr == nil {
-		lastErr = ErrExhausted
+		lastErr = p.unavailableError(req)
 	}
 	log.Printf("[llmpool] 轮询链已耗尽(%d 个配置全部失败)，最后错误：%s", len(order), trimErr(lastErr))
-	return llm.Message{}, "", llm.Usage{}, fmt.Errorf("%w：%v", ErrExhausted, lastErr)
+	return llm.Message{}, "", llm.Usage{}, fmt.Errorf("%w：%w", ErrExhausted, lastErr)
 }
 
 // order picks the members to try, in order: skip those in a cooling-off window
 // and those whose context window can't hold this request, then rotate within each
-// equal-priority group so same-priority profiles share the load. Never returns an
-// empty slice — if everything is filtered out, the head of the chain is tried
-// anyway, since stalling the engine is worse than one more failed request.
+// equal-priority group. An empty order fails fast until cooldown expires.
 func (p *Pool) order(req llm.CompletionRequest) []*Member {
 	est := estimateTokens(req)
 	var open []*Member
@@ -178,7 +178,7 @@ func (p *Pool) order(req llm.CompletionRequest) []*Member {
 		open = append(open, m)
 	}
 	if len(open) == 0 {
-		return p.members[:1] // last resort: probe the head rather than stall
+		return nil // Respect cooling-off/context limits; do not hammer the head.
 	}
 	return rotateGroups(open, p.rr.Add(1)-1)
 }
@@ -235,6 +235,9 @@ func shouldFailover(ctx context.Context, err error) bool {
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	if llmguard.Classify(err) == llmguard.RetryBudget || llmguard.Classify(err) == llmguard.CoolingDown {
+		return false
+	}
 	switch code := statusOf(err); {
 	case code == 0:
 		return true // no status → transport-level failure (reset / DNS / timeout)
@@ -252,11 +255,7 @@ func shouldFailover(ctx context.Context, err error) bool {
 // keep failing until a human fixes it) rather than transient. Hard failures open
 // the breaker on the first occurrence.
 func isHardFailure(err error) bool {
-	switch statusOf(err) {
-	case 401, 402, 403, 404:
-		return true
-	}
-	return false
+	return llmguard.HardFailure(err)
 }
 
 // trimErr shortens an error for logs/UI — provider bodies can be long.
@@ -296,4 +295,14 @@ func blocksLen(bs []llm.ContentBlock) int {
 		}
 	}
 	return n
+}
+
+func (p *Pool) unavailableError(req llm.CompletionRequest) error {
+	estimate := estimateTokens(req)
+	for _, m := range p.members {
+		if m.WindowTokens <= 0 || estimate <= m.WindowTokens {
+			return fmt.Errorf("llm_cooling_down: 所有可承载请求的配置均在冷却中，请稍后继续")
+		}
+	}
+	return fmt.Errorf("context_length_exceeded: 所有配置的上下文窗口均不足，请缩小输入")
 }

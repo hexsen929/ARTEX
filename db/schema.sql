@@ -1585,3 +1585,19 @@ CREATE INDEX IF NOT EXISTS idx_task_intelligence_assets ON task_intelligence USI
 
 -- Optional derived credential presentation; raw intelligence remains authoritative.
 ALTER TABLE task_intelligence ADD COLUMN IF NOT EXISTS credential_analysis JSONB;
+
+-- Additive migration: historical findings were not explicitly verified. Never
+-- silently promote them; new findings default to unverified independently of triage.
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_status TEXT NOT NULL DEFAULT 'legacy';
+ALTER TABLE findings ALTER COLUMN verification_status SET DEFAULT 'unverified';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_note TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_findings_verification ON findings(verification_status);
+CREATE TABLE IF NOT EXISTS finding_verification_events (
+ id BIGSERIAL PRIMARY KEY,
+ finding_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+ from_status TEXT NOT NULL,
+ to_status TEXT NOT NULL,
+ note TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_finding_verification_events_finding ON finding_verification_events(finding_id,id);

@@ -19,6 +19,7 @@ import {
 import { CopyButton } from "@/components/copy-button";
 import { FindingCaseMembers, FindingSeverityCounts } from "@/components/finding-case-list";
 import { Markdown } from "@/components/markdown";
+import { FindingVerificationBadge } from "@/components/finding-verification";
 import { StatusBadge } from "@/components/status-badge";
 import {
   AlertDialog,
@@ -256,6 +257,7 @@ export function FindingsTable({
                   />
                 </TableCell>
                 <TableCell>
+                  <FindingVerificationBadge finding={f} />
                   <StatusBadge domain="severity" value={f.severity} dot />
                 </TableCell>
                 <TableCell className="max-w-md">
