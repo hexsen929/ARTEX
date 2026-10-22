@@ -31,8 +31,26 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Go tests
-        run: go test ./... -p 2 -count=1 -timeout=5m
+      - name: Go tests with package-isolated databases
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          index=0
+          for package in $(go list ./...); do
+            database="artex_ci_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}_${index}"
+            docker exec "$PG_CONTAINER" createdb -U artex_test "$database"
+            if [[ "$package" == */server ]]; then
+              instructions="artex_instructions_test_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+              docker exec "$PG_CONTAINER" createdb -U artex_test "$instructions"
+              export ARTEX_INSTRUCTIONS_TEST_DSN="postgres://artex_test:artex_test@127.0.0.1:5432/${instructions}?sslmode=disable"
+            else
+              unset ARTEX_INSTRUCTIONS_TEST_DSN
+            fi
+            ARTEX_PG_DSN="postgres://artex_test:artex_test@127.0.0.1:5432/${database}?sslmode=disable" \
+              go test "$package" -count=1 -timeout=5m
+            index=$((index + 1))
+          done
       - name: Go static checks
         run: go vet ./...
       - uses: actions/setup-node@v4

@@ -16,8 +16,10 @@ import {
   ComboboxItem,
   ComboboxList,
   ComboboxValue,
+  useComboboxAnchor,
 } from "@/components/ui/combobox";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { llmProfileSearchLabel } from "@/lib/llm-profile-search";
 import type { LLMProfile } from "@/lib/types";
 
 interface TaskLLMProfileChainProps {
@@ -53,6 +55,7 @@ export function TaskLLMProfileChain({
   inputId,
   portalContainer,
 }: TaskLLMProfileChainProps) {
+  const comboboxAnchor = useComboboxAnchor();
   const profilesByID = React.useMemo(() => new Map(profiles.map((profile) => [profile.id, profile])), [profiles]);
   const itemIDs = React.useMemo(() => profiles.map((profile) => profile.id), [profiles]);
   const profilesUnavailable = profiles.length === 0;
@@ -64,7 +67,7 @@ export function TaskLLMProfileChain({
   const profileLabel = React.useCallback(
     (id: string) => {
       const profile = profilesByID.get(id);
-      return profile ? `${profile.name} ${profile.model}` : `配置 #${id}`;
+      return profile ? llmProfileSearchLabel(profile) : `配置 #${id}`;
     },
     [profilesByID],
   );
@@ -94,13 +97,14 @@ export function TaskLLMProfileChain({
     <div className="flex flex-col gap-3">
       <Combobox
         items={itemIDs}
-        itemToStringValue={profileLabel}
+        itemToStringLabel={profileLabel}
+        itemToStringValue={(id) => id}
         multiple
         value={value}
         onValueChange={handleValueChange}
         disabled={disabled}
       >
-        <ComboboxChips>
+        <ComboboxChips ref={comboboxAnchor}>
           <ComboboxValue>
             {value.map((id) => (
               <ComboboxChip key={id}>{profilesByID.get(id)?.name ?? `#${id}`}</ComboboxChip>
@@ -108,11 +112,11 @@ export function TaskLLMProfileChain({
           </ComboboxValue>
           <ComboboxChipsInput
             id={inputId}
-            placeholder={profiles.length > 0 ? "搜索并添加 LLM 配置" : "暂无可用 LLM 配置"}
+            placeholder={profiles.length > 0 ? "按名称、模型或地址搜索 LLM 配置" : "暂无可用 LLM 配置"}
             disabled={disabled ? true : profilesUnavailable}
           />
         </ComboboxChips>
-        <ComboboxContent portalContainer={portalContainer}>
+        <ComboboxContent anchor={comboboxAnchor} portalContainer={portalContainer}>
           <ComboboxEmpty>没有匹配的 LLM 配置</ComboboxEmpty>
           <ComboboxList>
             {(id) => {

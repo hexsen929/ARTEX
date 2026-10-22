@@ -2,7 +2,13 @@ name: release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch: {}   # 允许在 Actions 页面手动触发（不建 Release，只产出可下载 Artifacts）
+  workflow_dispatch:
+    inputs:
+      build_version:
+        description: "构建版本（例如 2.3.5-codex-config；手动运行不创建 Release）"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write # 创建 Release 需要
@@ -57,7 +63,7 @@ jobs:
         env:
           ARTEX_TARGET_OS: ${{ matrix.goos }}
           ARTEX_TARGET_ARCH: ${{ matrix.goarch }}
-          ARTEX_BUILD_VERSION: ${{ github.ref_name }}
+          ARTEX_BUILD_VERSION: ${{ inputs.build_version || github.ref_name }}
           ARTEX_SKIP_FRONTEND: "1"
           ARTEX_SKIP_NPM_CI: "1"
           # UPX 自解压 ELF 在部分 Linux 内核、虚拟化和安全策略下会崩溃。

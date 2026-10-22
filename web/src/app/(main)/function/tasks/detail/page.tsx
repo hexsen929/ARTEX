@@ -72,7 +72,21 @@ function taskProfileIDs(task: Task): string[] {
   return task.llm_profile_id ? [String(task.llm_profile_id)] : [];
 }
 
-function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: LLMProfile[]; onUpdated: () => void }) {
+function TaskLLMControl({
+  task,
+  profiles,
+  profilesLoading,
+  profilesError,
+  onRefreshProfiles,
+  onUpdated,
+}: {
+  task: Task;
+  profiles: LLMProfile[];
+  profilesLoading: boolean;
+  profilesError: string;
+  onRefreshProfiles: () => Promise<void>;
+  onUpdated: () => void;
+}) {
   const [open, setOpen] = React.useState(false);
   const [profileIDs, setProfileIDs] = React.useState<string[]>(() => taskProfileIDs(task));
   const [activeProfileID, setActiveProfileID] = React.useState(
@@ -115,7 +129,10 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
 
   const handleOpenChange = (next: boolean) => {
     setOpen(next);
-    if (next) syncDraft();
+    if (next) {
+      syncDraft();
+      void onRefreshProfiles();
+    }
   };
 
   const handleProfileIDsChange = (next: string[]) => {
@@ -179,6 +196,24 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
           </Alert>
         )}
 
+        {profilesLoading && (
+          <p role="status" className="flex items-center gap-2 text-muted-foreground text-xs">
+            <Spinner />正在刷新 LLM 配置…
+          </p>
+        )}
+        {profilesError && (
+          <Alert variant="destructive">
+            <CircleAlertIcon />
+            <AlertTitle>LLM 配置加载失败</AlertTitle>
+            <AlertDescription>
+              <p>{profilesError}。已有列表已保留，可重试加载最新配置。</p>
+              <Button type="button" variant="outline" size="sm" onClick={() => void onRefreshProfiles()} disabled={profilesLoading}>
+                重新加载
+              </Button>
+            </AlertDescription>
+          </Alert>
+        )}
+
         <TaskLLMProfileChain
           profiles={profiles}
           value={profileIDs}
@@ -186,7 +221,7 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
           activeProfileId={activeProfileID}
           onActiveProfileChange={setActiveProfileID}
           inputId="task-llm-profiles"
-          disabled={saving}
+          disabled={saving || (profilesLoading && profiles.length === 0)}
           portalContainer={popoverContentRef}
         />
 
@@ -218,14 +253,33 @@ function TaskDetailInner() {
   }, [requestedTab]);
   const [interceptPendingCount, setInterceptPendingCount] = React.useState(0);
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
+  const [profilesLoading, setProfilesLoading] = React.useState(false);
+  const [profilesError, setProfilesError] = React.useState("");
+  const profilesRequest = React.useRef(0);
   const [archiving, setArchiving] = React.useState(false);
 
-  React.useEffect(() => {
-    api
-      .llmProfiles()
-      .then(setProfiles)
-      .catch(() => setProfiles([]));
+  const refreshProfiles = React.useCallback(async () => {
+    const request = ++profilesRequest.current;
+    setProfilesLoading(true);
+    setProfilesError("");
+    try {
+      const next = await api.llmProfiles();
+      if (request === profilesRequest.current) setProfiles(next);
+    } catch (error) {
+      if (request === profilesRequest.current) {
+        setProfilesError(error instanceof Error ? error.message : "请求失败");
+      }
+    } finally {
+      if (request === profilesRequest.current) setProfilesLoading(false);
+    }
   }, []);
+
+  React.useEffect(() => {
+    void refreshProfiles();
+    return () => {
+      profilesRequest.current++;
+    };
+  }, [refreshProfiles]);
 
   React.useEffect(() => {
     let alive = true;
@@ -371,7 +425,14 @@ function TaskDetailInner() {
             {task.id}
           </code>
           <Separator orientation="vertical" className="mx-1 hidden h-4 sm:block" />
-          <TaskLLMControl task={task} profiles={profiles} onUpdated={load} />
+          <TaskLLMControl
+            task={task}
+            profiles={profiles}
+            profilesLoading={profilesLoading}
+            profilesError={profilesError}
+            onRefreshProfiles={refreshProfiles}
+            onUpdated={load}
+          />
           <StatusBadge domain={terminal ? "task" : "engine"} value={terminal ? task.status : engineMode} dot />
           {canArchive ? (
             <AlertDialog>
