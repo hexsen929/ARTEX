@@ -198,7 +198,8 @@ function TaskLLMControl({
 
         {profilesLoading && (
           <p role="status" className="flex items-center gap-2 text-muted-foreground text-xs">
-            <Spinner />正在刷新 LLM 配置…
+            <Spinner />
+            正在刷新 LLM 配置…
           </p>
         )}
         {profilesError && (
@@ -207,7 +208,13 @@ function TaskLLMControl({
             <AlertTitle>LLM 配置加载失败</AlertTitle>
             <AlertDescription>
               <p>{profilesError}。已有列表已保留，可重试加载最新配置。</p>
-              <Button type="button" variant="outline" size="sm" onClick={() => void onRefreshProfiles()} disabled={profilesLoading}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void onRefreshProfiles()}
+                disabled={profilesLoading}
+              >
                 重新加载
               </Button>
             </AlertDescription>

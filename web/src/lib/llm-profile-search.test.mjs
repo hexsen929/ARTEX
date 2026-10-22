@@ -1,22 +1,31 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { useFilter } from "@base-ui/react/use-filter";
+import { Combobox } from "@base-ui/react/combobox";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { llmProfileSearchLabel } from "./llm-profile-search.ts";
 
 const profiles = [
-  { id: "13", name: "中转配置", model: "glm-5.3-flash", base_url: "https://relay.example/v1", api_key_hint: "secret-only" },
+  {
+    id: "13",
+    name: "中转配置",
+    model: "glm-5.3-flash",
+    base_url: "https://relay.example/v1",
+    api_key_hint: "secret-only",
+  },
   { id: "27", name: "Second profile", model: "qwen3.8-flash", base_url: "https://other.example/v1" },
 ];
 
 // Exercise the same Base UI collator used by the combobox's label filter.
-function search(query) {
+function search(query, withLabels = true) {
   let result;
   function Probe() {
-    const filter = useFilter({ sensitivity: "base" });
-    result = profiles.filter((profile) => filter.contains(llmProfileSearchLabel(profile), query)).map((p) => p.id);
+    const filter = Combobox.useFilter({ sensitivity: "base", multiple: true });
+    const label = (id) => llmProfileSearchLabel(profiles.find((profile) => profile.id === id));
+    result = profiles
+      .filter((profile) => filter.contains(profile.id, query, withLabels ? label : undefined))
+      .map((p) => p.id);
     return null;
   }
   renderToStaticMarkup(React.createElement(Probe));
@@ -24,6 +33,7 @@ function search(query) {
 }
 
 test("search finds saved profiles by name, model, endpoint and ID", () => {
+  assert.deepEqual(search("glm", false), [], "without labels Base UI only sees profile IDs");
   for (const query of ["中转", "GLM-5.3", "relay.example", "#13"]) assert.deepEqual(search(query), ["13"]);
   assert.deepEqual(search("qwen3.8"), ["27"]);
   assert.deepEqual(search("does-not-exist"), []);
