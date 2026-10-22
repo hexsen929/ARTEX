@@ -97,7 +97,7 @@ export function fmtTime(ts: string) {
   });
 }
 
-const COLUMN_COUNT = 9;
+const COLUMN_COUNT = 10;
 
 interface FindingsTableProps {
   items: Finding[];
@@ -182,20 +182,20 @@ export function FindingsTable({
 
   return (
     /* 固定列宽保证展开内容不撑开表格；窄屏只在表格内部横向滚动。 */
-    <Table className="min-w-[60rem] table-fixed">
-      {hideHeader ? (
-        <colgroup>
-          <col className="w-8" />
-          <col className="w-8" />
-          <col className="w-20" />
-          <col />
-          <col className="w-44" />
-          <col className="w-28" />
-          <col className="w-32" />
-          <col className="w-24" />
-          <col className="w-48" />
-        </colgroup>
-      ) : null}
+    <Table aria-label="漏洞发现列表" className="min-w-[76rem] table-fixed">
+      {/* Every rendering path uses the same column geometry, including nested members. */}
+      <colgroup>
+        <col className="w-8" />
+        <col className="w-8" />
+        <col className="w-20" />
+        <col />
+        <col className="w-32" />
+        <col className="w-44" />
+        <col className="w-28" />
+        <col className="w-32" />
+        <col className="w-24" />
+        <col className="w-48" />
+      </colgroup>
       {!hideHeader ? (
         <TableHeader>
           <TableRow>
@@ -209,8 +209,9 @@ export function FindingsTable({
             <TableHead className="w-8" />
             <TableHead className="w-20">严重度</TableHead>
             <TableHead>漏洞名称</TableHead>
+            <TableHead className="w-32">验证状态</TableHead>
             <TableHead className="w-44">资产</TableHead>
-            <TableHead className="w-28">状态</TableHead>
+            <TableHead className="w-28">处理状态</TableHead>
             <TableHead className="w-32">所属任务</TableHead>
             <TableHead className="w-24">时间</TableHead>
             <TableHead className="w-48">操作</TableHead>
@@ -257,7 +258,6 @@ export function FindingsTable({
                   />
                 </TableCell>
                 <TableCell>
-                  <FindingVerificationBadge finding={f} />
                   <StatusBadge domain="severity" value={f.severity} dot />
                 </TableCell>
                 <TableCell className="max-w-md">
@@ -280,8 +280,13 @@ export function FindingsTable({
                         未命中当前筛选
                       </Badge>
                     ) : null}
-                    <Badge variant="outline">流量证据 {f.traffic_count ?? 0} 条</Badge>
+                    <Badge variant="outline" className="w-fit max-w-full">
+                      流量证据 {f.traffic_count ?? 0} 条
+                    </Badge>
                   </div>
+                </TableCell>
+                <TableCell>
+                  <FindingVerificationBadge finding={f} />
                 </TableCell>
                 <TableCell>
                   <FindingAssetLabels assets={f.assets} />
@@ -586,6 +591,14 @@ function FindingFolderTableRows({
               </span>
             </div>
           </div>
+        </TableCell>
+        <TableCell>
+          <span
+            className="text-muted-foreground text-xs"
+            title="归并文件夹不代表全部成员已确认，请查看各条原始上报的验证状态"
+          >
+            查看成员
+          </span>
         </TableCell>
         <TableCell>
           <FindingAssetLabels assets={assets} totalCount={assetCount} />

@@ -815,7 +815,7 @@ export default function FindingsPage() {
   }
 
   const statCards = [
-    { label: "独立漏洞", value: stats.distinct?.total ?? stats.total, icon: BugIcon },
+    { label: "独立发现", value: stats.distinct?.total ?? stats.total, icon: BugIcon },
     { label: "上报记录", value: stats.total, tone: "text-amber-500", icon: ClockIcon },
     { label: "严重", value: stats.distinct?.critical ?? stats.critical, tone: "text-rose-600", icon: ShieldAlertIcon },
     { label: "高危", value: stats.distinct?.high ?? stats.high, tone: "text-red-500", icon: TriangleAlertIcon },
@@ -889,7 +889,7 @@ export default function FindingsPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">发现</h1>
-          <p className="text-muted-foreground text-sm">跨任务发现汇总 · 包含待验证线索，不等于全部已确认</p>
+          <p className="text-muted-foreground text-sm">跨任务发现汇总 · 严重等级与验证状态独立</p>
         </div>
         <Tabs value={view} onValueChange={(v) => setView(v as FindingView)}>
           <TabsList>
@@ -918,11 +918,29 @@ export default function FindingsPage() {
           })}
         </div>
 
-        <p className="text-sm text-muted-foreground">
-          原始上报验证统计：已确认 {stats.verified ?? 0} · 待验证 {stats.unverified ?? 0} · 验证受阻{" "}
-          {stats.verification_blocked ?? 0} · 已排除 {stats.rejected ?? 0} · 历史未复核 {stats.legacy ?? 0}
-          。以上为全库统计，不随筛选改变。
-        </p>
+        <section
+          aria-label="全库验证状态统计"
+          className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-lg border bg-muted/20 px-4 py-3 text-sm"
+        >
+          <span className="text-muted-foreground text-xs">原始上报 · 验证状态</span>
+          {VERIFICATION_STATES.map((state) => (
+            <div key={state} className="inline-flex items-center gap-2">
+              <StatusBadge domain="verification" value={state} dot />
+              <span className="font-medium tabular-nums">
+                {
+                  {
+                    confirmed: stats.verified ?? 0,
+                    unverified: stats.unverified ?? 0,
+                    blocked: stats.verification_blocked ?? 0,
+                    rejected: stats.rejected ?? 0,
+                    legacy: stats.legacy ?? 0,
+                  }[state]
+                }
+              </span>
+            </div>
+          ))}
+          <span className="text-muted-foreground text-xs">全库统计，不随筛选变化</span>
+        </section>
         <div className="flex flex-wrap items-center gap-2">
           <InputGroup className="w-full sm:w-72">
             <InputGroupInput
@@ -975,10 +993,10 @@ export default function FindingsPage() {
           </Select>
           <Select value={status} onValueChange={(v) => setStatus(v as "all" | FindingStatus)}>
             <SelectTrigger size="sm" className="w-32">
-              <SelectValue placeholder="状态" />
+              <SelectValue placeholder="处理状态" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">全部状态</SelectItem>
+              <SelectItem value="all">全部处理状态</SelectItem>
               {FINDING_STATUSES.map((st) => (
                 <SelectItem key={st} value={st}>
                   {statusMeta("finding", st).label}

@@ -26,6 +26,7 @@ export const VERIFICATION_STATES: FindingVerification[] = ["confirmed", "unverif
 export function FindingVerificationBadge({ finding }: { finding: Finding }) {
   return (
     <span
+      className="inline-flex max-w-full shrink-0 align-middle"
       title={finding.verification_note?.trim() ? finding.verification_note : "尚无验证说明；缺少证据不等于漏洞不存在"}
     >
       <StatusBadge domain="verification" value={finding.verification_status ?? "legacy"} dot />
