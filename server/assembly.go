@@ -8,6 +8,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
@@ -18,7 +19,8 @@ import (
 
 // wireAgentAugment connects the PG agent_visibility table into the agent runtime:
 // an agent's visible skills are loaded from the filesystem and packed into one
-// Skill meta-tool; its visible stdio MCP servers are spawned and expanded to
+// Skill meta-tool; cached stdio MCP tools are exposed without spawning servers.
+// The first actual call starts the run's private connection. Tools expand to
 // mcp__server__tool. skillDir is the root directory of all skill subdirectories.
 // hostTools, if set, returns runtime host tools (currently the traffic tools when
 // capture is on) to add to EVERY agent's base list — the DB tools table then
@@ -63,7 +65,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 			}
 		}
 
-		// --- mcp: connect enabled servers that are directly visible to this agent
+		// --- mcp: expose enabled servers that are directly visible to this agent
 		// OR skill-gated (named in a visible skill's mcps field). Directly-visible
 		// and NOT gated → global (unlocked from session start). Skill-gated →
 		// deferred until that skill is invoked (regardless of direct visibility).
@@ -84,18 +86,36 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				if !directVisible && !skillGated {
 					continue // neither directly visible nor referenced by a visible skill
 				}
-				cl, err := connectMCP(ctx, m)
-				if err != nil {
-					log.Printf("[mcp] %s 连接失败: %v", m.Name, err)
-					continue
-				}
-				closers = append(closers, cl)
-				ts, err := cl.Tools(ctx)
-				if err != nil {
-					log.Printf("[mcp] %s tools/list 失败: %v", m.Name, err)
-					continue
+				var ts []actool.CoreTool
+				if m.Transport == "stdio" {
+					// Upgrade name-only legacy caches once, then assemble from schemas.
+					metadataCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+					metadata, err := cacheMCPMetadata(metadataCtx, pg, m, false)
+					cancel()
+					if err != nil {
+						log.Printf("[mcp] %s 工具元数据暂不可用，保留已缓存工具供后续重试: %v", m.Name, err)
+					}
+					session := newLazyMCPSession(ctx, m)
+					closers = append(closers, session)
+					for _, t := range metadata {
+						ts = append(ts, session.tool(t))
+					}
+				} else {
+					// Remote SSE/HTTP connections retain their existing lifecycle.
+					cl, err := connectMCP(ctx, m)
+					if err != nil {
+						log.Printf("[mcp] %s 连接失败: %v", m.Name, err)
+						continue
+					}
+					closers = append(closers, cl)
+					ts, err = cl.Tools(ctx)
+					if err != nil {
+						log.Printf("[mcp] %s tools/list 失败: %v", m.Name, err)
+						continue
+					}
 				}
 				for _, t := range ts {
+					t = meterTool(t, pg, t.Name(), a.Key, agent.RunInfoFrom(ctx))
 					extra = append(extra, t)
 					allNames = append(allNames, t.Name())
 					serverTools[m.Name] = append(serverTools[m.Name], t.Name())

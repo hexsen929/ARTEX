@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,6 +20,59 @@ func hasSkillTool(tools []actool.CoreTool) bool {
 		}
 	}
 	return false
+}
+
+func TestAssembleCachedStdioToolsWithoutStartingProcess(t *testing.T) {
+	dsn, _, err := db.DSN()
+	if err != nil {
+		t.Skip("no test database")
+	}
+	pg, err := db.Open(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pg.Close() })
+	ag, err := pg.GetAgentByKey("planner")
+	if err != nil || ag == nil {
+		t.Fatal("planner missing")
+	}
+	orig, err := pg.AgentVisible(ag.ID, "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = pg.Exec(`DELETE FROM mcp_servers WHERE name='t-lazy-cached'`)
+	m := &db.MCPServer{Name: "t-lazy-cached", Transport: "stdio", Command: "/fixture/must-not-be-started", Enabled: true}
+	m.ID, err = pg.SaveMCP(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pg.SetAgentVisibilityKind(ag.ID, "mcp", orig); _ = pg.DeleteMCP(m.ID) })
+	const toolName = "mcp__t-lazy-cached__fixture"
+	if err = pg.SaveMCPTools(m.ID, []db.MCPTool{{Name: toolName, Description: "cached schema fixture", Schema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = pg.SetAgentVisibilityKind(ag.ID, "mcp", []int64{m.ID}); err != nil {
+		t.Fatal(err)
+	}
+	old := agent.ToolAugment
+	wireAgentAugment(pg, t.TempDir(), nil)
+	t.Cleanup(func() { agent.ToolAugment = old })
+	for range 8 {
+		tools, def, cleanup := agent.ToolAugment(context.Background(), "planner")
+		found := false
+		for _, tool := range tools {
+			if tool.Name() == toolName {
+				found = true
+				if tool.InputSchema()["type"] != "object" {
+					t.Fatal("cached schema not exposed")
+				}
+			}
+		}
+		cleanup()
+		if !found || !contains(def.GlobalNames, toolName) {
+			t.Fatal("cached MCP tool was dropped or process startup was attempted")
+		}
+	}
 }
 
 // TestAssembleVisibleSkill verifies a filesystem skill made visible to an agent is
