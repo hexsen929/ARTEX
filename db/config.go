@@ -932,6 +932,48 @@ func (d *DB) SaveMCPTools(serverID int64, tools []MCPTool) error {
 		return err
 	}
 	defer tx.Rollback()
+	var id int64
+	if err := tx.QueryRow(`SELECT id FROM mcp_servers WHERE id=$1 FOR UPDATE`, serverID).Scan(&id); err != nil {
+		return err
+	}
+	if err := saveMCPTools(tx, serverID, tools); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// SaveMCPToolsForConfig rejects a late discovery from a replaced endpoint. The
+// parent-row lock serializes cache replacement with SaveMCP's invalidation.
+func (d *DB) SaveMCPToolsForConfig(m *MCPServer, tools []MCPTool) error {
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	args, env := m.Args, m.Env
+	if len(args) == 0 {
+		args = json.RawMessage(`[]`)
+	}
+	if len(env) == 0 {
+		env = json.RawMessage(`{}`)
+	}
+	var same bool
+	if err := tx.QueryRow(`SELECT
+ROW(name,transport,COALESCE(command,''),args,env,COALESCE(url,''),insecure)
+IS NOT DISTINCT FROM ROW($1::text,$2::text,$3::text,$4::jsonb,$5::jsonb,$6::text,$7::boolean)
+FROM mcp_servers WHERE id=$8 FOR UPDATE`, m.Name, m.Transport, m.Command, string(args), string(env), m.URL, m.Insecure, m.ID).Scan(&same); err != nil {
+		return err
+	}
+	if !same {
+		return errors.New("MCP 配置在工具发现期间已变化，请重新刷新工具")
+	}
+	if err := saveMCPTools(tx, m.ID, tools); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func saveMCPTools(tx *sql.Tx, serverID int64, tools []MCPTool) error {
 	if _, err := tx.Exec(`DELETE FROM mcp_tools_cache WHERE server_id=$1`, serverID); err != nil {
 		return err
 	}
@@ -945,7 +987,7 @@ ON CONFLICT (server_id, tool_name) DO UPDATE SET description=EXCLUDED.descriptio
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (d *DB) SaveMCP(m *MCPServer) (int64, error) {
@@ -968,6 +1010,10 @@ func (d *DB) SaveMCP(m *MCPServer) (int64, error) {
 	}
 	defer tx.Rollback()
 	params := []any{m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled, m.Insecure, m.ID}
+	var lockedID int64
+	if err := tx.QueryRow(`SELECT id FROM mcp_servers WHERE id=$1 FOR UPDATE`, m.ID).Scan(&lockedID); err != nil {
+		return m.ID, err
+	}
 	// A changed endpoint/credential/profile can expose different schemas. An
 	// enable toggle alone must not erase a valid cache or launch a subprocess.
 	if _, err = tx.Exec(`DELETE FROM mcp_tools_cache WHERE server_id=$8 AND EXISTS (

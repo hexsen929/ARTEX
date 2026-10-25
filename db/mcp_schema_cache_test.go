@@ -39,6 +39,7 @@ func TestMCPToolSchemasPersistAndInvalidateOnConfigChange(t *testing.T) {
 		}
 	}
 	check(1)
+	old := *m
 	m.Enabled = false
 	if _, err = d.SaveMCP(m); err != nil {
 		t.Fatal(err)
@@ -50,6 +51,14 @@ func TestMCPToolSchemasPersistAndInvalidateOnConfigChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(0)
+	if err = d.SaveMCPToolsForConfig(&old, []MCPTool{{Name: "stale-tool", Schema: schema}}); err == nil {
+		t.Fatal("late discovery repopulated a replaced endpoint's schema cache")
+	}
+	check(0)
+	if err = d.SaveMCPToolsForConfig(m, []MCPTool{{Name: "current-tool", Schema: schema}}); err != nil {
+		t.Fatal(err)
+	}
+	check(1)
 	// Old callers may still cache only names. SQL NULL distinguishes that from
 	// a real empty object schema, triggering a one-time metadata hydration.
 	if err = d.SaveMCPTools(m.ID, []MCPTool{{Name: "mcp__fixture__legacy"}}); err != nil {

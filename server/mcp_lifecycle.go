@@ -170,7 +170,7 @@ func cacheMCPMetadata(ctx context.Context, pg *db.DB, m *db.MCPServer, force boo
 		}
 		metadata = append(metadata, db.MCPTool{Name: t.Name(), Description: t.Description(), Schema: schema})
 	}
-	if err := pg.SaveMCPTools(m.ID, metadata); err != nil {
+	if err := pg.SaveMCPToolsForConfig(m, metadata); err != nil {
 		return cached, err
 	}
 	return metadata, nil
@@ -313,7 +313,7 @@ func (s *lazyMCPSession) call(ctx context.Context, name string, in json.RawMessa
 	s.mu.Lock()
 	transportClosed := err != nil && strings.Contains(err.Error(), "connection closed")
 	for _, block := range result.Content {
-		if result.IsError && strings.Contains(block.Text, "mcp: connection closed") {
+		if result.IsError && strings.HasPrefix(block.Text, "Error: mcp: connection closed") {
 			transportClosed = true
 		}
 	}
