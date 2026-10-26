@@ -20,30 +20,32 @@ import (
 // Plan 是完整部署计划 = deploy_params 持久化内容。所有进程台账（server_pid/
 // remote_pid/stage_token/远端路径）也回写进来，满足受管资源原则。
 type Plan struct {
-	Kind         string   `json:"kind"`                 // socks | portfwd
-	Adapter      string   `json:"adapter"`              // chisel
-	TaskID       int64    `json:"task_id"`              // 归属任务
-	ViaSessionID int64    `json:"via_session_id"`       // 经哪个立足点部署
-	ListenHost   string   `json:"listen_host"`          // 平台侧 server 绑定地址
-	ListenPort   int      `json:"listen_port"`          // 平台侧 server 端口（目标回连口）
-	SocksPort    int      `json:"socks_port,omitempty"` // socks：平台回环上的 socks5 入口
-	LocalPort    int      `json:"local_port,omitempty"` // portfwd：平台回环上的转发入口
-	TargetHost   string   `json:"target_host,omitempty"`
-	TargetPort   int      `json:"target_port,omitempty"`
-	PlatformAddr string   `json:"platform_addr"` // 目标回连地址 host:port(callback host + listen port)
-	AuthUser     string   `json:"auth_user"`
-	AuthPass     string   `json:"auth_pass"`   // crypto/rand 16 字节 hex；只在此处与 authfile，不进命令行
-	AuthFile     string   `json:"auth_file"`   // 平台侧 --authfile 路径（0600)
-	ServerArgs   []string `json:"server_args"` // chisel server 参数（不含 auth)
-	ServerPID    int      `json:"server_pid,omitempty"`
-	ServerLog    string   `json:"server_log"`
-	RemoteDir    string   `json:"remote_dir"` // 目标侧 /tmp/.artex-<rand>
-	RemoteBin    string   `json:"remote_bin"`
-	RemoteLog    string   `json:"remote_log"`
-	RemotePID    int      `json:"remote_pid,omitempty"`
-	StageToken   string   `json:"stage_token,omitempty"` // 一次性投递条目（用完删）
-	VerifyAddr   string   `json:"verify_addr,omitempty"` // 决定性验证目标 host:port
-	ClientArgs   []string `json:"client_args"`           // chisel client 参数（不含 auth,auth 走 AUTH env)
+	Kind           string   `json:"kind"`                 // socks | portfwd
+	Adapter        string   `json:"adapter"`              // chisel
+	TaskID         int64    `json:"task_id"`              // 归属任务
+	ViaSessionID   int64    `json:"via_session_id"`       // 经哪个立足点部署
+	ListenHost     string   `json:"listen_host"`          // 平台侧 server 绑定地址
+	ListenPort     int      `json:"listen_port"`          // 平台侧 server 端口（目标回连口）
+	SocksPort      int      `json:"socks_port,omitempty"` // socks：平台回环上的 socks5 入口
+	LocalPort      int      `json:"local_port,omitempty"` // portfwd：平台回环上的转发入口
+	TargetHost     string   `json:"target_host,omitempty"`
+	TargetPort     int      `json:"target_port,omitempty"`
+	PlatformAddr   string   `json:"platform_addr"` // 目标回连地址 host:port(callback host + listen port)
+	AuthUser       string   `json:"auth_user"`
+	AuthPass       string   `json:"auth_pass"`   // crypto/rand 16 字节 hex；只在此处与 authfile，不进命令行
+	AuthFile       string   `json:"auth_file"`   // 平台侧 --authfile 路径（0600)
+	ServerArgs     []string `json:"server_args"` // chisel server 参数（不含 auth)
+	ServerPID      int      `json:"server_pid,omitempty"`
+	ServerLog      string   `json:"server_log"`
+	RemoteDir      string   `json:"remote_dir"` // 目标侧 /tmp/.artex-<rand>
+	RemoteBin      string   `json:"remote_bin"`
+	RemoteLog      string   `json:"remote_log"`
+	RemotePID      int      `json:"remote_pid,omitempty"`
+	StageToken     string   `json:"stage_token,omitempty"`     // 一次性投递条目（用完删）
+	VerifyAddr     string   `json:"verify_addr,omitempty"`     // 决定性验证目标 host:port
+	ClientArgs     []string `json:"client_args"`               // chisel client 参数（不含 auth,auth 走 AUTH env)
+	ClientPlatform string   `json:"client_platform,omitempty"` // 实测目标平台，例如 linux/amd64
+	ClientSHA256   string   `json:"client_sha256,omitempty"`   // 本次目标端文件摘要，重拉时重新探测/校验
 	// suo5 适配器字段（omitempty，向后兼容既有 chisel deploy_params):
 	PayloadFile string `json:"payload_file,omitempty"` // 平台侧 payloads 目录里的文件名（suo5.php 等）
 	PayloadName string `json:"payload_name,omitempty"` // 目标侧随机文件名

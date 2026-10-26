@@ -134,3 +134,118 @@ func TestCheckEnvOverride(t *testing.T) {
 		t.Fatalf("env 覆盖未生效: status=%v path=%s", r.Status, r.Path)
 	}
 }
+
+func TestHostVariantSelectsItsOwnPathAndHash(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("native-tool-variant")
+	if err := os.WriteFile(filepath.Join(dir, "native"), content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(content)
+	host := runtime.GOOS + "/" + runtime.GOARCH
+	r := CheckEntry(Entry{
+		Name: "tool", Execution: "host", Path: "legacy", Platform: "legacy/platform", SHA256: strings.Repeat("0", 64),
+		Variants: []Variant{
+			{Platform: "unavailable/platform", Path: "foreign", SHA256: strings.Repeat("1", 64)},
+			{Platform: host, Path: "native", Version: "native-version", SHA256: hex.EncodeToString(sum[:])},
+		},
+	}, dir)
+	if r.Status != StatusOK || r.Entry.Platform != host || r.Entry.Version != "native-version" || r.Path != filepath.Join(dir, "native") || r.PlatformWarning != "" {
+		t.Fatalf("host variant was not independently selected and verified: %+v", r)
+	}
+}
+
+func TestUnpinnedVariantNeverInheritsLegacyChecksum(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "native"), []byte("tool"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r := CheckEntry(Entry{
+		Name: "tool", Path: "native", SHA256: strings.Repeat("0", 64),
+		Variants: []Variant{{Platform: runtime.GOOS + "/" + runtime.GOARCH}},
+	}, dir)
+	if r.Status != StatusUnpinned || r.Entry.SHA256 != "" || r.Actual != "" {
+		t.Fatalf("platform inherited an unrelated checksum: %+v", r)
+	}
+}
+
+func TestMissingHostVariantInspectsOverrideWithoutForeignChecksum(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARTEX_TEST_NATIVE_VARIANT", executable)
+	r := CheckEntry(Entry{
+		Name: "tool", Env: "ARTEX_TEST_NATIVE_VARIANT", SHA256: strings.Repeat("0", 64),
+		Variants: []Variant{{Platform: "unavailable/platform", SHA256: strings.Repeat("1", 64)}},
+	}, t.TempDir())
+	if r.Status != StatusUnpinned || r.PlatformWarning == "" || r.HostIncompatible || r.Entry.SHA256 != "" {
+		t.Fatalf("missing platform pin applied another platform checksum: %+v", r)
+	}
+}
+
+func TestTargetVariantsAreAllCheckedRegardlessOfHost(t *testing.T) {
+	dir := t.TempDir()
+	var variants []Variant
+	for _, item := range []struct {
+		platform string
+		machine  uint16
+	}{
+		{"linux/amd64", 62},
+		{"linux/arm64", 183},
+	} {
+		name := strings.ReplaceAll(item.platform, "/", "-")
+		content := elfFixture(item.machine)
+		if err := os.WriteFile(filepath.Join(dir, name), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(content)
+		variants = append(variants, Variant{Platform: item.platform, Path: name, SHA256: hex.EncodeToString(sum[:])})
+	}
+	results := Check(&Manifest{Tools: []Entry{{Name: "target", Execution: "target", Variants: variants}}}, dir)
+	if len(results) != 2 {
+		t.Fatalf("checked %d target variants, want both", len(results))
+	}
+	for _, r := range results {
+		if r.Status != StatusOK || r.PlatformWarning != "" || r.HostIncompatible {
+			t.Errorf("target variant incorrectly selected by host: %+v", r)
+		}
+	}
+}
+
+func TestTargetExecutableHeaderMustMatchDeclaredPlatform(t *testing.T) {
+	dir := t.TempDir()
+	content := elfFixture(62)
+	if err := os.WriteFile(filepath.Join(dir, "target"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(content)
+	r := CheckEntry(Entry{Name: "target", Execution: "target", Path: "target", Platform: "linux/arm64", SHA256: hex.EncodeToString(sum[:])}, dir)
+	if r.Status != StatusOK || r.PlatformWarning == "" || r.HostIncompatible {
+		t.Fatalf("target architecture mismatch was not reported separately from integrity: %+v", r)
+	}
+}
+
+func TestPlatformMatchesUniversalExecutables(t *testing.T) {
+	for _, tc := range []struct {
+		list, want string
+		matches    bool
+	}{
+		{"darwin/amd64,darwin/arm64", "darwin/arm64", true},
+		{"linux/amd64", "darwin/arm64", false},
+		{"linux/amd64", "linux/arm64,linux/amd64", true},
+		{"any", "darwin/arm64", true},
+		{"", "darwin/arm64", false},
+	} {
+		if got := PlatformMatches(tc.list, tc.want); got != tc.matches {
+			t.Errorf("PlatformMatches(%q, %q) = %v, want %v", tc.list, tc.want, got, tc.matches)
+		}
+	}
+}
+
+func TestMissingToolPathDoesNotCountDataDirectoryAsInstalled(t *testing.T) {
+	r := CheckEntry(Entry{Name: "no-path"}, t.TempDir())
+	if r.Status != StatusMissing || r.Path != "" || r.PlatformWarning == "" {
+		t.Fatalf("data directory was incorrectly treated as an installed tool: %+v", r)
+	}
+}

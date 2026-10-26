@@ -28,15 +28,25 @@ import (
 
 // Entry 是清单里一个外部工具的记录。
 type Entry struct {
-	Name      string `json:"name"`                // 工具名（唯一）
-	Purpose   string `json:"purpose"`             // 用途（一行话）
-	Version   string `json:"version"`             // 钉的版本；空 = 未钉
-	Platform  string `json:"platform"`            // 适用平台（如 linux/amd64;any = 不限）
-	SHA256    string `json:"sha256"`              // 钉的 sha256；空串 = 未钉（不校验）
-	Path      string `json:"path"`                // 相对 data 目录的路径（文件或目录）
-	Env       string `json:"env"`                 // 可选：覆盖路径的环境变量（如 ARTEX_SUO5_PATH)
-	Category  string `json:"category"`            // tunnel（隧道） | arsenal（军火库）
-	Execution string `json:"execution,omitempty"` // host | target; empty preserves legacy target-payload inference
+	Name      string    `json:"name"`                // 工具名（唯一）
+	Purpose   string    `json:"purpose"`             // 用途（一行话）
+	Version   string    `json:"version"`             // 钉的版本；空 = 未钉
+	Platform  string    `json:"platform"`            // 适用平台（如 linux/amd64;any = 不限）
+	SHA256    string    `json:"sha256"`              // 钉的 sha256；空串 = 未钉（不校验）
+	Path      string    `json:"path"`                // 相对 data 目录的路径（文件或目录）
+	Env       string    `json:"env"`                 // 可选：覆盖路径的环境变量（如 ARTEX_SUO5_PATH)
+	Category  string    `json:"category"`            // tunnel（隧道） | arsenal（军火库）
+	Execution string    `json:"execution,omitempty"` // host | target; empty preserves legacy target-payload inference
+	Variants  []Variant `json:"variants,omitempty"`  // platform-specific paths and hashes; never inherit another platform hash
+}
+
+// Variant pins one host or target platform independently of the legacy entry.
+// A blank hash intentionally means unpinned, even when Entry.SHA256 is set.
+type Variant struct {
+	Platform string `json:"platform"`
+	Path     string `json:"path,omitempty"`
+	Version  string `json:"version,omitempty"`
+	SHA256   string `json:"sha256,omitempty"`
 }
 
 // Manifest 是 tools-manifest.json 的整体结构。
@@ -99,6 +109,14 @@ func Check(m *Manifest, dataDir string) []CheckResult {
 	}
 	out := make([]CheckResult, 0, len(m.Tools))
 	for _, e := range m.Tools {
+		// Target resources belong to the target platform, not the machine running
+		// ARTEX. Check all declared variants without selecting by host OS.
+		if IsTargetArtifact(e) && len(e.Variants) > 0 {
+			for _, v := range e.Variants {
+				out = append(out, CheckEntry(applyVariant(e, v), dataDir))
+			}
+			continue
+		}
 		out = append(out, CheckEntry(e, dataDir))
 	}
 	return out
@@ -106,12 +124,33 @@ func Check(m *Manifest, dataDir string) []CheckResult {
 
 // CheckEntry 校验单个清单条目（见 Check)。
 func CheckEntry(e Entry, dataDir string) CheckResult {
-	r := CheckResult{Entry: e, Status: StatusMissing}
+	host := runtime.GOOS + "/" + runtime.GOARCH
+	selectionWarning := ""
+	if len(e.Variants) > 0 {
+		platform := host
+		if IsTargetArtifact(e) {
+			platform = e.Platform
+		}
+		selected, ok := selectVariant(e, platform)
+		if ok {
+			e = selected
+		} else {
+			// An explicit environment override may still point at a valid native
+			// tool. Inspect it, but never apply a checksum from another platform.
+			e.SHA256, e.Version, e.Platform, e.Variants = "", "", "", nil
+			selectionWarning = "清单未提供 " + platform + " 的唯一平台版本；请补充匹配平台的工具清单"
+		}
+	}
+	r := CheckResult{Entry: e, Status: StatusMissing, PlatformWarning: selectionWarning}
 	p := ""
 	if e.Env != "" {
 		p = strings.TrimSpace(os.Getenv(e.Env))
 	}
 	if p == "" {
+		if strings.TrimSpace(e.Path) == "" {
+			r.PlatformWarning = "工具清单未设置文件或目录路径"
+			return r
+		}
 		p = filepath.Join(dataDir, filepath.FromSlash(e.Path))
 	}
 	r.Path = p
@@ -130,18 +169,26 @@ func CheckEntry(e Entry, dataDir string) CheckResult {
 		r.Status = StatusOK
 	}
 	if !st.IsDir() {
-		r.ActualPlatform = executablePlatform(p)
+		r.ActualPlatform = InspectExecutablePlatform(p)
 	}
-	target := isTargetArtifact(e)
-	host := runtime.GOOS + "/" + runtime.GOARCH
-	if !target && r.ActualPlatform != "" && !platformIncludes(r.ActualPlatform, host) {
+	target := IsTargetArtifact(e)
+	if !target && r.ActualPlatform != "" && !PlatformMatches(r.ActualPlatform, host) {
 		r.HostIncompatible = true
 		r.PlatformWarning = "本机工具架构为 " + r.ActualPlatform + "，当前主机为 " + host
 		r.Status = StatusUnpinned
 		return r
 	}
-	if !target && e.Platform != "" && e.Platform != "any" && !platformIncludes(e.Platform, host) {
+	if !target && e.Platform != "" && e.Platform != "any" && !PlatformMatches(e.Platform, host) {
 		r.PlatformWarning = "清单校验值适用于 " + e.Platform + "，当前主机为 " + host + "；请提供本机版本并单独钉版"
+		r.Status = StatusUnpinned
+		return r
+	}
+	if target && r.ActualPlatform != "" && e.Platform != "" && e.Platform != "any" && !PlatformMatches(e.Platform, r.ActualPlatform) {
+		r.PlatformWarning = "目标侧资源架构为 " + r.ActualPlatform + "，清单声明为 " + e.Platform
+	}
+	if !target && r.ActualPlatform != "" && runtime.GOOS != "windows" && st.Mode().Perm()&0o111 == 0 {
+		r.HostIncompatible = true
+		r.PlatformWarning = "本机工具缺少执行权限"
 		r.Status = StatusUnpinned
 		return r
 	}
@@ -162,7 +209,9 @@ func CheckEntry(e Entry, dataDir string) CheckResult {
 	return r
 }
 
-func isTargetArtifact(e Entry) bool {
+// IsTargetArtifact reports whether a resource is intended for a remote target.
+// Legacy names retain their existing role when execution is omitted.
+func IsTargetArtifact(e Entry) bool {
 	if e.Execution != "" {
 		return e.Execution == "target"
 	}
@@ -173,17 +222,61 @@ func isTargetArtifact(e Entry) bool {
 	return false
 }
 
-func platformIncludes(list, want string) bool {
+// PlatformMatches compares comma-separated platform sets (including fat Mach-O
+// headers). A match requires a platform in common; "any" matches either side.
+func PlatformMatches(list, want string) bool {
 	for _, p := range strings.Split(list, ",") {
-		if strings.TrimSpace(p) == want {
-			return true
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		for _, q := range strings.Split(want, ",") {
+			q = strings.TrimSpace(q)
+			if q != "" && (p == q || p == "any" || q == "any") {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// executablePlatform only reads headers; it never runs a supplied tool.
-func executablePlatform(path string) string {
+func applyVariant(e Entry, v Variant) Entry {
+	e.Platform = strings.TrimSpace(v.Platform)
+	if v.Path != "" {
+		e.Path = v.Path
+	}
+	e.Version, e.SHA256, e.Variants = v.Version, v.SHA256, nil
+	return e
+}
+
+func selectVariant(e Entry, platform string) (Entry, bool) {
+	var exact, fallback *Variant
+	for i := range e.Variants {
+		v := &e.Variants[i]
+		if strings.TrimSpace(v.Platform) == "any" {
+			if fallback != nil {
+				return e, false
+			}
+			fallback = v
+		} else if PlatformMatches(v.Platform, platform) {
+			if exact != nil {
+				return e, false
+			}
+			exact = v
+		}
+	}
+	if exact != nil {
+		return applyVariant(e, *exact), true
+	}
+	if fallback != nil {
+		return applyVariant(e, *fallback), true
+	}
+	return e, false
+}
+
+// InspectExecutablePlatform only reads ELF, PE and Mach-O headers; it never
+// runs the supplied tool. Unknown or malformed executable formats return "".
+func InspectExecutablePlatform(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
 		return ""

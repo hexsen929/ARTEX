@@ -151,9 +151,15 @@ func (m *Manager) maybeRedeploy(ctx context.Context, id int64, p *Plan, retry ma
 			return
 		}
 	} else {
+		client, err := m.prepareChisel(ctx, sess, p)
+		if err != nil {
+			_ = m.store.UpdateState(ctx, id, db.TunnelError, "重拉预检失败： "+err.Error())
+			m.notifyState(p.TaskID)
+			return
+		}
 		m.killRemote(ctx, sess, p)
 		m.killServer(id, p)
-		if err := m.deployInto(ctx, id, sess, p); err != nil {
+		if err := m.deployInto(ctx, id, sess, p, client); err != nil {
 			_ = m.store.UpdateState(ctx, id, db.TunnelError, "重拉失败： "+err.Error())
 			m.rollbackKeepRow(ctx, id, sess, p)
 			return

@@ -45,13 +45,15 @@ func (s *Server) initTunnels(dataDir string) {
 		suo5PayloadsDir = filepath.Join(dataDir, "tools", "suo5-payloads")
 	}
 	mgr, err := tunnel.NewManager(tunnel.Options{
-		Store:           db.NewTunnelStore(s.m.pg),
-		Stage:           s.stage,
-		Sessions:        s.sessReg,
-		ChiselPath:      chiselPath,
-		Suo5Path:        suo5Path,
-		Suo5PayloadsDir: suo5PayloadsDir,
-		DataDir:         dataDir,
+		Store:            db.NewTunnelStore(s.m.pg),
+		Stage:            s.stage,
+		Sessions:         s.sessReg,
+		ChiselPath:       chiselPath,
+		ChiselTargetsDir: strings.TrimSpace(os.Getenv("ARTEX_CHISEL_TARGETS_DIR")),
+		ChiselTargetPath: strings.TrimSpace(os.Getenv("ARTEX_CHISEL_TARGET_PATH")),
+		Suo5Path:         suo5Path,
+		Suo5PayloadsDir:  suo5PayloadsDir,
+		DataDir:          dataDir,
 	})
 	if err != nil {
 		log.Printf("[tunnel] disabled: %v", err)
@@ -211,6 +213,7 @@ func (s *Server) tunnelDeployTool() actool.CoreTool {
 		Name: "tunnel_deploy",
 		Description: "【隧道四件套 2/4·plan+deploy】经立足点会话部署反向隧道。两个适配器：" +
 			"adapter=chisel（默认能力）：目标能 TCP 出网时用，平台起 chisel server、二进制经受管投递到目标回连；" +
+			"chisel 自动部署目前支持 Linux 目标，按会话实测 OS/CPU 从 tools/targets/<os>-<arch>/chisel 选择客户端，平台本机文件单独匹配本机系统；Windows/Darwin 目标自动进程管理尚未实现。" +
 			"adapter=suo5（目标无出网场景，红日3 复盘缺口）:HTTP 隧道，payload(suo5.jsp/php/aspx，按会话语言自动选）" +
 			"写到 webshell 同目录，平台 suo5 CLI 经入向 HTTP 建 socks5，完全不依赖目标出网，只支持 kind=socks；" +
 			"adapter=auto（默认）：现场跑 probe，能 TCP 出网→chisel，否则→suo5。" +

@@ -137,34 +137,23 @@ func runDoctor(args []string) int {
 		check(worst, "隧道工具", strings.Join(parts, ";"))
 	}
 
-	// 5. 军火库工具存在性汇总（存在 X/Y)
-	{
-		var present, missing, warnings []string
+	// 5. Separate host tools from target resources. Presence of a Linux/Windows
+	// payload must never count as a usable tool on a macOS host.
+	for _, group := range []struct {
+		target bool
+		name   string
+	}{
+		{false, "本机军火库工具"},
+		{true, "目标侧军火库资源"},
+	} {
+		var entries []tools.CheckResult
 		for _, r := range results {
-			if r.Entry.Category != "arsenal" {
-				continue
-			}
-			if r.Status == tools.StatusMissing {
-				missing = append(missing, r.Entry.Name)
-			} else {
-				present = append(present, r.Entry.Name)
-			}
-			if r.PlatformWarning != "" || r.Status == tools.StatusMismatch {
-				warnings = append(warnings, doctorToolNote(r))
+			if r.Entry.Category == "arsenal" && tools.IsTargetArtifact(r.Entry) == group.target {
+				entries = append(entries, r)
 			}
 		}
-		total := len(present) + len(missing)
-		switch {
-		case total == 0:
-			check(docSkip, "军火库工具", "清单缺失，无法汇总")
-		case len(warnings) > 0:
-			check(docWarn, "军火库工具", fmt.Sprintf("存在 %d/%d；需核对：%s", len(present), total, strings.Join(warnings, "; ")))
-		case len(missing) == 0:
-			check(docOK, "军火库工具", fmt.Sprintf("存在 %d/%d", len(present), total))
-		default:
-			check(docWarn, "军火库工具", fmt.Sprintf("存在 %d/%d（缺失: %s)——按需补齐到 %s",
-				len(present), total, strings.Join(missing, ", "), filepath.Join(*dataDir, "tools")))
-		}
+		status, note := doctorToolSummary(entries)
+		check(status, group.name, note)
 	}
 
 	// 6. 门控状态：监听地址非 loopback 时 ARTEX_GATE 是否生效（与 server.NewGate 同规则）
@@ -237,19 +226,59 @@ func runDoctor(args []string) int {
 
 // doctorToolNote 渲染单个工具的自检片段（doctor 报告用）。
 func doctorToolNote(r tools.CheckResult) string {
+	scope := "本机工具"
+	if tools.IsTargetArtifact(r.Entry) {
+		scope = "目标侧资源"
+		if r.Entry.Platform != "" && r.Entry.Platform != "any" {
+			scope += "[" + r.Entry.Platform + "]"
+		}
+	}
+	name := scope + " " + r.Entry.Name
 	if r.PlatformWarning != "" {
-		return fmt.Sprintf("%s 平台待核对（%s；%s）", r.Entry.Name, r.PlatformWarning, r.Path)
+		if r.HostIncompatible {
+			return fmt.Sprintf("%s 本机不可运行（%s；%s）", name, r.PlatformWarning, r.Path)
+		}
+		return fmt.Sprintf("%s 平台待核对（%s；%s）", name, r.PlatformWarning, r.Path)
 	}
 	switch r.Status {
 	case tools.StatusOK:
-		return fmt.Sprintf("%s OK(sha256 一致, %s)", r.Entry.Name, r.Path)
+		return fmt.Sprintf("%s OK(sha256 一致, %s)", name, r.Path)
 	case tools.StatusUnpinned:
-		return fmt.Sprintf("%s 存在（未钉 sha256, %s)", r.Entry.Name, r.Path)
+		return fmt.Sprintf("%s 存在（未钉 sha256, %s)", name, r.Path)
 	case tools.StatusMismatch:
-		return fmt.Sprintf("%s 哈希不匹配（期望 %s 实际 %s；可能自编译，仅警告）", r.Entry.Name, r.Entry.SHA256, r.Actual)
+		return fmt.Sprintf("%s 哈希不匹配（期望 %s 实际 %s；可能自编译，仅警告）", name, r.Entry.SHA256, r.Actual)
 	default:
-		return fmt.Sprintf("%s 缺失（期望 %s)", r.Entry.Name, r.Path)
+		return fmt.Sprintf("%s 缺失（期望 %s)", name, r.Path)
 	}
+}
+
+// doctorToolSummary describes static file readiness; it does not claim to have
+// invoked a tool or validated a target protocol. Incompatible or unverified
+// platforms and bad hashes do not increase the ready count.
+func doctorToolSummary(results []tools.CheckResult) (doctorStatus, string) {
+	if len(results) == 0 {
+		return docSkip, "清单没有此类条目"
+	}
+	ready, unpinned := 0, 0
+	var notes []string
+	for _, r := range results {
+		if r.PlatformWarning != "" || r.HostIncompatible || r.Status == tools.StatusMissing || r.Status == tools.StatusMismatch {
+			notes = append(notes, doctorToolNote(r))
+			continue
+		}
+		ready++
+		if r.Status == tools.StatusUnpinned {
+			unpinned++
+		}
+	}
+	note := fmt.Sprintf("文件及平台检查通过 %d/%d", ready, len(results))
+	if unpinned > 0 {
+		note += fmt.Sprintf("（其中 %d 项未钉 sha256；目录仅查存在性）", unpinned)
+	}
+	if len(notes) > 0 {
+		return docWarn, note + "; " + strings.Join(notes, "; ")
+	}
+	return docOK, note
 }
 
 // doctorLoopback 判定监听地址是否只绑回环（与 server.isLoopbackAddr 同规则；

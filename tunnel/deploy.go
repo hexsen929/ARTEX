@@ -39,13 +39,15 @@ const (
 // Manager 是隧道子系统的运行时：部署/验证/回滚/巡检/回收。受管资源原则——
 // 所有外部暴露面（server 进程、远端进程、stage 条目、监听端口）都经它登记与回收。
 type Manager struct {
-	store           *db.TunnelStore
-	stage           *stage.Manager
-	sessions        *session.Registry
-	chiselPath      string // 空 = 二进制缺失，Deploy 返回明确错误
-	suo5Path        string // 空 = suo5 二进制缺失，suo5 适配器 Deploy 返回明确错误
-	suo5PayloadsDir string // 空 = payloads 目录缺失，同上
-	dataDir         string // 平台侧隧道工作目录（authfile/日志）
+	store            *db.TunnelStore
+	stage            *stage.Manager
+	sessions         *session.Registry
+	chiselPath       string // 空 = 二进制缺失，Deploy 返回明确错误
+	chiselTargetsDir string // 目标侧按 OS/arch 分开存放，绝不复用本机文件
+	chiselTargetPath string // 显式目标文件覆盖，仍须匹配探测到的目标平台
+	suo5Path         string // 空 = suo5 二进制缺失，suo5 适配器 Deploy 返回明确错误
+	suo5PayloadsDir  string // 空 = payloads 目录缺失，同上
+	dataDir          string // 平台侧隧道工作目录（authfile/日志）
 	// OnListenStart/OnListenStop 是监听端口台账钩子（server 层注册进端口审计）。
 	OnListenStart func(port int)
 	OnListenStop  func(port int)
@@ -58,10 +60,12 @@ type Manager struct {
 
 // Options 是 Manager 装配输入。
 type Options struct {
-	Store      *db.TunnelStore
-	Stage      *stage.Manager
-	Sessions   *session.Registry
-	ChiselPath string // ARTEX_CHISEL_PATH 或 data/tools/chisel；不存在时 Deploy 明确报错
+	Store            *db.TunnelStore
+	Stage            *stage.Manager
+	Sessions         *session.Registry
+	ChiselPath       string // ARTEX_CHISEL_PATH 或 data/tools/chisel；不存在时 Deploy 明确报错
+	ChiselTargetsDir string // ARTEX_CHISEL_TARGETS_DIR 或 data/tools/targets
+	ChiselTargetPath string // ARTEX_CHISEL_TARGET_PATH；空时按目标平台选择目录
 	// Suo5Path 是 suo5 CLI 路径（ARTEX_SUO5_PATH 或 data/tools/suo5);
 	// Suo5PayloadsDir 是 payload 目录（ARTEX_SUO5_PAYLOADS_DIR 或 data/tools/suo5-payloads)。
 	// 缺失时仅 suo5 适配器 Deploy 报明确错误，不影响 chisel。
@@ -82,8 +86,12 @@ func NewManager(o Options) (*Manager, error) {
 	m := &Manager{
 		store: o.Store, stage: o.Stage, sessions: o.Sessions,
 		chiselPath: o.ChiselPath, dataDir: dir,
+		chiselTargetsDir: o.ChiselTargetsDir, chiselTargetPath: o.ChiselTargetPath,
 		suo5Path: o.Suo5Path, suo5PayloadsDir: o.Suo5PayloadsDir,
 		procs: map[int64]*exec.Cmd{},
+	}
+	if m.chiselTargetsDir == "" {
+		m.chiselTargetsDir = filepath.Join(o.DataDir, "tools", "targets")
 	}
 	if o.ChiselPath != "" {
 		if sum, err := fileSHA256(o.ChiselPath); err != nil {
@@ -190,6 +198,10 @@ func (m *Manager) Deploy(ctx context.Context, p *Plan) (*db.TunnelRecord, error)
 	if !ok {
 		return nil, fmt.Errorf("会话 %d 不在注册表，无法部署", p.ViaSessionID)
 	}
+	client, err := m.prepareChisel(ctx, sess, p)
+	if err != nil {
+		return nil, err
+	}
 	rec := &db.TunnelRecord{
 		TaskID: p.TaskID, Kind: p.Kind, Adapter: p.Adapter,
 		ListenHost: p.ListenHost, ListenPort: p.ListenPort,
@@ -202,7 +214,7 @@ func (m *Manager) Deploy(ctx context.Context, p *Plan) (*db.TunnelRecord, error)
 	if err != nil {
 		return nil, fmt.Errorf("台账落库失败: %w", err)
 	}
-	if err := m.deployInto(ctx, id, sess, p); err != nil {
+	if err := m.deployInto(ctx, id, sess, p, client); err != nil {
 		m.rollback(ctx, id, sess, p)
 		return nil, err
 	}
@@ -222,7 +234,7 @@ func (m *Manager) notifyState(taskID int64) {
 }
 
 // deployInto 按层推进，每层成功即把台账参数落库（进程台账逐层补齐）。
-func (m *Manager) deployInto(ctx context.Context, id int64, sess session.Session, p *Plan) error {
+func (m *Manager) deployInto(ctx context.Context, id int64, sess session.Session, p *Plan, client chiselClientBinary) error {
 	// 层 1：平台侧 chisel server(authfile 0600,auth 不进命令行）。
 	if err := os.WriteFile(p.AuthFile, []byte(p.AuthfileContent()), 0o600); err != nil {
 		return fmt.Errorf("层 server_process: authfile 写入失败: %w", err)
@@ -250,7 +262,7 @@ func (m *Manager) deployInto(ctx context.Context, id int64, sess session.Session
 	}
 
 	// 层 2：客户端二进制受管投递（stage 一次性 URL;curl → wget → 会话分块写入）。
-	if err := m.deliver(ctx, sess, p); err != nil {
+	if err := m.deliver(ctx, sess, p, client); err != nil {
 		return fmt.Errorf("层 stage_entry: %w", err)
 	}
 	m.saveParams(ctx, id, p)
@@ -271,11 +283,14 @@ func (m *Manager) deployInto(ctx context.Context, id int64, sess session.Session
 }
 
 // deliver 经 stage 投递客户端二进制到目标 RemoteBin 并 chmod+x。
-func (m *Manager) deliver(ctx context.Context, sess session.Session, p *Plan) error {
+func (m *Manager) deliver(ctx context.Context, sess session.Session, p *Plan, client chiselClientBinary) error {
 	if m.stage == nil {
 		return fmt.Errorf("stage 暂存服务未启用，无法投递")
 	}
-	entry, err := m.stage.PutFile(m.chiselPath, stage.PutOpts{
+	if sum, err := fileSHA256(client.path); err != nil || sum != client.sha256 {
+		return fmt.Errorf("目标侧 chisel 在校验后发生变化，请重新部署")
+	}
+	entry, err := m.stage.PutFile(client.path, stage.PutOpts{
 		OneShot: true, TaskID: strconv.FormatInt(p.TaskID, 10),
 	})
 	if err != nil {
@@ -293,9 +308,12 @@ func (m *Manager) deliver(ctx context.Context, sess session.Session, p *Plan) er
 	}
 	// 回退：目标无 curl/wget（或被拦）——经会话分块写入（session.WriteFile 内部分块）。
 	log.Printf("[tunnel] 目标直接下载失败，回退会话分块写入（%s)…", p.RemoteDir)
-	data, rerr := os.ReadFile(m.chiselPath)
+	data, rerr := os.ReadFile(client.path)
 	if rerr != nil {
-		return fmt.Errorf("读取本地 chisel 失败: %w", rerr)
+		return fmt.Errorf("读取目标侧 chisel 失败: %w", rerr)
+	}
+	if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != client.sha256 {
+		return fmt.Errorf("目标侧 chisel 在校验后发生变化，已停止会话写入")
 	}
 	if _, _, err := sess.Exec(ctx, "mkdir -p "+p.RemoteDir, probeTimeout); err != nil {
 		return fmt.Errorf("远端目录创建失败: %w", err)
