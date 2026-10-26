@@ -67,7 +67,7 @@ jobs:
           "$tool_dir/suo5" --help
           "$tool_dir/chisel" --version
           "$tool_dir/gogo" -h
-          "$tool_dir/fscan" -h
+          "$tool_dir/fscan" --help
           "$tool_dir/ligolo-proxy" -h
           "$tool_dir/httpx" -version
           "$tool_dir/katana" -version

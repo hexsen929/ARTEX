@@ -34,7 +34,7 @@ def main():
     parser.add_argument("--tools-dir", type=Path, required=True)
     args = parser.parse_args()
     tools = args.tools_dir.absolute()
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"}
     for name in ("impacket", "nxc", "pypykatz", "lazagne-macos", "penelope"):
         subprocess.run([str(tools / name), "--help"], env=env, check=True, timeout=60, stdout=subprocess.DEVNULL)
         print("CLI_HELP_OK", name, flush=True)
@@ -45,8 +45,10 @@ def main():
         while listen_port == mcp_port:
             mcp_port = free_port()
         env["ARTEX_PENELOPE_DATA_DIR"] = str(root / "state")
+        env["ARTEX_PENELOPE_STARTUP_DIAGNOSTICS"] = "1"
         with (root / "handler.log").open("wb") as log:
             process = subprocess.Popen([str(tools / "penelope"), "--mcp", "--mcp-host", "127.0.0.1", "--mcp-port", str(mcp_port), "--mcp-token", token, "-p", str(listen_port), "-i", "127.0.0.1", "-C"], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=env)
+            passed = False
             try:
                 url = "http://127.0.0.1:" + str(mcp_port) + "/"
                 deadline = time.monotonic() + 20
@@ -62,6 +64,15 @@ def main():
                         if time.monotonic() >= deadline:
                             raise RuntimeError("Penelope MCP readiness timeout")
                         time.sleep(0.2)
+                # A successful early initialize can race an upstream non-TTY
+                # menu crash. Verify the production DEVNULL process remains
+                # usable after listener initialization has completed.
+                steady_deadline = time.monotonic() + 2.5
+                while time.monotonic() < steady_deadline:
+                    if process.poll() is not None:
+                        raise RuntimeError("Penelope exited after initial MCP readiness")
+                    time.sleep(0.1)
+                request(url, token, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "artex-package-smoke", "version": "1"}})
                 try:
                     request(url, "wrong-token", "tools/list")
                     raise RuntimeError("Penelope accepted an invalid MCP token")
@@ -79,7 +90,12 @@ def main():
                     raise RuntimeError("Expected an empty, isolated session handler")
                 # Querying the listener does not create a shell connection.
                 subprocess.run(["lsof", "-nP", "-a", "-p", str(process.pid), "-iTCP:" + str(listen_port), "-sTCP:LISTEN"], check=True, stdout=subprocess.DEVNULL, timeout=5)
-                print("PENELOPE_MCP_OK authenticated initialize/tools-list/empty-sessions; listener bound; no target operations", flush=True)
+                log.flush()
+                startup_log = (root / "handler.log").read_text(errors="replace")
+                if any(marker in startup_log for marker in ("termios.error", "Traceback (most recent call last)", "Oops...")):
+                    raise RuntimeError("Penelope startup reported an exception")
+                passed = True
+                print("PENELOPE_MCP_OK authenticated initialize/tools-list/empty-sessions after 2.5s; headless listener bound; no target operations", flush=True)
             except Exception:
                 log.flush()
                 diagnostic = (root / "handler.log").read_text(errors="replace")[-6000:].replace(token, "<ephemeral-token>")
@@ -88,10 +104,15 @@ def main():
             finally:
                 process.terminate()
                 try:
-                    process.wait(timeout=5)
+                    exit_code = process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
+                    if passed:
+                        raise RuntimeError("Penelope ignored managed SIGTERM shutdown")
+                else:
+                    if passed and exit_code != 0:
+                        raise RuntimeError("Penelope SIGTERM shutdown did not exit cleanly")
 
 
 if __name__ == "__main__":

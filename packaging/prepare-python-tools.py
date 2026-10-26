@@ -31,6 +31,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 SOURCE_PATH = ROOT / "python-tools-sources.json"
 GROUPS = ("impacket", "nxc", "pypykatz", "lazagne-macos", "penelope")
+PENELOPE_ADAPTER_REVISION = 3
 PURPOSES = {
     "impacket": "Windows protocol tool collection; invoke impacket <script.py> [arguments].",
     "nxc": "NetExec protocol test CLI in an isolated Python environment.",
@@ -100,9 +101,8 @@ def fetch(url: str, expected: str) -> bytes:
     return data
 
 
-def source_zip(spec: dict, destination: Path) -> Path:
-    url = "https://codeload.github.com/" + spec["repository"] + "/zip/" + spec["commit"]
-    archive = zipfile.ZipFile(io.BytesIO(fetch(url, spec["sha256"])))
+def unpack_source_zip(data: bytes, destination: Path) -> Path:
+    archive = zipfile.ZipFile(io.BytesIO(data))
     total = 0
     roots = set()
     for entry in archive.infolist():
@@ -117,6 +117,34 @@ def source_zip(spec: dict, destination: Path) -> Path:
         fail("Expected one source archive root")
     archive.extractall(destination)
     return destination / next(iter(roots))
+
+
+def source_zip(spec: dict, destination: Path) -> Path:
+    url = "https://codeload.github.com/" + spec["repository"] + "/zip/" + spec["commit"]
+    return unpack_source_zip(fetch(url, spec["sha256"]), destination)
+
+
+def resource_spec(name: str, sources: dict) -> tuple[str, str, str]:
+    spec = sources["sources"][name]
+    if name == "penelope":
+        return ("resources/penelope.py", "https://raw.githubusercontent.com/" + spec["repository"] + "/" + spec["commit"] + "/penelope.py", spec["sha256"])
+    if name == "lazagne-macos":
+        return ("resources/lazagne-macos.zip", "https://codeload.github.com/" + spec["repository"] + "/zip/" + spec["commit"], spec["sha256"])
+    fail("Unknown source resource: " + name)
+
+
+def resource_bytes(name: str, wheelhouse: Path | None, index: dict, sources: dict) -> bytes:
+    relative, url, expected = resource_spec(name, sources)
+    if wheelhouse is None:
+        return fetch(url, expected)
+    record = index.get("resources", {}).get(name)
+    if not record or record.get("file") != relative or record.get("sha256") != expected:
+        fail("Offline source resource is missing or has different provenance: " + name)
+    path = wheelhouse / relative
+    safe_path(path)
+    if not path.is_file() or digest(path) != expected:
+        fail("Offline source resource checksum mismatch: " + name)
+    return path.read_bytes()
 
 
 def run(command: list[str], *, cwd: Path | None = None, env: dict | None = None) -> None:
@@ -151,7 +179,12 @@ def build_wheelhouse(args: argparse.Namespace, sources: dict) -> None:
     if destination.exists() and any(destination.iterdir()):
         fail("Wheelhouse output must be new or empty")
     destination.mkdir(parents=True, exist_ok=True)
-    index = {"schema": 1, "platform": host_platform(), "python": "3.11", "sources_sha256": digest(SOURCE_PATH), "groups": {}, "sources": sources["sources"]}
+    index = {"schema": 1, "platform": host_platform(), "python": "3.11", "sources_sha256": digest(SOURCE_PATH), "groups": {}, "sources": sources["sources"], "resources": {}}
+    for name in ("penelope", "lazagne-macos"):
+        if name in args.tools:
+            relative, url, expected = resource_spec(name, sources)
+            atomic_bytes(destination / relative, fetch(url, expected))
+            index["resources"][name] = {"file": relative, "sha256": expected, "source_url": url}
     pip = [args.python, "-m", "pip", "--disable-pip-version-check", "--no-cache-dir"]
     with tempfile.TemporaryDirectory(prefix="artex-python-sources-") as temporary:
         temporary_path = Path(temporary)
@@ -224,6 +257,8 @@ def validate_wheelhouse(path: Path, sources: dict, names: list[str]) -> dict:
     if index["platform"] != host_platform() or index["python"] != "3.11" or index["sources_sha256"] != digest(SOURCE_PATH):
         fail("Wheelhouse provenance, platform, or Python version mismatch")
     for name in names:
+        if name in ("penelope", "lazagne-macos"):
+            resource_bytes(name, path, index, sources)
         if name == "penelope":
             continue
         group = index["groups"].get(name)
@@ -270,6 +305,37 @@ def manifest_entry(record: dict) -> dict:
     return {key: record[key] for key in fields if key in record}
 
 
+def adapt_penelope(upstream: bytes) -> bytes:
+    original_line = b"self.basedir = globals().get('_ephemeral_root') or (real_home / f'.{__program__}')"
+    replacement_line = b"self.basedir = Path(os.environ['ARTEX_PENELOPE_DATA_DIR']) if os.environ.get('ARTEX_PENELOPE_DATA_DIR') else (globals().get('_ephemeral_root') or (real_home / f'.{__program__}'))"
+    main_guard = b'if __name__ == "__main__":\n\tmain()'
+    listener_tail = b'\t\tlistener_menu()\n\t\tsignal.signal(signal.SIGINT, keyboard_interrupt)\n\t\tmenu.start()'
+    if upstream.count(original_line) != 1 or upstream.count(main_guard) != 1 or upstream.count(listener_tail) != 1:
+        fail("Penelope source no longer matches the reviewed adapter")
+    diagnostic = b'''if os.environ.get('ARTEX_PENELOPE_STARTUP_DIAGNOSTICS') == '1':
+\timport faulthandler
+\tfaulthandler.enable()
+\tfaulthandler.dump_traceback_later(8, repeat=True)
+\tif hasattr(signal, 'SIGUSR2'):
+\t\tfaulthandler.register(signal.SIGUSR2, all_threads=True)
+
+'''
+    headless_tail = b'''\t\t# ARTEX manages this MCP handler without a controlling terminal.
+\t\t# -C disables session attachment, but upstream listener_menu still calls
+\t\t# tty.setraw unconditionally. Keep the Core and MCP threads alive while
+\t\t# retaining main()'s existing SIGINT/SIGTERM shutdown handlers.
+\t\tif options.mcp and not sys.stdin.isatty():
+\t\t\twhile core.started:
+\t\t\t\ttime.sleep(0.2)
+\t\telse:
+\t\t\tlistener_menu()
+\t\t\tsignal.signal(signal.SIGINT, keyboard_interrupt)
+\t\t\tmenu.start()'''
+    patched = upstream.replace(original_line, replacement_line).replace(listener_tail, headless_tail).replace(main_guard, diagnostic + main_guard)
+    ast.parse(patched.decode())
+    return patched
+
+
 def runtime_defaults(name: str, destination: Path) -> dict[str, str]:
     if name == "nxc":
         return {"NXC_PATH": str(destination / "runtime" / "nxc")}
@@ -304,6 +370,8 @@ def verify_existing_record(record: dict, destination: Path, sources: dict, index
         fail("Existing tool uses a different source/version; preserve it and prepare a new destination: " + name)
     if name != "penelope" and record.get("wheelhouse_group") != index["groups"].get(name):
         fail("Existing tool uses a different wheel lock; preserve it and prepare a new destination: " + name)
+    if name == "penelope" and record.get("adapter_revision") != PENELOPE_ADAPTER_REVISION:
+        fail("Existing Penelope uses a different adapter; preserve it and prepare a new destination")
     for path_key, hash_key in (("path", "sha256"), ("resolved_executable", "resolved_sha256")):
         if path_key not in record:
             fail("Existing Python record lacks entry provenance: " + name)
@@ -322,7 +390,7 @@ def install(args: argparse.Namespace, sources: dict) -> None:
     destination = args.destination.absolute()
     safe_path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    index = validate_wheelhouse(args.wheelhouse.absolute(), sources, args.tools) if any(n != "penelope" for n in args.tools) else {}
+    index = validate_wheelhouse(args.wheelhouse.absolute(), sources, args.tools) if args.wheelhouse is not None else {}
     lock_path = destination / "python-tools-install.lock.json"
     previous = json.loads(lock_path.read_text()) if lock_path.exists() else {"schema": 1, "host_platform": host_platform(), "records": []}
     if previous.get("schema") != 1 or previous.get("host_platform") != host_platform():
@@ -355,16 +423,11 @@ def install(args: argparse.Namespace, sources: dict) -> None:
             if name == "penelope":
                 spec = sources["sources"]["penelope"]
                 url = "https://raw.githubusercontent.com/" + spec["repository"] + "/" + spec["commit"] + "/penelope.py"
-                upstream = fetch(url, spec["sha256"])
+                upstream = resource_bytes(name, args.wheelhouse.absolute() if args.wheelhouse is not None else None, index, sources)
                 ast.parse(upstream.decode())
                 if not all(token in upstream for token in (b'class MCPServer:', b'--mcp-token', b'list_sessions', b'get_session_info', b'exec_in_session')):
                     fail("Pinned Penelope is missing ARTEX's MCP interface")
-                original_line = b"self.basedir = globals().get('_ephemeral_root') or (real_home / f'.{__program__}')"
-                replacement_line = b"self.basedir = Path(os.environ['ARTEX_PENELOPE_DATA_DIR']) if os.environ.get('ARTEX_PENELOPE_DATA_DIR') else (globals().get('_ephemeral_root') or (real_home / f'.{__program__}'))"
-                if upstream.count(original_line) != 1:
-                    fail("Penelope data-directory adapter no longer matches source")
-                patched = upstream.replace(original_line, replacement_line)
-                ast.parse(patched.decode())
+                patched = adapt_penelope(upstream)
                 source = destination / "sources" / ("penelope-" + spec["commit"]) / "penelope.py"
                 atomic_bytes(source, upstream)
                 entry = destination / "penelope.py"
@@ -375,7 +438,7 @@ def install(args: argparse.Namespace, sources: dict) -> None:
             elif name == "lazagne-macos":
                 spec = sources["sources"][name]
                 with tempfile.TemporaryDirectory(prefix="artex-lazagne-") as temporary:
-                    source = source_zip(spec, Path(temporary))
+                    source = unpack_source_zip(resource_bytes(name, args.wheelhouse.absolute(), index, sources), Path(temporary))
                     base = destination / "targets" / "darwin-arm64" / "lazagne"
                     for p in (source / "Mac").rglob("*"):
                         if p.is_file():
@@ -408,7 +471,8 @@ def install(args: argparse.Namespace, sources: dict) -> None:
             else:
                 record["upstream_sha256"] = spec["sha256"]
                 record["installed_script_sha256"] = digest(entry)
-                record["adapter"] = "ARTEX_PENELOPE_DATA_DIR override; otherwise official upstream behavior."
+                record["adapter_revision"] = PENELOPE_ADAPTER_REVISION
+                record["adapter"] = "ARTEX data-directory override; MCP without a TTY retains Core/MCP lifecycle without the interactive menu; opt-in startup stack diagnostics."
             if commands:
                 record["commands"] = commands
             if execution == "target":

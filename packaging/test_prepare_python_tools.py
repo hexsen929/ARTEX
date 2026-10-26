@@ -132,6 +132,36 @@ class PythonToolPreparationTests(unittest.TestCase):
             self.assertEqual(wrapper.read_bytes(), b"wrapper")
             self.assertEqual(entry.read_bytes(), b"entry")
 
+    def test_penelope_startup_diagnostics_are_opt_in_and_source_matching_is_strict(self):
+        fixture = b'''class Options:
+\tdef __init__(self):
+\t\tself.basedir = globals().get('_ephemeral_root') or (real_home / f'.{__program__}')
+def main():
+\tif True:
+\t\tlistener_menu()
+\t\tsignal.signal(signal.SIGINT, keyboard_interrupt)
+\t\tmenu.start()
+if __name__ == "__main__":
+\tmain()
+'''
+        adapted = PREPARE.adapt_penelope(fixture)
+        self.assertIn(b"if os.environ.get('ARTEX_PENELOPE_STARTUP_DIAGNOSTICS') == '1':", adapted)
+        self.assertIn(b"faulthandler.dump_traceback_later(8, repeat=True)", adapted)
+        self.assertIn(b"faulthandler.register(signal.SIGUSR2, all_threads=True)", adapted)
+        self.assertIn(b"if options.mcp and not sys.stdin.isatty():", adapted)
+        self.assertIn(b"while core.started:", adapted)
+        self.assertIn(b"else:\n\t\t\tlistener_menu()", adapted)
+        with self.assertRaisesRegex(RuntimeError, "reviewed adapter"):
+            PREPARE.adapt_penelope(fixture.replace(b"\tmain()", b"\tother_main()"))
+
+    def test_offline_resource_never_falls_back_to_network(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            wheelhouse = Path(temporary).resolve()
+            with mock.patch.object(PREPARE, "fetch") as fetch:
+                with self.assertRaisesRegex(RuntimeError, "Offline source resource"):
+                    PREPARE.resource_bytes("penelope", wheelhouse, {}, json.loads(PREPARE.SOURCE_PATH.read_text()))
+                fetch.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
