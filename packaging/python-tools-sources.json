@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "python": "3.11",
+  "platform": "darwin/arm64",
+  "packages": {
+    "impacket": ["impacket==0.13.1"],
+    "pypykatz": ["pypykatz==0.6.13"],
+    "lazagne-macos": ["pyasn1==0.6.1", "pbkdf2==1.3"]
+  },
+  "sources": {
+    "netexec": {"repository": "Pennyw0rth/NetExec", "commit": "c7dc286ba65daf10402cdc470e531b84e6d3d911", "version": "1.5.1", "sha256": "b527266f6dd94f0cbe5951cffb958e13ae90914eb80a929e56a2746130043612"},
+    "certipy-nxc": {"repository": "Pennyw0rth/Certipy", "commit": "a47c2fdf1b7067d1120c90f33593514b342d8ee8", "sha256": "2c9c44b057718977125b16b69254c1d0753c3c44f612168a6fc487c548b0a050"},
+    "impacket-nxc": {"repository": "fortra/impacket", "commit": "df596692458f879db39a0b2dd0ebc2549c1946ad", "sha256": "446a0f4c334b7bd86e3838f346f630e2720759774941e3bad6a4c530bbd95cce"},
+    "oscrypto": {"repository": "wbond/oscrypto", "commit": "76bfdcb7285d856c44f8d0fbafe0ecca1c6d2f8b", "sha256": "0487384201929932548ad3da31fd65f12de1df86288aa50533b7efd96ae76b53"},
+    "pynfsclient": {"repository": "Pennyw0rth/NfsClient", "commit": "730650439f12eb8b7d9f61c0019840e29cba4b77", "sha256": "14de67026bdfdf1707e3b37dadcd2b24740ce56a726c1f326943b25bb52d4e5c"},
+    "lazagne-macos": {"repository": "AlessandroZ/LaZagne", "commit": "4a5bd85604665f8c364ece914d5fec4d7fe8affb", "version": "2.4.7", "sha256": "6cf39c0861ebe08d0392bec4e6ebc1f3b0db8cb756f4883a81cac453a49ffa6a"},
+    "penelope": {"repository": "brightio/penelope", "commit": "f72cd94c3793132c35cc2c87c28f0f6b8e4a6d79", "file": "penelope.py", "sha256": "6973f63c366be5e2b22588468a958896eb0aebb13dcdd12392c381bc03f3f2f0", "note": "v0.21.0 has no MCP server. This fixed official commit includes ARTEX's HTTP MCP methods."}
+  }
+}

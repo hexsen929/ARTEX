@@ -213,7 +213,7 @@ type PenelopeHandler struct {
 }
 
 // newPenelopeHandler 构造 handler(不起进程)。binPath 解析:ARTEX_PENELOPE_PATH >
-// dataDir/tools/penelope.py;python 解释器:ARTEX_PENELOPE_PYTHON > python3。
+// dataDir/tools/penelope.py;python 解释器:ARTEX_PENELOPE_PYTHON > 受管环境 > python3。
 func newPenelopeHandler(bgCtx context.Context, dataDir string, store *db.SessionStore, reg *session.Registry) *PenelopeHandler {
 	binPath := strings.TrimSpace(os.Getenv("ARTEX_PENELOPE_PATH"))
 	if binPath == "" {
@@ -221,12 +221,22 @@ func newPenelopeHandler(bgCtx context.Context, dataDir string, store *db.Session
 	}
 	python := strings.TrimSpace(os.Getenv("ARTEX_PENELOPE_PYTHON"))
 	if python == "" {
-		python = "python3"
+		python = managedPenelopePython(dataDir)
 	}
 	return &PenelopeHandler{
 		bgCtx: bgCtx, dataDir: dataDir, binPath: binPath, python: python,
 		store: store, reg: reg, pen: map[int]int64{},
 	}
+}
+
+// Prefer the prepared runtime without changing the user's shell, PATH or
+// Python installation. An explicit interpreter override always wins above.
+func managedPenelopePython(dataDir string) string {
+	path := filepath.Join(dataDir, "tools", "python-envs", "penelope", "bin", "python")
+	if st, err := os.Stat(path); err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0 {
+		return path
+	}
+	return "python3"
 }
 
 // logPath 是本 handler 进程日志(台账:日志文件落 dataDir/reverse/)。
@@ -295,6 +305,10 @@ func (h *PenelopeHandler) ensure(ctx context.Context, listenPort int, iface stri
 		"-C", // no-attach:无 TTY,新会话不进入交互菜单(菜单会消费 stdin)
 	}
 	cmd := exec.Command(h.python, args...)
+	cmd.Env = os.Environ()
+	if strings.TrimSpace(os.Getenv("ARTEX_PENELOPE_DATA_DIR")) == "" {
+		cmd.Env = append(cmd.Env, "ARTEX_PENELOPE_DATA_DIR="+filepath.Join(h.dataDir, "reverse", "penelope"))
+	}
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()

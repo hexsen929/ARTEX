@@ -187,6 +187,9 @@ package_binary() {
   # runtime credentials are bundled into release archives.
   mkdir -p "$package_root/packaging"
   cp packaging/tools-manifest.json "$package_root/packaging/"
+  for helper in packaging/prepare-tools.py packaging/prepare-python-tools.py packaging/python-tools-sources.json packaging/register-tools.py packaging/MACOS-TOOLS.md; do
+    if [ -f "$helper" ]; then cp "$helper" "$package_root/packaging/"; fi
+  done
   if [ "$goos" = "linux" ]; then cp packaging/artex.service "$package_root/packaging/"; fi
   if [ -f README.md ]; then cp README.md "$package_root/"; fi
   if [ -f README-FORK.md ]; then cp README-FORK.md "$package_root/"; fi

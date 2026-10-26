@@ -22,8 +22,23 @@ func checkToolsManifest(dataDir string) {
 		}
 		return
 	}
-	var ok, unpinned, missing, mismatch, incompatible []string
+	var ok, unpinned, missing, mismatch, incompatible, platformWarnings []string
 	for _, r := range tools.Check(m, dataDir) {
+		if r.PlatformWarning != "" {
+			role := "本机"
+			if tools.IsTargetArtifact(r.Entry) {
+				role = "目标侧"
+			}
+			label := role + "/" + r.Entry.Name
+			if r.Entry.Platform != "" {
+				label += " (" + r.Entry.Platform + ")"
+			}
+			platformWarnings = append(platformWarnings, label)
+			log.Printf("[tools] ⚠ %s: %s", label, r.PlatformWarning)
+			if r.Status == tools.StatusOK {
+				r.Status = tools.StatusUnpinned
+			}
+		}
 		if r.HostIncompatible {
 			incompatible = append(incompatible, r.Entry.Name)
 		}
@@ -40,9 +55,9 @@ func checkToolsManifest(dataDir string) {
 			missing = append(missing, r.Entry.Name)
 		}
 	}
-	log.Printf("[tools] 清单自检：sha256 一致 %d，存在未钉 %d，缺失 %d，不匹配 %d%s%s%s",
+	log.Printf("[tools] 清单自检：校验通过 %d，存在待核对 %d，缺失 %d，不匹配 %d%s%s%s%s",
 		len(ok), len(unpinned), len(missing), len(mismatch),
-		toolsListNote("缺失", missing), toolsListNote("不匹配", mismatch), toolsListNote("本机架构不适用", incompatible))
+		toolsListNote("缺失", missing), toolsListNote("不匹配", mismatch), toolsListNote("本机架构不适用", incompatible), toolsListNote("平台待核对", platformWarnings))
 }
 
 // toolsListNote 把名单拼成汇总行后缀；空名单不输出（别刷屏）。

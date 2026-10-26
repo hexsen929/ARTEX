@@ -9,11 +9,20 @@ on:
         required: false
         type: string
         default: ""
+      prepare_macos_tools:
+        description: "验证 Mac ARM64 外部工具并生成 Python wheelhouse（云端构建依赖）"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write # 创建 Release 需要
 
 jobs:
+  tool-runtimes:
+    if: ${{ inputs.prepare_macos_tools == true }}
+    uses: ./.github/workflows/tools-macos.yml
+
   verify:
     # Reusable workflow succeeds only after both Go regression and frontend
     # validation jobs succeed. No release/build job may bypass that result.

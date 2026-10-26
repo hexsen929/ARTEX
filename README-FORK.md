@@ -51,6 +51,8 @@
 
 门控入口变化、工具准备、Mac ARM64 适配、密钥持久化和更新签名策略，统一见 [README.md](README.md#artex-ymh-工作流移植与升级提示)。不要覆盖现有配置/数据/密钥，也不要把未通过云端验证的构建称为稳定发布。
 
+Mac 外部工具的运行端、成品下载、Python 环境与注册步骤见 [Mac 工具部署](packaging/MACOS-TOOLS.md)。本机 ARM64 工具与 Linux/Windows 目标资源分别准备；Chisel 自动部署目前支持 Linux 目标，不把目标资源已经下载视作该系统的自动生命周期已实现。
+
 ## 许可与来源
 
 保留原 ARTEX、RuoJi6 和 ARTEX-ymh 的来源说明；本项目及移植代码继续采用仓库 `LICENSE` 中的 AGPL-3.0。根目录设计文档是参考资料，引用其中的外部资料并不表示本 fork 对其效果进行背书。
