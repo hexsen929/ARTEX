@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -54,6 +55,10 @@ type SessionStore struct {
 	d   *DB
 	key []byte
 }
+
+// An owner keeps control through created_by_task, not through the optional
+// binding table. Unbinding must never pretend that ownership was revoked.
+var ErrSessionTaskOwner = errors.New("当前任务拥有该会话，解绑不能移除创建者所有权")
 
 // NewSessionStore 构造访问层。masterKey 传 jwt.key 内容；内部自行派生。
 func NewSessionStore(d *DB, masterKey []byte) *SessionStore {
@@ -219,6 +224,44 @@ RETURNING session_id`, taskID, sessionID).Scan(&session)
 		return fmt.Errorf("会话或目标任务不存在")
 	}
 	return err
+}
+
+// UnbindTask revokes only an explicit grant to a live task. It neither closes
+// the shared session nor changes its creating task or another task's grant.
+func (s *SessionStore) UnbindTask(ctx context.Context, taskID, sessionID int64) (bool, error) {
+	if taskID <= 0 || sessionID <= 0 {
+		return false, fmt.Errorf("task_id 和 session_id 必须为正整数")
+	}
+	tx, err := s.d.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var owner int64
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(s.created_by_task,0)
+FROM sessions s JOIN tasks t ON t.id=$1 AND t.deleted_at IS NULL
+WHERE s.id=$2 FOR SHARE OF s,t`, taskID, sessionID).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("会话或目标任务不存在: %w", err)
+	}
+	if err != nil {
+		return false, err
+	}
+	if owner == taskID {
+		return false, ErrSessionTaskOwner
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM task_session_bindings WHERE task_id=$1 AND session_id=$2`, taskID, sessionID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // TaskCanUse never follows parent_ref: data visibility is not remote-control

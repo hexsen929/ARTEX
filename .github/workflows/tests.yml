@@ -21,7 +21,8 @@ jobs:
           scratch="$(mktemp -d)"
           trap 'rm -rf "$scratch"' EXIT
           failed=0
-          for package in $(go list ./...); do
+          packages="$(go list ./...)"
+          for package in $packages; do
             echo "Compile $package"
             if ! go test -c -o "$scratch/package.test" "$package" > "$scratch/compiler.log" 2>&1; then
               cat "$scratch/compiler.log"
@@ -61,7 +62,9 @@ jobs:
         run: |
           set -euo pipefail
           index=0
-          for package in $(go list ./...); do
+          failed=0
+          packages="$(go list ./...)"
+          for package in $packages; do
             database="artex_ci_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}_${index}"
             docker exec "$PG_CONTAINER" createdb -U artex_test "$database"
             if [[ "$package" == */server ]]; then
@@ -77,12 +80,13 @@ jobs:
               go test "$package" -count=1 -timeout=5m > "$test_log" 2>&1 || result=$?
             cat "$test_log"
             if [[ "$result" -ne 0 ]]; then
-              CI_LOG="$test_log" CI_PACKAGE="$package" python3 -c 'import os,pathlib; s=pathlib.Path(os.environ["CI_LOG"]).read_text(errors="replace")[-18000:]; s=s.replace("%","%25").replace("\r","%0D").replace("\n","%0A"); print("::error title=Go test "+os.environ["CI_PACKAGE"]+"::"+s)'
-              exit "$result"
+              CI_LOG="$test_log" CI_PACKAGE="$package" python3 -c 'import os,pathlib,re; raw=pathlib.Path(os.environ["CI_LOG"]).read_text(errors="replace"); lines=raw.splitlines(); bad=[i for i,line in enumerate(lines) if line.startswith(("--- FAIL:","panic:","fatal error:")) or re.search(r"\S+_test\.go:\d+:",line)]; selected=sorted({j for i in bad for j in range(max(0,i-1),min(len(lines),i+9))}); s=("\n".join(lines[j] for j in selected) if selected else raw[-18000:])[:18000]; s=s.replace("%","%25").replace("\r","%0D").replace("\n","%0A"); print("::error title=Go test "+os.environ["CI_PACKAGE"]+"::"+s)'
+              failed=1
             fi
             rm -f "$test_log"
             index=$((index + 1))
           done
+          exit "$failed"
       - name: Go static checks
         run: go vet ./...
       - name: MCP lifecycle concurrency regressions

@@ -25,13 +25,18 @@ import (
 // hostTools, if set, returns runtime host tools (currently the traffic tools when
 // capture is on) to add to EVERY agent's base list — the DB tools table then
 // filters them per-agent binding. Empty/nil → no host tools this run (capture off).
-func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string)) {
+func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string), taskDialers ...taskMCPDialer) {
 	agent.ToolAugment = func(ctx context.Context, agentKey string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
 		a, err := pg.GetAgentByKey(agentKey)
 		if err != nil || a == nil {
 			return nil, agent.DeferredInfo{}, nil
 		}
 		var extra []actool.CoreTool
+		var taskDial taskMCPDialer
+		if len(taskDialers) > 0 {
+			taskDial = taskDialers[0]
+		}
+		taskID := agent.RunInfoFrom(ctx).TaskID
 
 		// --- skills: load visible skills into reg (used for the Skill meta-tool
 		// and to know which MCP servers are skill-gated). ---
@@ -87,7 +92,8 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 					continue // neither directly visible nor referenced by a visible skill
 				}
 				var ts []actool.CoreTool
-				if m.Transport == "stdio" {
+				scopedBrowser := taskID > 0 && taskDial != nil && m.Name == browserMCPName
+				if m.Transport == "stdio" || scopedBrowser {
 					// Upgrade name-only legacy caches once, then assemble from schemas.
 					metadataCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 					metadata, err := cacheMCPMetadata(metadataCtx, pg, m, false)
@@ -96,6 +102,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 						log.Printf("[mcp] %s 工具元数据暂不可用，保留已缓存工具供后续重试: %v", m.Name, err)
 					}
 					session := newLazyMCPSession(ctx, m)
+					attachTaskMCPDialer(session, taskID, taskDial)
 					closers = append(closers, session)
 					for _, t := range metadata {
 						ts = append(ts, session.tool(t))

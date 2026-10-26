@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -188,6 +190,66 @@ func TestTaskSessionBindingIsExplicitNotInherited(t *testing.T) {
 	}
 }
 
+func TestTaskSessionUnbindRevokesOnlyTheExplicitGrant(t *testing.T) {
+	d := portTestDB(t)
+	makeTask := func() *Task {
+		t.Helper()
+		task, err := d.CreateTask("session unbind fixture", "fixture", nil, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+		return task
+	}
+	owner, child, other, archived := makeTask(), makeTask(), makeTask(), makeTask()
+	store := NewSessionStore(d, []byte("fixture-only-unbind-key"))
+	sessionID, err := store.Create(t.Context(), &SessionRecord{Kind: "http_php", URL: "http://fixture.invalid/unbind", Secret: json.RawMessage(`{"fixture":true}`), Status: SessionAlive, CreatedByTask: owner.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Delete(context.Background(), sessionID) })
+	for _, task := range []*Task{owner, child, other, archived} {
+		if err = store.BindTask(t.Context(), sessionID, task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if changed, err := store.UnbindTask(t.Context(), child.ID, sessionID); err != nil || !changed {
+		t.Fatalf("child unbind changed=%v err=%v", changed, err)
+	}
+	for task, want := range map[int64]bool{owner.ID: true, child.ID: false, other.ID: true} {
+		can, err := store.TaskCanUse(t.Context(), sessionID, task)
+		if err != nil || can != want {
+			t.Fatalf("task %d can_use=%v want=%v err=%v", task, can, want, err)
+		}
+	}
+	if changed, err := store.UnbindTask(t.Context(), child.ID, sessionID); err != nil || changed {
+		t.Fatalf("repeated unbind changed=%v err=%v", changed, err)
+	}
+	if changed, err := store.UnbindTask(t.Context(), owner.ID, sessionID); changed || !errors.Is(err, ErrSessionTaskOwner) {
+		t.Fatalf("owner unbind changed=%v err=%v", changed, err)
+	}
+	session, err := store.Get(t.Context(), sessionID)
+	if err != nil || session == nil || session.Status != SessionAlive || session.CreatedByTask != owner.ID {
+		t.Fatalf("parent session changed: %+v err=%v", session, err)
+	}
+	var ownerBinding int
+	if err = d.QueryRow(`SELECT count(*) FROM task_session_bindings WHERE task_id=$1 AND session_id=$2`, owner.ID, sessionID).Scan(&ownerBinding); err != nil || ownerBinding != 1 {
+		t.Fatal("owner explicit binding was removed by a rejected unbind")
+	}
+	if _, err = d.Exec(`UPDATE tasks SET deleted_at=now() WHERE id=$1`, archived.ID); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := store.UnbindTask(t.Context(), archived.ID, sessionID); changed || !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("deleted task accepted: changed=%v err=%v", changed, err)
+	}
+	if changed, err := store.UnbindTask(t.Context(), child.ID, 999999999); changed || !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing session accepted: changed=%v err=%v", changed, err)
+	}
+	if changed, err := store.UnbindTask(t.Context(), 0, sessionID); changed || err == nil {
+		t.Fatal("invalid task id accepted")
+	}
+}
+
 func TestFindingCheckUsesIndependentVerificationAndProtectsManualChanges(t *testing.T) {
 	d := portTestDB(t)
 	for _, mode := range []string{"verified", "false_positive", "inconclusive", "manual_change", "evidence_change"} {
@@ -201,7 +263,7 @@ func TestFindingCheckUsesIndependentVerificationAndProtectsManualChanges(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { _ = d.DeleteFinding(f.FindingID) })
+			t.Cleanup(func() { _, _ = d.DeleteFinding(f.FindingID) })
 			check, conv, created, err := d.CreateFindingCheck(t.Context(), f.FindingID, FindingCheckKindVerify)
 			if err != nil || !created {
 				t.Fatalf("check creation: %v", err)

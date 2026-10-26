@@ -46,9 +46,13 @@ func (s *Server) initStage(dataDir string) {
 		filepath.Join(baseDir, jwtKeyFilename), filepath.Join(baseDir, gateKeyFilename),
 		filepath.Join(keyDir, jwtKeyFilename), filepath.Join(keyDir, gateKeyFilename),
 		filepath.Join(dataDir, "config.json"), filepath.Join(dataDir, ".env"),
+		filepath.Join(dataDir, "browser-mcp-proxy.json"),
 		filepath.Join(dataDir, jwtKeyFilename), filepath.Join(dataDir, gateKeyFilename), filepath.Join(dataDir, gatePathFilename)}
 	protectedDirs := []string{}
-	for _, name := range []string{"sessions", "transcripts", "traffic", "evidence", "reverse", "archives", "task-archives", ".delete-staging", "stage"} {
+	if s.m != nil && s.m.dir != "" {
+		protectedFiles = append(protectedFiles, filepath.Join(s.m.dir, "browser-mcp-proxy.json"))
+	}
+	for _, name := range []string{"sessions", "transcripts", "traffic", "traffic-tasks", "tunnels", "mcp-private", "evidence", "reverse", "archives", "task-archives", ".delete-staging", "stage"} {
 		protectedDirs = append(protectedDirs, filepath.Join(dataDir, name))
 		if s.m != nil && s.m.dir != "" {
 			protectedDirs = append(protectedDirs, filepath.Join(s.m.dir, name))

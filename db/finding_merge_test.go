@@ -225,7 +225,7 @@ func TestRecordFindingTxMerge(t *testing.T) {
 		var out *RecordedFinding
 		err := d.WithEvidenceTx(t.Context(), func(tx *sql.Tx) error {
 			var e error
-			out, e = RecordFindingTx(tx, in, nil)
+			out, e = RecordFindingTx(t.Context(), tx, in, nil)
 			return e
 		})
 		if err != nil {

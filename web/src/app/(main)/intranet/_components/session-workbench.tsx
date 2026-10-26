@@ -356,6 +356,10 @@ export function SessionWorkbench({
   const [confirming, setConfirming] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
 
+  React.useEffect(() => {
+    setConfirming(false);
+  }, [session?.id]);
+
   const doDelete = () => {
     if (!session) return;
     setDeleting(true);
@@ -403,7 +407,7 @@ export function SessionWorkbench({
                   onClick={() => setConfirming(true)}
                 >
                   <Trash2Icon className="size-3.5" />
-                  删除会话
+                  全局删除会话
                 </Button>
               </div>
             </SheetHeader>
@@ -427,9 +431,10 @@ export function SessionWorkbench({
             <AlertDialog open={confirming} onOpenChange={setConfirming}>
               <AlertDialogContent>
                 <AlertDialogHeader>
-                  <AlertDialogTitle>删除会话 #{session.id}？</AlertDialogTitle>
+                  <AlertDialogTitle>全局删除会话 #{session.id}？</AlertDialogTitle>
                   <AlertDialogDescription>
-                    将断开并移除该 webshell 会话，目标上的马文件不会被清除。此操作不可撤销。
+                    将断开并从平台移除该会话，影响所有关联任务；这不是仅解除当前任务的使用权。
+                    目标上的端点文件不会被清除。此操作不可撤销。
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -442,7 +447,7 @@ export function SessionWorkbench({
                       doDelete();
                     }}
                   >
-                    {deleting ? "删除中…" : "确认删除"}
+                    {deleting ? "删除中…" : "确认全局删除"}
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>

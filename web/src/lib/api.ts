@@ -1568,6 +1568,12 @@ export const api = {
   // 400 = 无法确定立足点 IP;404 = 会话不存在。
   handoffSession: (id: string) => post<{ task_id: string }>(`/sessions/${encodeURIComponent(id)}/handoff`),
   deleteSession: (id: string) => del<{ ok: boolean }>(`/sessions/${encodeURIComponent(id)}`),
+  // Remove only this task's explicit usage grant; never stop/delete the session.
+  // The owning task cannot relinquish ownership through this endpoint (409).
+  taskUnbindSession: (taskId: string, sessionId: string) =>
+    del<{ task_id: string; session_id: string; unbound: boolean }>(
+      `/tasks/${encodeURIComponent(taskId)}/sessions/${encodeURIComponent(sessionId)}/binding`,
+    ),
   tunnels: (taskId?: string) =>
     get<{ items: TunnelInfo[] }>(`/tunnels${taskQuery(taskId)}`).then((r) => arr(r.items)),
   teardownTunnel: (id: string) => post<{ ok: boolean }>(`/tunnels/${encodeURIComponent(id)}/teardown`),

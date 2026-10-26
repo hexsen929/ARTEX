@@ -232,6 +232,7 @@ export default function IntranetPage() {
         </TabsList>
         <TabsContent value="sessions" className="flex min-h-0 flex-1 flex-col pt-2">
           <SessionsTab
+            selectedTaskId={taskParam}
             sessions={sessions}
             loading={loadingSessions}
             hostFilter={hostFilter}
