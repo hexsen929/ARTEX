@@ -5,7 +5,7 @@
 AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 
-🌐 **在线 Demo**： [https://artex-demo-ruoji6.vercel.app/](https://artex-demo-ruoji6.vercel.app/)
+🌐 **上游 Demo（不包含本分支新增工作流）**： [https://artex-demo-ruoji6.vercel.app/](https://artex-demo-ruoji6.vercel.app/)
 
 本 fork 保留 RuoJi6/ARTEX 的较新基线，以及 Codex、验证状态和 MCP 生命周期定制，并移植 ARTEX-ymh 的已实现内网工作流。
 
@@ -147,24 +147,24 @@ cd ARTEX
 
 脚本会：检测 / 自动安装 Docker → 让你选 **① 全部 Docker** 或 **② 本地编译运行**：
 
-- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 自动写 `.env` → `docker compose up -d`。
+- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 自动写 `.env` → 使用 `docker-compose.source.yml` 从本仓库源码构建并启动。
 - **② 本地运行**：选数据库（连已有 / 用 Docker 起一个）→ 生成 `config.json` → `go` 编译内嵌单二进制 → 启动。
 
 装好后打开 **http://localhost:8787**（首次进入 `/setup` 设置管理员密码）。
 
-### 方式二：Docker Compose（手动）
+### 方式二：Docker Compose（源码模式）
 
 ```bash
 git clone https://github.com/hexsen929/ARTEX.git
 cd ARTEX
-cp .env.example .env          # 填 POSTGRES_PASSWORD、可选 ANTHROPIC_API_KEY
-docker compose up -d          # 拉取 ruoji6/artex 镜像 + postgres
-# → http://localhost:8787
+cp .env.example .env
+# 填 POSTGRES_PASSWORD；密钥目录 keys/ 与 data/ 都必须持久化。
+docker compose -f docker-compose.source.yml up -d --build
 ```
 
-镜像已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
+此模式使用本仓库的 `Dockerfile.source`，构建发生在 Docker 内，不会误拉上游原版镜像。它仍需要构建时间、网络与磁盘空间；本项目的本机维护默认使用 GitHub Actions 构建的程序包，而不是执行本地构建。门控开启后，请按启动日志或 `data/gate.path` 先进入门控，再访问登录页。
 
-`.env` 中默认 `ARTEX_IMAGE=hexsen929/artex`，`ARTEX_TAG=latest` 使用最新镜像，也可固定为 `v0.3.17`（完整镜像地址 `hexsen929/artex:v0.3.17`）。镜像支持 `linux/amd64` 和 `linux/arm64`，Docker 会自动选择与宿主机匹配的架构，ARM64 Kali 无需自行编译。初次部署请修改 `POSTGRES_PASSWORD`；运行服务无需配置 Docker Hub 发布 Token。
+`docker-compose.yml` 另保留预构建镜像模式：仅在维护者已经发布对应镜像时，设置自己的 `ARTEX_IMAGE` 和实际存在的 `ARTEX_TAG` 后使用。镜像发布在本 fork 默认关闭，不能假设 `hexsen929/artex:latest` 已存在或已包含本次移植，也不要用上游原版镜像冒充本分支。已有 `skills`、`data`、数据库卷和 `keys` 挂载必须保留。
 
 远程 MCP 可在系统设置中选择 `http`（Streamable HTTP）或 `sse`（旧版 SSE）。
 旧版 SSE 服务通常使用 `GET /sse` 建立事件流，再通过服务返回的
@@ -243,9 +243,9 @@ git tag v0.3.17
 git push origin v0.3.17
 ```
 
-工作流固定标签对应的提交，用 Node.js 22 导出前端，按照 `go.mod` 指定的 Go 版本编译内嵌前端的五个平台程序，并生成 ZIP 与 `SHA256SUMS`。AMD64 和 ARM64 镜像分别在 GitHub 原生 runner 上构建，连接临时 PostgreSQL 验证程序启动、版本和内嵌前端；两种架构都通过后发布多架构镜像的版本标签与 `latest`。镜像发布成功后上传完整 ZIP 和校验文件，最后公开 Release。已公开的同版本不允许覆盖，应发布新标签。
+工作流固定构建提交，先运行独立的 Go 编译、带隔离 PostgreSQL 的全量回归和前端单测/类型检查/静态构建；全部成功后生成内嵌前端的五个平台 ZIP。推送版本标签时创建 Release 并生成 `SHA256SUMS`；手动构建只保存 Actions 安装包，不自动公开正式 Release。Docker 镜像是另行显式开启的发布分支，不应将程序包构建通过等同于所有容器运行场景均已验证。已公开的同版本不应覆盖，应发布新标签。
 
-维护者需在本仓库 Settings → Secrets and variables → Actions 中配置变量 `ARTEX_DOCKER_IMAGE`（Docker Hub 用户名/镜像名）和 Secrets `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`（有镜像推送权限）。程序包通过 GitHub 自带 `GITHUB_TOKEN` 上传，镜像通过上述凭据推送到 Docker Hub。凭据只供工作流登录使用，不写入源码或镜像。镜像地址同时记录在 `.env.example` 和 Compose 默认值中。
+需要发布 Docker 镜像时，维护者另设置 `PUBLISH_DOCKER=true`，并在本仓库 Settings → Secrets and variables → Actions 中配置变量 `ARTEX_DOCKER_IMAGE`（Docker Hub 用户名/镜像名）和 Secrets `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`（有镜像推送权限）。程序包通过 GitHub 自带 `GITHUB_TOKEN` 上传，镜像通过上述凭据推送到 Docker Hub。凭据只供工作流登录使用，不写入源码或镜像。镜像地址同时记录在 `.env.example` 和 Compose 默认值中。
 
 ### 已有 Docker 部署迁移到本仓库镜像
 
@@ -263,7 +263,8 @@ services:
 ```bash
 docker compose pull artex
 docker compose up -d --no-deps artex
-curl --fail http://127.0.0.1:8787/api/health
+
+# 门控开启时先访问门控入口；无 cookie 的 /api/health 可能只是欢迎页，不能据此证明版本。
 docker compose logs --tail=50 artex
 ```
 
