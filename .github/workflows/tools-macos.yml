@@ -2,10 +2,21 @@ name: macOS tool runtime
 
 on:
   workflow_dispatch:
+    inputs:
+      python_wheelhouse_run:
+        required: false
+        type: string
+        default: ""
   workflow_call:
+    inputs:
+      python_wheelhouse_run:
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   python-wheelhouse:
@@ -23,10 +34,20 @@ jobs:
           python3 -m unittest discover -s packaging -p 'test_*.py'
       - name: Build fixed Python dependencies in the cloud
         id: build-wheels
+        if: ${{ inputs.python_wheelhouse_run == '' }}
         run: |
           python3 packaging/prepare-python-tools.py --build-wheelhouse \
             --wheelhouse "$RUNNER_TEMP/artex-python-wheelhouse" \
             --python "$(command -v python3)"
+      - name: Download an explicitly selected wheelhouse from this repository
+        id: reuse-wheels
+        if: ${{ inputs.python_wheelhouse_run != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: python-tools-darwin-arm64-py311
+          path: ${{ runner.temp }}/artex-python-wheelhouse
+          run-id: ${{ inputs.python_wheelhouse_run }}
+          github-token: ${{ github.token }}
       - name: Install offline wheelhouse into isolated smoke environments
         run: |
           python3 packaging/prepare-python-tools.py --install \
@@ -38,7 +59,7 @@ jobs:
           python3 packaging/smoke-python-tools.py \
             --tools-dir "$RUNNER_TEMP/artex-python-smoke/data/tools"
       - uses: actions/upload-artifact@v4
-        if: ${{ always() && steps.build-wheels.outcome == 'success' }}
+        if: ${{ always() && (steps.build-wheels.outcome == 'success' || steps.reuse-wheels.outcome == 'success') }}
         with:
           name: python-tools-darwin-arm64-py311
           path: ${{ runner.temp }}/artex-python-wheelhouse

@@ -2,7 +2,9 @@
 import importlib.util
 import io
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import socketserver
 import tempfile
 import unittest
 from unittest import mock
@@ -12,6 +14,25 @@ import zipfile
 SPEC = importlib.util.spec_from_file_location("prepare_python_tools", Path(__file__).with_name("prepare-python-tools.py"))
 PREPARE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PREPARE)
+
+
+def penelope_fixture():
+    return b'''class Options:
+\tdef __init__(self):
+\t\tself.basedir = globals().get('_ephemeral_root') or (real_home / f'.{__program__}')
+class MCPServer:
+\tdef start(self):
+\t\tclass _Server(ThreadingHTTPServer):
+\t\t\tdaemon_threads = True
+\t\treturn _Server
+def main():
+\tif True:
+\t\tlistener_menu()
+\t\tsignal.signal(signal.SIGINT, keyboard_interrupt)
+\t\tmenu.start()
+if __name__ == "__main__":
+\tmain()
+'''
 
 
 class PythonToolPreparationTests(unittest.TestCase):
@@ -133,17 +154,7 @@ class PythonToolPreparationTests(unittest.TestCase):
             self.assertEqual(entry.read_bytes(), b"entry")
 
     def test_penelope_startup_diagnostics_are_opt_in_and_source_matching_is_strict(self):
-        fixture = b'''class Options:
-\tdef __init__(self):
-\t\tself.basedir = globals().get('_ephemeral_root') or (real_home / f'.{__program__}')
-def main():
-\tif True:
-\t\tlistener_menu()
-\t\tsignal.signal(signal.SIGINT, keyboard_interrupt)
-\t\tmenu.start()
-if __name__ == "__main__":
-\tmain()
-'''
+        fixture = penelope_fixture()
         adapted = PREPARE.adapt_penelope(fixture)
         self.assertIn(b"if os.environ.get('ARTEX_PENELOPE_STARTUP_DIAGNOSTICS') == '1':", adapted)
         self.assertIn(b"faulthandler.dump_traceback_later(8, repeat=True)", adapted)
@@ -153,6 +164,23 @@ if __name__ == "__main__":
         self.assertIn(b"else:\n\t\t\tlistener_menu()", adapted)
         with self.assertRaisesRegex(RuntimeError, "reviewed adapter"):
             PREPARE.adapt_penelope(fixture.replace(b"\tmain()", b"\tother_main()"))
+
+    def test_penelope_mcp_bind_does_not_call_reverse_dns(self):
+        namespace = {"__name__": "penelope_adapter_fixture", "os": PREPARE.os, "socketserver": socketserver, "ThreadingHTTPServer": ThreadingHTTPServer}
+        with mock.patch.dict("os.environ", {"ARTEX_PENELOPE_STARTUP_DIAGNOSTICS": "0"}):
+            exec(compile(PREPARE.adapt_penelope(penelope_fixture()), "penelope-adapter-fixture.py", "exec"), namespace)
+        server_type = namespace["MCPServer"]().start()
+        # A broken/slow resolver must never enter MCP's bind path. Raising here
+        # catches even one lookup without adding a long timeout to the suite.
+        with mock.patch("socket.getfqdn", side_effect=AssertionError("reverse DNS entered MCP bind")) as resolver:
+            server = server_type(("127.0.0.1", 0), BaseHTTPRequestHandler)
+            try:
+                self.assertEqual(server.server_name, "127.0.0.1")
+                self.assertGreater(server.server_port, 0)
+                self.assertEqual(server.server_port, server.server_address[1])
+                resolver.assert_not_called()
+            finally:
+                server.server_close()
 
     def test_offline_resource_never_falls_back_to_network(self):
         with tempfile.TemporaryDirectory() as temporary:

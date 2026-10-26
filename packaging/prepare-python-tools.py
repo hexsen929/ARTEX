@@ -31,7 +31,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 SOURCE_PATH = ROOT / "python-tools-sources.json"
 GROUPS = ("impacket", "nxc", "pypykatz", "lazagne-macos", "penelope")
-PENELOPE_ADAPTER_REVISION = 3
+PENELOPE_ADAPTER_REVISION = 4
 PURPOSES = {
     "impacket": "Windows protocol tool collection; invoke impacket <script.py> [arguments].",
     "nxc": "NetExec protocol test CLI in an isolated Python environment.",
@@ -310,7 +310,8 @@ def adapt_penelope(upstream: bytes) -> bytes:
     replacement_line = b"self.basedir = Path(os.environ['ARTEX_PENELOPE_DATA_DIR']) if os.environ.get('ARTEX_PENELOPE_DATA_DIR') else (globals().get('_ephemeral_root') or (real_home / f'.{__program__}'))"
     main_guard = b'if __name__ == "__main__":\n\tmain()'
     listener_tail = b'\t\tlistener_menu()\n\t\tsignal.signal(signal.SIGINT, keyboard_interrupt)\n\t\tmenu.start()'
-    if upstream.count(original_line) != 1 or upstream.count(main_guard) != 1 or upstream.count(listener_tail) != 1:
+    mcp_server_class = b'\t\tclass _Server(ThreadingHTTPServer):\n\t\t\tdaemon_threads = True'
+    if any(upstream.count(marker) != 1 for marker in (original_line, main_guard, listener_tail, mcp_server_class)):
         fail("Penelope source no longer matches the reviewed adapter")
     diagnostic = b'''if os.environ.get('ARTEX_PENELOPE_STARTUP_DIAGNOSTICS') == '1':
 \timport faulthandler
@@ -331,7 +332,16 @@ def adapt_penelope(upstream: bytes) -> bytes:
 \t\t\tlistener_menu()
 \t\t\tsignal.signal(signal.SIGINT, keyboard_interrupt)
 \t\t\tmenu.start()'''
-    patched = upstream.replace(original_line, replacement_line).replace(listener_tail, headless_tail).replace(main_guard, diagnostic + main_guard)
+    mcp_server_without_dns = mcp_server_class + b'''
+\t\t\tdef server_bind(self):
+\t\t\t\t# HTTPServer's default server_bind performs reverse DNS, which can
+\t\t\t\t# stall loopback MCP startup on macOS. This handler already has a
+\t\t\t\t# configured bind address; no reverse lookup is needed.
+\t\t\t\tsocketserver.TCPServer.server_bind(self)
+\t\t\t\tself.server_name = self.server_address[0]
+\t\t\t\tself.server_port = self.server_address[1]
+'''
+    patched = upstream.replace(original_line, replacement_line).replace(listener_tail, headless_tail).replace(mcp_server_class, mcp_server_without_dns).replace(main_guard, diagnostic + main_guard)
     ast.parse(patched.decode())
     return patched
 
@@ -472,7 +482,7 @@ def install(args: argparse.Namespace, sources: dict) -> None:
                 record["upstream_sha256"] = spec["sha256"]
                 record["installed_script_sha256"] = digest(entry)
                 record["adapter_revision"] = PENELOPE_ADAPTER_REVISION
-                record["adapter"] = "ARTEX data-directory override; MCP without a TTY retains Core/MCP lifecycle without the interactive menu; opt-in startup stack diagnostics."
+                record["adapter"] = "ARTEX data-directory override; MCP bind skips reverse DNS; MCP without a TTY retains Core/MCP lifecycle without the interactive menu; opt-in startup stack diagnostics."
             if commands:
                 record["commands"] = commands
             if execution == "target":

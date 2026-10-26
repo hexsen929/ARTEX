@@ -14,14 +14,22 @@ on:
         required: false
         type: boolean
         default: false
+      python_wheelhouse_run:
+        description: "可选：复用本仓库已构建的 Python wheelhouse 工作流编号，安装时仍核对固定来源与全部摘要"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write # 创建 Release 需要
+  actions: read # 显式复用本仓库已验证的依赖构建产物
 
 jobs:
   tool-runtimes:
     if: ${{ inputs.prepare_macos_tools == true }}
     uses: ./.github/workflows/tools-macos.yml
+    with:
+      python_wheelhouse_run: ${{ inputs.python_wheelhouse_run || '' }}
 
   verify:
     # Reusable workflow succeeds only after both Go regression and frontend
