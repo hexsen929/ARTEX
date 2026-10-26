@@ -7,8 +7,11 @@ package traffic
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -135,12 +138,14 @@ const TrafficSearchDescription = "查询记录代理已抓取的目标流量（�
 
 // Traffic runs the recording proxy and owns the file tree + index.
 type Traffic struct {
-	dir   string
-	addr  string
-	db    *sql.DB
-	wmu   sync.Mutex // serializes record() vs DeleteHost (incl. blob GC)
-	seq   atomic.Int64
-	proxy *mproxy.Proxy
+	dir    string
+	addr   string
+	db     *sql.DB
+	wmu    sync.Mutex // serializes record() vs DeleteHost (incl. blob GC)
+	seq    atomic.Int64
+	proxy  *mproxy.Proxy
+	parent *Traffic // non-nil listeners share the parent recorder, never its lifetime
+	caRoot string   // separate CA directory for task-scoped listeners
 	// fts reports whether the full-text index is available. False on a driver
 	// build without FTS5: recording and metadata search still work, body search
 	// degrades to unsupported rather than erroring.
@@ -161,10 +166,18 @@ type Traffic struct {
 	// stopping() treats as "not closing".
 	closed    chan struct{}
 	closeOnce sync.Once
+	closeErr  error
 	// pass is the set of hosts whose MITM interception failed for a proxy/protocol
 	// reason; connections to them are tunneled transparently (fail-open) so the
 	// request still reaches the target — unrecorded — instead of being killed.
-	pass sync.Map // hostname(string) -> struct{}
+	// Entries expire after passTTL: a transient failure must not blind the
+	// recorder to a host forever, so the next connection after expiry retries
+	// MITM + recording.
+	pass passList
+	// auth holds the proxy's Basic credentials; nil = authentication disabled
+	// (ARTEX_PROXY_AUTH=off, only acceptable on loopback-only deployments).
+	// See resolveProxyAuth.
+	auth *proxyAuth
 	// upstream is the global egress proxy every captured request is forwarded
 	// through (nil = dial targets directly). Both the intercepted and the
 	// transparent-passthrough paths honor it (go-mitmproxy's getUpstreamConn),
@@ -175,9 +188,19 @@ type Traffic struct {
 // Open initializes the traffic tree, blob store and SQLite index under dir.
 func Open(dir, addr string) (*Traffic, error) {
 	for _, d := range []string{dir, filepath.Join(dir, "_index"), filepath.Join(dir, "_blobs"), filepath.Join(dir, "_ca")} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		// 0o700 plus an explicit chmod: MkdirAll does not tighten a pre-existing
+		// directory. Recordings hold target credentials and _ca the CA private
+		// key, so the tree is owner-only (F11c).
+		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
+		_ = os.Chmod(d, 0o700) // best-effort on filesystems without mode bits
+	}
+	// F2-1: resolve client credentials before anything can fail behind an open
+	// db handle. Auth on by default; see resolveProxyAuth for the env switches.
+	auth, err := resolveProxyAuth(dir)
+	if err != nil {
+		return nil, err
 	}
 	// busy_timeout is a per-connection setting, so it belongs in the DSN rather
 	// than in a one-off Exec: the pool opens connections on demand, and an Exec
@@ -195,20 +218,74 @@ func Open(dir, addr string) (*Traffic, error) {
 	if err != nil {
 		return nil, err
 	}
-	t := &Traffic{dir: dir, addr: addr, db: db, closed: make(chan struct{})}
+	t := &Traffic{dir: dir, addr: addr, db: db, auth: auth, closed: make(chan struct{})}
 	if err := t.initIndex(); err != nil {
 		db.Close()
 		return nil, err
 	}
+	// The SQLite driver creates index files under the process umask; tighten
+	// them explicitly (F11c).
+	indexPath := filepath.Join(dir, "_index", "index.sqlite")
+	for _, f := range []string{indexPath, indexPath + "-wal", indexPath + "-shm"} {
+		chmodIfExists(f, 0o600)
+	}
 
-	p, err := mproxy.NewProxy(&mproxy.Options{
-		Addr:        addr,
-		SslInsecure: true,
-		CaRootPath:  filepath.Join(dir, "_ca"),
-	})
-	if err != nil {
+	if err := t.initializeProxy(filepath.Join(dir, "_ca"), t); err != nil {
 		db.Close()
 		return nil, err
+	}
+	return t, nil
+}
+
+// OpenProxy adds an independently routed listener/CA but records into this
+// recorder's one index/tree. Thus existing search, evidence binding, UI, archive
+// and storage reclamation continue to see all task traffic without a second DB.
+// Closing the child listener never closes the parent recorder.
+func (t *Traffic) OpenProxy(runtimeDir, addr string) (*Traffic, error) {
+	if t == nil {
+		return nil, fmt.Errorf("shared traffic recorder is unavailable")
+	}
+	if t.parent != nil {
+		return t.parent.OpenProxy(runtimeDir, addr)
+	}
+	if t.stopping() || t.db == nil || t.proxy == nil {
+		return nil, fmt.Errorf("shared traffic recorder is unavailable")
+	}
+	for _, dir := range []string{runtimeDir, filepath.Join(runtimeDir, "_ca")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+		_ = os.Chmod(dir, 0o700)
+	}
+	child := &Traffic{dir: t.dir, addr: addr, db: t.db, auth: t.auth, fts: t.fts, parent: t, closed: make(chan struct{})}
+	if err := child.initializeProxy(filepath.Join(runtimeDir, "_ca"), t); err != nil {
+		return nil, err
+	}
+	return child, nil
+}
+
+func (t *Traffic) initializeProxy(caRoot string, recorder *Traffic) error {
+	p, err := mproxy.NewProxy(&mproxy.Options{
+		Addr:        t.addr,
+		SslInsecure: sslInsecure(),
+		CaRootPath:  caRoot,
+	})
+	if err != nil {
+		return err
+	}
+	// F2-1: require Basic proxy credentials on every request — plain requests
+	// AND CONNECT tunnels both pass through go-mitmproxy's auth hook; failures
+	// get a 407 from the entry. Even if the listener is accidentally bound to a
+	// non-loopback interface, the proxy is not an open relay.
+	if t.auth != nil {
+		p.SetAuthProxy(t.auth.check)
+	}
+	// go-mitmproxy wrote (or rewrote) the CA during NewProxy; its key signs
+	// every intercepted certificate, so keep the whole tree owner-only (F11c).
+	chmodCATree(caRoot)
+	// One-time sweep tightening files/dirs written by older versions.
+	if recorder == t {
+		t.migratePerms()
 	}
 	// Upstream selection. By default (no global egress proxy set) targets are
 	// dialed DIRECTLY: go-mitmproxy's own default upstream uses
@@ -223,12 +300,12 @@ func Open(dir, addr string) (*Traffic, error) {
 	// can't intercept without breaking (see maybePassthrough). Those are tunneled
 	// transparently so the request still reaches the target instead of being killed.
 	p.SetShouldInterceptRule(func(req *http.Request) bool {
-		_, tunnel := t.pass.Load(hostOnly(req.Host))
-		return !tunnel
+		return !recorder.pass.tunneled(hostOnly(req.Host))
 	})
-	p.AddAddon(&sink{t: t})
+	p.AddAddon(&sink{t: recorder})
 	t.proxy = p
-	return t, nil
+	t.caRoot = caRoot
+	return nil
 }
 
 // initIndex applies the schema on a single pinned connection. Pinning is what
@@ -291,6 +368,233 @@ func (t *Traffic) initIndex() error {
 	return nil
 }
 
+// proxyAuth holds the Basic credentials the recording proxy requires from its
+// clients (worker bash env, WebFetch, browser MCP). Auth exists so that a
+// proxy accidentally bound to a non-loopback interface is not an open relay.
+type proxyAuth struct {
+	user   string
+	pass   string
+	header string // expected "Basic <base64(user:pass)>" Proxy-Authorization value
+}
+
+// resolveProxyAuth decides the proxy's client credentials (F2-1):
+//   - env ARTEX_PROXY_AUTH="off"/"0"/"false" → authentication disabled. Only
+//     acceptable on a pure-loopback deployment; a warning is logged.
+//   - env ARTEX_PROXY_AUTH="user:pass" → explicit credentials.
+//   - unset → load <dir>/_auth; if missing, generate a random password with
+//     crypto/rand and persist it there (0600). The password is never logged —
+//     only the file path is.
+func resolveProxyAuth(dir string) (*proxyAuth, error) {
+	v := strings.TrimSpace(os.Getenv("ARTEX_PROXY_AUTH"))
+	switch {
+	case strings.EqualFold(v, "off") || v == "0" || strings.EqualFold(v, "false"):
+		log.Printf("[traffic] 警告：代理认证已关闭（ARTEX_PROXY_AUTH=%s），仅在纯 loopback 监听下可接受", v)
+		return nil, nil
+	case v != "":
+		user, pass, ok := strings.Cut(v, ":")
+		if !ok || user == "" || pass == "" {
+			return nil, fmt.Errorf("ARTEX_PROXY_AUTH 需要 user:pass 形式（或 off 关闭认证），当前值无效")
+		}
+		return newProxyAuth(user, pass), nil
+	}
+	path := filepath.Join(dir, "_auth")
+	if b, err := os.ReadFile(path); err == nil {
+		var stored struct {
+			User string `json:"user"`
+			Pass string `json:"pass"`
+		}
+		if json.Unmarshal(b, &stored) == nil && stored.User != "" && stored.Pass != "" {
+			return newProxyAuth(stored.User, stored.Pass), nil
+		}
+		log.Printf("[traffic] 代理凭据文件 %s 无法解析，将重新生成", path)
+	}
+	raw := make([]byte, 18)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, fmt.Errorf("生成代理凭据: %w", err)
+	}
+	// hex keeps the password free of characters that need URL-escaping in
+	// http://user:pass@host proxy URLs.
+	a := newProxyAuth("artex", hex.EncodeToString(raw))
+	b, _ := json.Marshal(map[string]string{"user": a.user, "pass": a.pass})
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		return nil, fmt.Errorf("保存代理凭据: %w", err)
+	}
+	_ = os.Chmod(path, 0o600) // umask backstop
+	log.Printf("[traffic] 已生成代理访问凭据并保存到 %s（0600；口令只存在于该文件，不打印日志）", path)
+	return a, nil
+}
+
+func newProxyAuth(user, pass string) *proxyAuth {
+	return &proxyAuth{
+		user:   user,
+		pass:   pass,
+		header: "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass)),
+	}
+}
+
+// check is the go-mitmproxy SetAuthProxy hook: the request must carry matching
+// Basic credentials (constant-time compare) or the proxy entry answers 407. On
+// a match the Proxy-Authorization header is stripped so the password is
+// neither recorded by the sink nor forwarded to the target.
+func (a *proxyAuth) check(_ http.ResponseWriter, req *http.Request) (bool, error) {
+	got := req.Header.Get("Proxy-Authorization")
+	if subtle.ConstantTimeCompare([]byte(got), []byte(a.header)) != 1 {
+		return false, errors.New("missing or invalid Proxy-Authorization")
+	}
+	req.Header.Del("Proxy-Authorization")
+	return true, nil
+}
+
+// sslInsecure reports whether the MITM accepts any target certificate. Default
+// true — historical behavior, and pentest targets routinely have broken or
+// self-signed TLS. Set env ARTEX_PROXY_SSL_INSECURE=0/false to verify target
+// certificates instead: safer against target-side MitM, but expect many
+// targets to fail interception and fall back to transparent passthrough
+// (unrecorded). Leave it on unless the engagement forbids it.
+func sslInsecure() bool {
+	v := strings.TrimSpace(os.Getenv("ARTEX_PROXY_SSL_INSECURE"))
+	return !(v == "0" || strings.EqualFold(v, "false"))
+}
+
+const (
+	// passTTL bounds how long a host stays in transparent passthrough after a
+	// proxy-caused MITM failure. When it lapses the host is retried with MITM +
+	// recording — a one-off hiccup no longer blinds the recorder permanently.
+	passTTL = 30 * time.Minute
+	// passMax caps the passthrough set; at the cap the oldest entry is evicted
+	// (and therefore retried), so a flood of failing hosts cannot grow it
+	// without bound.
+	passMax = 256
+)
+
+// passList is the set of hosts currently tunneled transparently (Traffic.pass),
+// with TTL expiry and a size cap. The zero value is ready to use.
+type passList struct {
+	mu  sync.Mutex
+	m   map[string]time.Time // host -> when it was flagged
+	now func() time.Time     // test hook; nil → time.Now
+}
+
+func (l *passList) time() time.Time {
+	if l.now != nil {
+		return l.now()
+	}
+	return time.Now()
+}
+
+// flag marks host for passthrough. already is true when the host was flagged
+// before and its TTL has not lapsed (so callers log only on the transition).
+func (l *passList) flag(host string) (already bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.m == nil {
+		l.m = make(map[string]time.Time)
+	}
+	now := l.time()
+	if t, ok := l.m[host]; ok && now.Sub(t) < passTTL {
+		return true
+	}
+	if _, ok := l.m[host]; !ok && len(l.m) >= passMax {
+		l.evictOldestLocked()
+	}
+	l.m[host] = now
+	return false
+}
+
+// tunneled reports whether host is currently in the passthrough set. An
+// expired entry is dropped on lookup, so the host transparently returns to
+// MITM + recording once its TTL lapses.
+func (l *passList) tunneled(host string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	t, ok := l.m[host]
+	if !ok {
+		return false
+	}
+	if l.time().Sub(t) >= passTTL {
+		delete(l.m, host)
+		return false
+	}
+	return true
+}
+
+// evictOldestLocked drops the stalest entry; the evicted host is retried with
+// MITM on its next connection, which is the desired behavior under pressure.
+func (l *passList) evictOldestLocked() {
+	var oldest string
+	var oldestT time.Time
+	first := true
+	for h, t := range l.m {
+		if first || t.Before(oldestT) {
+			oldest, oldestT, first = h, t, false
+		}
+	}
+	delete(l.m, oldest)
+}
+
+// chmodIfExists tightens one file, ignoring a missing path (the SQLite WAL/SHM
+// sidecars only exist once the database has been written).
+func chmodIfExists(path string, mode os.FileMode) {
+	if err := os.Chmod(path, mode); err != nil && !os.IsNotExist(err) {
+		log.Printf("[traffic] 收紧权限 %s 失败：%v", path, err)
+	}
+}
+
+// chmodCATree tightens the CA directory go-mitmproxy writes on startup (the CA
+// private key signs every intercepted certificate — treat it as a root
+// secret). Runs on every Open because the library may regenerate files.
+func chmodCATree(caDir string) {
+	_ = filepath.WalkDir(caDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil {
+			return nil
+		}
+		if d.IsDir() {
+			_ = os.Chmod(p, 0o700)
+		} else {
+			_ = os.Chmod(p, 0o600)
+		}
+		return nil
+	})
+}
+
+// permsMigrationMarker names the sentinel written once the one-time permission
+// migration (F11c: files 0644→0600, dirs 0755→0700) has swept the tree. New
+// writes are already created with tight modes, so the sweep runs only once —
+// without the marker every startup would stat every legacy capture file
+// (legacy trees can hold hundreds of thousands).
+const permsMigrationMarker = "_index/perms-v1.done"
+
+// migratePerms tightens files/dirs written by older versions. Idempotent and
+// best-effort: any failure skips the marker so the sweep retries on the next
+// start.
+func (t *Traffic) migratePerms() {
+	marker := filepath.Join(t.dir, permsMigrationMarker)
+	if _, err := os.Stat(marker); err == nil {
+		return
+	}
+	failed := false
+	_ = filepath.WalkDir(t.dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil {
+			return nil
+		}
+		mode := os.FileMode(0o600)
+		if d.IsDir() {
+			mode = 0o700
+		}
+		if err := os.Chmod(p, mode); err != nil {
+			failed = true
+		}
+		return nil
+	})
+	if failed {
+		log.Printf("[traffic] 部分历史文件权限迁移失败，下次启动将重试")
+		return
+	}
+	if err := os.WriteFile(marker, []byte("0600/0700\n"), 0o600); err != nil {
+		log.Printf("[traffic] 写权限迁移标记失败：%v", err)
+	}
+}
+
 // hostOnly strips an optional :port, so passthrough keys match whether the host
 // arrives as "example.com:443" (CONNECT) or "example.com" (request URL).
 func hostOnly(hostport string) string {
@@ -300,13 +604,47 @@ func hostOnly(hostport string) string {
 	return hostport
 }
 
-// ProxyAddr returns the address workers should set as HTTP(S)_PROXY. A bare
-// ":port" means "bind all interfaces" (legacy default), so map it to loopback.
-func (t *Traffic) ProxyAddr() string {
-	if strings.HasPrefix(t.addr, ":") {
-		return "http://127.0.0.1" + t.addr
+// proxyLoopbackHost normalizes the listen address for client URLs: a bare
+// ":port" bind means all interfaces, but clients always reach the proxy via
+// loopback. A host-ful address (e.g. "127.0.0.1:8788") is used as-is.
+func proxyLoopbackHost(addr string) string {
+	if h, p, err := net.SplitHostPort(addr); err == nil {
+		if h == "" {
+			h = "127.0.0.1"
+		}
+		return net.JoinHostPort(h, p)
 	}
-	return "http://" + t.addr
+	return addr
+}
+
+// ProxyAddr returns the proxy URL workers should set as HTTP(S)_PROXY. With
+// proxy authentication on (the default) the Basic credentials are embedded —
+// http://user:pass@127.0.0.1:port — so every consumer (bash env, WebFetch,
+// browser MCP) authenticates transparently. This is the single source of
+// truth for the credentialed address; logs must use ProxyAddrRedacted.
+func (t *Traffic) ProxyAddr() string {
+	host := proxyLoopbackHost(t.addr)
+	if t.auth == nil {
+		return "http://" + host
+	}
+	return (&url.URL{
+		Scheme: "http",
+		User:   url.UserPassword(t.auth.user, t.auth.pass),
+		Host:   host,
+	}).String()
+}
+
+// ProxyAddrRedacted is ProxyAddr with the password masked — safe for logs.
+func (t *Traffic) ProxyAddrRedacted() string {
+	host := proxyLoopbackHost(t.addr)
+	if t.auth == nil {
+		return "http://" + host
+	}
+	return (&url.URL{
+		Scheme: "http",
+		User:   url.UserPassword(t.auth.user, "****"),
+		Host:   host,
+	}).String()
 }
 
 // SetUpstreamProxy points every captured request at a global egress proxy
@@ -352,11 +690,23 @@ func ValidateProxyURL(raw string) (*url.URL, error) {
 // CACertPath returns the PEM CA cert clients must trust to verify HTTPS through
 // the MITM proxy (go-mitmproxy writes it here on first start).
 func (t *Traffic) CACertPath() string {
+	if t.caRoot != "" {
+		return filepath.Join(t.caRoot, "mitmproxy-ca-cert.pem")
+	}
 	return filepath.Join(t.dir, "_ca", "mitmproxy-ca-cert.pem")
 }
 
 // Start runs the proxy (blocking); run in a goroutine.
 func (t *Traffic) Start() error { return t.proxy.Start() }
+
+// UpstreamProxy returns the current egress proxy URL ("" = direct dial).
+// Observability/test hook for the hot-swappable upstream (SetUpstreamProxy).
+func (t *Traffic) UpstreamProxy() string {
+	if u := t.upstream.Load(); u != nil {
+		return u.String()
+	}
+	return ""
+}
 
 // Close waits for background tree reclamation to finish before closing the
 // index, so shutdown never leaves a goroutine unlinking files out from under a
@@ -364,11 +714,23 @@ func (t *Traffic) Start() error { return t.proxy.Start() }
 // it holds a whole minutes-long budget, and finishing it is never worth delaying
 // shutdown for — the next deletion resumes it.
 func (t *Traffic) Close() error {
-	if t.closed != nil {
-		t.closeOnce.Do(func() { close(t.closed) })
-	}
-	t.reaping.Wait()
-	return t.db.Close()
+	t.closeOnce.Do(func() {
+		if t.closed != nil {
+			close(t.closed)
+		}
+		if t.parent == nil {
+			t.reaping.Wait()
+		}
+		var errs []error
+		if t.proxy != nil {
+			errs = append(errs, t.proxy.Close())
+		}
+		if t.parent == nil && t.db != nil {
+			errs = append(errs, t.db.Close())
+		}
+		t.closeErr = errors.Join(errs...)
+	})
+	return t.closeErr
 }
 
 // stopping reports whether Close has been called. A nil channel (the zero value)
@@ -413,8 +775,8 @@ func (t *Traffic) maybePassthrough(f *mproxy.Flow, err error) {
 	if host == "" {
 		return
 	}
-	if _, loaded := t.pass.LoadOrStore(host, struct{}{}); !loaded {
-		log.Printf("[traffic] 与 %s 的 MITM 出错，改为透传（该 host 后续直连目标、不再记录，但请求照常）：%v", host, err)
+	if !t.pass.flag(host) {
+		log.Printf("[traffic] 与 %s 的 MITM 出错，改为透传（该 host 后续直连目标、不再记录，但请求照常；%s 后自动重试录制）：%v", host, passTTL, err)
 	}
 }
 
@@ -543,13 +905,13 @@ func (t *Traffic) spill(body []byte, contentType string) storedBody {
 	// One bucket level (256 buckets) is enough to keep any single directory small;
 	// the store only ever holds bodies above maxInlineBody, deduplicated by hash.
 	blobDir := filepath.Join(t.dir, "_blobs", "sha256", h[:2])
-	if err := os.MkdirAll(blobDir, 0o755); err != nil {
+	if err := os.MkdirAll(blobDir, 0o700); err != nil {
 		log.Printf("[traffic] 创建 blob 目录失败：%v", err)
 		return storedBody{inline: clipBytes(body, blobPreview), index: indexText()}
 	}
 	blobPath := filepath.Join(blobDir, h+".bin")
 	if _, err := os.Stat(blobPath); os.IsNotExist(err) {
-		if err := os.WriteFile(blobPath, body, 0o644); err != nil {
+		if err := os.WriteFile(blobPath, body, 0o600); err != nil {
 			log.Printf("[traffic] 写 blob %s 失败：%v", h, err)
 			return storedBody{inline: clipBytes(body, blobPreview), index: indexText()}
 		}

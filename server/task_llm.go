@@ -559,8 +559,11 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetNoaEnabled(s.m.NoaCompactionEnabled)     // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	wk.SetTaskProxyResolverChecked(s.m.TaskProxyForTaskChecked) // route failures stop this run instead of silently changing egress
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
+	wk.SetIntranetResolver(s.taskIntranet)           // 期 4:内网期(立足点/隧道)切 worker.intranet 提示词变体
+	wk.SetUAResolver(s.uaForTask)                    // 批 5 B4:按任务稳定分配的客户端 UA → BashEnv ARTEX_UA
 	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetFindingRecorder(s.evidenceStore())
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
@@ -572,6 +575,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	pl.SetWebSearch(s.webSearchFor("planner"))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开)
+	pl.SetGuard(s.agentGuard())                       // 审批门:planner 的工具调用同样过 PreToolUse 拦截
 	// cold-digest §7: 冷节点后台压缩。引擎经权威解析器实际驱动的就是这套 per-task planner
 	// (agentsForTask),Compactor 必须接在这里。走任务路由的 planner provider(§4:与 agent
 	// 同模型,随任务 LLM 链解析),压缩用 Complete 一次性生成 body。
@@ -585,6 +589,10 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	main.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	main.SetWebSearch(s.webSearchFor("mainagent"))
 	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
+	main.SetKillWork(func(intentID int64) error {
+		return s.engine.KillWorkAs(intentID, agent.AbortKilledByMainagent)
+	}) // kill_work：人立即终止运行中 work(killed_by_mainagent)
+	main.SetGuard(s.agentGuard()) // 审批门:mainagent 的工具调用同样过 PreToolUse 拦截
 	bundle := &taskAgentBundle{
 		runtime: goalRuntime, plannerRuntime: plannerRuntime, workerRuntime: workerRuntime,
 		mainRuntime: mainRuntime, pl: pl, wk: wk, main: main,

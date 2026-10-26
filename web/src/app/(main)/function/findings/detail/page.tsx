@@ -9,6 +9,7 @@ import { ArrowLeftIcon, ArrowUpRightIcon, ShieldAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
+import { FindingInlineHistory } from "@/components/finding-inline-history";
 import { FindingRetestPanel } from "@/components/finding-retest-panel";
 import { FindingVerificationEditor, FindingVerificationBadge } from "@/components/finding-verification";
 import { FindingTrafficPanel } from "@/components/finding-traffic-panel";
@@ -184,6 +185,12 @@ function FindingDetailInner() {
                 </CardContent>
               </Card>
               <FindingRetestPanel key={`retest:${id}`} findingId={id} readOnly={finding.inherited} onCompleted={load} />
+              {finding.finding_id ? (
+                <FindingInlineHistory
+                  key={`inline-history:${finding.finding_id}:${finding.evidence_version ?? 0}`}
+                  findingId={finding.finding_id}
+                />
+              ) : null}
               <Card>
                 <CardHeader>
                   <CardTitle className="text-sm">证据 / PoC</CardTitle>

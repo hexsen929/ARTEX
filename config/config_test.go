@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+func TestKeyDirPreservesNativeDefaultAndSupportsContainerVolume(t *testing.T) {
+	t.Setenv("ARTEX_KEY_DIR", "")
+	if got := KeyDir(); got != BaseDir() {
+		t.Fatalf("native key directory changed: got %q want %q", got, BaseDir())
+	}
+	dir := filepath.Join(t.TempDir(), "keys", ".")
+	t.Setenv("ARTEX_KEY_DIR", dir)
+	if got := KeyDir(); got != filepath.Clean(dir) {
+		t.Fatalf("explicit key directory ignored: %q", got)
+	}
+}
+
 func TestPostgresDSNPrecedence(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
@@ -38,5 +50,23 @@ func TestPostgresDSNPrecedence(t *testing.T) {
 	t.Setenv("ARTEX_CONFIG", cfgPath)
 	if got, _, err := PostgresDSN(); err != nil || got != "postgres://full/dsn" {
 		t.Fatalf("file dsn verbatim, got %q err %v", got, err)
+	}
+}
+
+func TestCallbackAddrPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	os.WriteFile(cfgPath, []byte(`{"callback_addr":"10.0.0.5:443"}`), 0o644)
+	t.Setenv("ARTEX_CONFIG", cfgPath)
+
+	// config file value used when env unset
+	t.Setenv("ARTEX_CALLBACK_ADDR", "")
+	if got := CallbackAddr(); got != "10.0.0.5:443" {
+		t.Fatalf("from file: got %q", got)
+	}
+	// env wins
+	t.Setenv("ARTEX_CALLBACK_ADDR", " 192.168.1.10:8443 ")
+	if got := CallbackAddr(); got != "192.168.1.10:8443" {
+		t.Fatalf("from env: got %q", got)
 	}
 }

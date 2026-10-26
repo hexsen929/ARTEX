@@ -183,7 +183,13 @@ package_binary() {
   fi
   cp -R skills "$package_root/"
   cp config.example.json "$package_root/"
+  # Deployment preflight reads this source manifest; no external binaries or
+  # runtime credentials are bundled into release archives.
+  mkdir -p "$package_root/packaging"
+  cp packaging/tools-manifest.json "$package_root/packaging/"
+  if [ "$goos" = "linux" ]; then cp packaging/artex.service "$package_root/packaging/"; fi
   if [ -f README.md ]; then cp README.md "$package_root/"; fi
+  if [ -f README-FORK.md ]; then cp README-FORK.md "$package_root/"; fi
   (cd "$ARTEX_PACKAGE_DIR" && zip -q -r -9 "$(basename "$archive")" "$(basename "$package_root")")
   rm -rf "$package_root"
   ok "Release 压缩包：$archive"
@@ -211,6 +217,9 @@ build_target() {
   fi
   mkdir -p "$(dirname "$output")"
 
+  case "${ARTEX_RELEASE_PUBLIC_KEY:-}" in
+    *[!A-Za-z0-9+/=]*) die "ARTEX_RELEASE_PUBLIC_KEY 必须是单行 base64 minisign 公钥" ;;
+  esac
   info "编译 ${goos}/${goarch}，版本 ${ARTEX_BUILD_VERSION}"
   GOSUMDB="$ARTEX_GOSUMDB" \
   CGO_ENABLED=0 \
@@ -219,7 +228,7 @@ build_target() {
   go build \
     -tags embedui \
     -trimpath \
-    -ldflags "-s -w -buildid= -X main.version=${ARTEX_BUILD_VERSION}" \
+    -ldflags "-s -w -buildid= -X main.version=${ARTEX_BUILD_VERSION} -X github.com/Autumn-27/artex/selfupdate.releasePublicKey=${ARTEX_RELEASE_PUBLIC_KEY:-}" \
     -o "$output" \
     ./cmd/artex
 

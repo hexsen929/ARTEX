@@ -18,8 +18,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
-import { api, openSSE } from "@/lib/api";
+import { api, createSSE, sseUrl } from "@/lib/api";
 import type { UpdateCheck, UpdateProgress, UpdateSettings } from "@/lib/types";
+import { safeHref } from "@/lib/safe-href";
 
 /** 等待新版本上线的最长时间。一次升级要经过三次进程启动（暂存 → 换装 → 新版），
  *  每次都是秒级，三分钟足够覆盖慢磁盘和 Docker 容器重建。 */
@@ -51,7 +52,8 @@ export function UpdateCard() {
   const [savedNetwork, setSavedNetwork] = React.useState<UpdateSettings | null>(null);
   const [savingNetwork, setSavingNetwork] = React.useState(false);
   const [networkError, setNetworkError] = React.useState("");
-  const streamRef = React.useRef<ReturnType<typeof openSSE> | null>(null);
+  const streamRef = React.useRef<EventSource | null>(null);
+  const streamVersion = React.useRef(0);
   const networkDirty = network?.proxy !== savedNetwork?.proxy;
 
   React.useEffect(() => {
@@ -71,7 +73,10 @@ export function UpdateCard() {
     };
   }, []);
 
-  React.useEffect(() => () => streamRef.current?.close(), []);
+  React.useEffect(() => () => {
+    streamVersion.current++;
+    streamRef.current?.close();
+  }, []);
 
   // quiet 同时决定要不要绕过后端缓存：进页面时的自动检查用缓存（顶栏刚查过），
   // 用户手动点「检查更新」则强制回源，否则刚发布的版本要等缓存过期才看得到。
@@ -146,11 +151,22 @@ export function UpdateCard() {
   }, []);
 
   // 订阅更新进度。SSE 不走 Next 的 /api 重写（那层会缓冲，事件推不出来）。
+  // F6:凭据是 60s 一次性 ticket;更新过程后端会重启,不重连(交给 /api/health 轮询)。
   const openStream = React.useCallback(
-    (fromVersion: string) => {
+    async (fromVersion: string) => {
+      const version = ++streamVersion.current;
       streamRef.current?.close();
-      const es = openSSE("/api/update/stream");
+      const url = await sseUrl("/api/update/stream");
+      if (version !== streamVersion.current) throw new Error("更新进度订阅已取消");
+      const es = createSSE(url);
+      let waiting = false;
+      const waitForRestart = () => {
+        if (waiting || version !== streamVersion.current) return;
+        waiting = true;
+        void waitForNewVersion(fromVersion);
+      };
       es.onmessage = (ev) => {
+        if (version !== streamVersion.current) return;
         let p: UpdateProgress;
         try {
           p = JSON.parse(ev.data) as UpdateProgress;
@@ -166,14 +182,20 @@ export function UpdateCard() {
         }
         if (p.phase === "staged") {
           es.close();
-          void waitForNewVersion(fromVersion);
+          waitForRestart();
         }
       };
       streamRef.current = es;
       es.onerror = () => {
         // 进程退出时 SSE 必然断开。如果已经进入等待重启，这属于正常现象，
         // 交给 /api/health 轮询继续判定即可。
-        // EventSource 自动重连，恢复服务端保存的当前进度。
+        // A one-use ticket must not be retried by EventSource. Health polling
+        // observes the replacement version without replaying applyUpdate.
+        es.close();
+        if (streamRef.current === es && version === streamVersion.current) {
+          streamRef.current = null;
+          waitForRestart();
+        }
       };
       return es;
     },
@@ -195,16 +217,23 @@ export function UpdateCard() {
 
     setBusy(true);
     setProgress({ phase: "downloading", percent: 0, message: "准备中…" });
-    api
-      .applyUpdate()
-      .then(() => {
-        openStream(from);
-      })
-      .catch((e) => {
+    void (async () => {
+      let es: EventSource;
+      try {
+        es = await openStream(from);
+      } catch (e) {
+        setBusy(false);
+        setProgress(null);
+        toast.error("打开更新进度流失败：" + (e as Error).message);
+        return;
+      }
+      api.applyUpdate().catch((e) => {
+        es.close();
         setBusy(false);
         setProgress(null);
         toast.error("启动更新失败：" + (e as Error).message);
       });
+    })();
   };
 
   const doRollback = () => {
@@ -235,6 +264,8 @@ export function UpdateCard() {
   // 时长不可知的阶段，进度条填满并加个脉冲动画表示"在忙但说不准还要多久"。
   const downloading = !restarting && phase === "downloading";
   const pct = downloading ? Math.max(progress?.percent ?? 0, 0) : 100;
+  // html_url 来自 GitHub API 响应,只允许 http(s) 进 href;异常值时不渲染链接。
+  const changelogHref = safeHref(info?.html_url);
 
   return (
     // 设置页是多列瀑布流布局，卡片自己负责行间距并禁止跨列断开（见 page.tsx 的注释）。
@@ -308,9 +339,9 @@ export function UpdateCard() {
               </Badge>
             </>
           )}
-          {info?.html_url && (
+          {changelogHref && (
             <a
-              href={info.html_url}
+              href={changelogHref}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-4 hover:underline"

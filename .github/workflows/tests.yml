@@ -54,7 +54,9 @@ jobs:
       - name: Go static checks
         run: go vet ./...
       - name: MCP lifecycle concurrency regressions
-        run: go test -race ./server -run 'Test(LazyMCP|MCPSlotQueue|LeasedMCP)' -count=1 -timeout=3m
+        run: |
+          go test -race ./server -run 'Test(LazyMCP|MCPSlotQueue|LeasedMCP|ManagerClose)' -count=1 -timeout=3m
+          go test -race ./traffic -run 'TestSharedProxy' -count=1 -timeout=3m
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

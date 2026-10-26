@@ -80,7 +80,7 @@ func TestConversationBatchDeleteReportsMissing(t *testing.T) {
 		_ = m.pg.DeleteConversation(first.ID)
 		_ = m.pg.DeleteConversation(second.ID)
 	}()
-	token, err := signJWT(s.jwtKey)
+	token, err := signJWT(s.jwtKey, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

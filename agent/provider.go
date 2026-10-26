@@ -364,9 +364,13 @@ func (c Config) newProvider(client *http.Client, limiter *RequestLimiter) (llm.P
 		return nil, err
 	}
 	if codexResponses {
-		return llmguard.Wrap(codexResponsesProvider{Provider: provider}), nil
+		provider = codexResponsesProvider{Provider: provider}
 	}
-	return llmguard.Wrap(provider), nil
+	// 整体墙钟(ARTEX_LLM_CALL_TIMEOUT):单次调用的最上层保险,防连接半开挂死冻住
+	// worker/planner。包在这里(组装处),recorder/pool 都在它之外,归一化错误可被
+	// llm_usage 记录并触发安全窗口内的故障转移。外层 HTTP 总预算经派生 context
+	// 保留并在配置切换间共享;Codex Complete 的流式缓冲也受同一墙钟保护。
+	return llmguard.Wrap(wrapCallTimeout(provider, c)), nil
 }
 
 // IsQuotaExhaustedMessage deliberately recognizes only explicit balance,

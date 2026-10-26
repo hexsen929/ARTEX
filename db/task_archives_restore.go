@@ -93,6 +93,9 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		{`DELETE FROM task_llm_profiles WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_scope WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_intelligence WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM credentials WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM pending_scope WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM task_session_bindings WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_constraints WHERE exploration_id=$1`, []any{expID}},
 		{`DELETE FROM activity WHERE exploration_id=$1`, []any{expID}},
 		{`DELETE FROM exploration_nodes WHERE exploration_id=$1`, []any{expID}},
@@ -108,6 +111,8 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		if _, err := tx.Exec(`DELETE FROM assets asset
 WHERE asset.id=ANY($2::bigint[]) AND asset.company_id IS NULL
 AND NOT EXISTS (SELECT 1 FROM tasks task WHERE task.id<>$1 AND task.deleted_at IS NULL AND task.id=ANY(asset.task_ids))
+AND NOT EXISTS (SELECT 1 FROM sessions resource WHERE resource.host_asset_id=asset.id)
+AND NOT EXISTS (SELECT 1 FROM credentials credential WHERE credential.host_asset_id=asset.id AND credential.task_id<>$1)
 AND NOT EXISTS (
  SELECT 1 FROM exploration_anchors anchor JOIN exploration_nodes node ON node.id=anchor.node_id
  JOIN tasks task ON task.exploration_id=node.exploration_id
@@ -273,6 +278,9 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
 	}
+	if err := restoreIntranetArchiveRows(tx, taskID, remappedTables); err != nil {
+		return nil, fmt.Errorf("restore intranet state: %w", err)
+	}
 	if err := restoreFindingTrafficTx(tx, snapshot); err != nil {
 		return nil, fmt.Errorf("restore finding traffic: %w", err)
 	}
@@ -386,6 +394,8 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		}
 	}
 	allowed := map[string]bool{
+		"credentials": true, "pending_scope": true, "task_session_bindings": true, "finding_checks": true,
+		"finding_verification_events": true, "finding_inline_merge_events": true,
 		"exploration_nodes": true, "exploration_edges": true, "exploration_anchors": true,
 		"task_intelligence": true, "task_constraints": true, "activity": true, "task_asset_links": true, "findings": true,
 		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true,
@@ -599,6 +609,20 @@ func remapArchiveAssetReferences(tables map[string]json.RawMessage, mapping map[
 				}
 				// Triage is human editable; preserve it even when the original observation was inferred.
 				row["fingerprint"] = intelligenceFingerprint(input)
+			}
+		}
+		out[table], _ = json.Marshal(rows)
+	}
+	for _, table := range []string{"sessions", "credentials"} {
+		rows, err := decodeArchiveRows(tables[table])
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			if old, ok := jsonInt64(row["host_asset_id"]); ok {
+				if replacement, exists := mapping[old]; exists {
+					row["host_asset_id"] = replacement
+				}
 			}
 		}
 		out[table], _ = json.Marshal(rows)

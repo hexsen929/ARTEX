@@ -134,7 +134,7 @@ func TestWorkerReviewContextAcrossToolCalls(t *testing.T) {
 		if json.Unmarshal(detail.Audit.ModelInput, &saved) != nil || saved.Background != nil || saved.Version != 5 {
 			t.Fatal("stored Worker review input retained a background")
 		}
-			if row.Status == "allowed" && (detail.Audit.ExecutionStatus != "succeeded" || saved.Version != 5) {
+		if row.Status == "allowed" && (detail.Audit.ExecutionStatus != "succeeded" || saved.Version != 5) {
 			t.Fatal("automatic allow lost execution result or its original background snapshot")
 		}
 		if detail.Audit.Correlation != "exact" {

@@ -126,6 +126,8 @@ function MatchCell({ row, showReason = true }: { row: InterceptApprovalRow; show
         </Badge>
       ) : decisionSource === "manual" ? (
         <Badge variant="outline">人工判定</Badge>
+      ) : decisionSource === "auto_allow" ? (
+        <Badge variant="outline">限时自动放行</Badge>
       ) : (
         <span className="truncate">{row.rule_name || "规则未记录或已删除"}</span>
       )}
@@ -1032,6 +1034,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
                 <SelectItem value="model">模型判定</SelectItem>
                 <SelectItem value="rule">规则判定</SelectItem>
                 <SelectItem value="manual">人工判定</SelectItem>
+                <SelectItem value="auto_allow">限时自动放行</SelectItem>
                 <SelectItem value="unknown">来源未知</SelectItem>
               </SelectGroup>
             </SelectContent>

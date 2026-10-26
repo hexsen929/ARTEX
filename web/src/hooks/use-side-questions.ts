@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { toast } from "sonner";
 
-import { openSSE } from "@/lib/api";
+import { createSSE, sseUrl } from "@/lib/api";
 import { isBtwCommand, type SideExchange, type SideHistory, sideAPI } from "@/lib/side-questions";
 
 // crypto.randomUUID 仅在安全上下文可用(https/localhost);经 IP+http 访问时降级。
@@ -128,24 +128,39 @@ export function useSideQuestions(parent: string | null) {
   useEffect(() => {
     if (!runningID) return;
     const version = epoch.current;
-    const stream = openSSE(`/api/side-questions/${runningID}/events`);
-    stream.addEventListener("snapshot", (event) => {
-      if (version !== epoch.current) return;
-      try {
-        const item = JSON.parse((event as MessageEvent).data) as SideExchange;
-        if (item.id !== runningID) return;
-        setItems((old) => merge(old, [item]));
-        restoreFailedDraft([item]);
-        if (item.status !== "running") stream.close();
-      } catch {
-        setError("旁路数据解析失败，请重新打开面板");
-      }
-    });
-    stream.addEventListener("cleared", () => {
-      stream.close();
-      if (version === epoch.current) setItems([]);
-    });
-    return () => stream.close();
+    let stream: EventSource | null = null;
+    let cancelled = false;
+    // F6:SSE 凭据是 60s 一次性 ticket;断流后不再自动重连,由 2s 轮询兜底。
+    void sseUrl(`/api/side-questions/${runningID}/events`)
+      .then((url) => {
+        if (cancelled) return;
+        stream = createSSE(url);
+        // This stream has polling fallback; never let the browser retry a used ticket.
+        stream.onerror = () => stream?.close();
+        stream.addEventListener("snapshot", (event) => {
+          if (cancelled || version !== epoch.current) return;
+          try {
+            const item = JSON.parse((event as MessageEvent).data) as SideExchange;
+            if (item.id !== runningID) return;
+            setItems((old) => merge(old, [item]));
+            restoreFailedDraft([item]);
+            if (item.status !== "running") stream?.close();
+          } catch {
+            setError("旁路数据解析失败，请重新打开面板");
+          }
+        });
+        stream.addEventListener("cleared", () => {
+          stream?.close();
+          if (version === epoch.current) setItems([]);
+        });
+      })
+      .catch(() => {
+        // 换票失败(如 token 刚过期)——轮询仍在跑,不视为致命。
+      });
+    return () => {
+      cancelled = true;
+      stream?.close();
+    };
   }, [runningID, streamEpoch, restoreFailedDraft]);
 
   const ask = async (input: string) => {

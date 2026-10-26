@@ -64,6 +64,7 @@ jobs:
           ARTEX_TARGET_OS: ${{ matrix.goos }}
           ARTEX_TARGET_ARCH: ${{ matrix.goarch }}
           ARTEX_BUILD_VERSION: ${{ inputs.build_version || github.ref_name }}
+          ARTEX_RELEASE_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
           ARTEX_SKIP_FRONTEND: "1"
           ARTEX_SKIP_NPM_CI: "1"
           # UPX 自解压 ELF 在部分 Linux 内核、虚拟化和安全策略下会崩溃。
@@ -116,11 +117,29 @@ jobs:
       - name: Generate checksums
         working-directory: dist
         run: sha256sum *.zip > SHA256SUMS
+      - name: Sign checksums when this fork has a release key
+        if: ${{ vars.MINISIGN_PUBLIC_KEY != '' }}
+        working-directory: dist
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+          MINISIGN_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$MINISIGN_KEY"
+          curl -fsSL -o minisign.tar.gz https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  minisign.tar.gz" | sha256sum -c -
+          tar xzf minisign.tar.gz
+          umask 077
+          trap 'rm -f minisign.key' EXIT
+          printf '%s\n' "$MINISIGN_KEY" > minisign.key
+          ./minisign-linux/x86_64/minisign -S -s minisign.key -m SHA256SUMS
+          ./minisign-linux/x86_64/minisign -Vm SHA256SUMS -P "$MINISIGN_PUBLIC_KEY"
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.zip
             dist/SHA256SUMS
+            dist/*.minisig
           body_path: release-notes.md
 
   # ④ 多架构镜像 → 推 Docker Hub（复用 binaries 编好的 Linux 二进制，
@@ -153,7 +172,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: autumn27/artex
+          images: ${{ vars.DOCKER_IMAGE || 'hexsen929/artex' }}
           tags: |
             type=ref,event=tag
             type=raw,value=latest

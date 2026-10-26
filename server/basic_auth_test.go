@@ -498,3 +498,56 @@ func TestBasicAuthPostgresLoginFlow(t *testing.T) {
 		t.Fatalf("disable with gate cookie and JWT: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestManagedStageDownloadUsesItsOwnTokenNotBasicAuth(t *testing.T) {
+	s, _ := basicAuthTestServer(t)
+	if w := saveBasicAuthForTest(s, `{"enabled":true,"username":"entry","password":"entry-password"}`); w.Code != http.StatusOK {
+		t.Fatal(w.Body.String())
+	}
+	h := s.requireBasicAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Stand in for stage.Manager's token/TTL check, not a public file handler.
+		if r.URL.Path != "/s/valid-fixture-token/file.txt" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	for _, tc := range []struct {
+		method, path string
+		want         int
+	}{
+		{http.MethodGet, "/s/valid-fixture-token/file.txt", http.StatusOK},
+		{http.MethodHead, "/s/valid-fixture-token/file.txt", http.StatusOK},
+		{http.MethodGet, "/s/unknown-token/file.txt", http.StatusNotFound},
+		{http.MethodPost, "/s/valid-fixture-token/file.txt", http.StatusUnauthorized},
+		{http.MethodGet, "/api/stage", http.StatusUnauthorized},
+		{http.MethodGet, "/api/settings", http.StatusUnauthorized},
+	} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+		if w.Code != tc.want {
+			t.Fatalf("%s %s status=%d want=%d", tc.method, tc.path, w.Code, tc.want)
+		}
+	}
+}
+
+func TestGateRemainsOuterLayerBeforeBasicAuthChallenge(t *testing.T) {
+	s, _ := basicAuthTestServer(t)
+	if w := saveBasicAuthForTest(s, `{"enabled":true,"username":"entry","password":"entry-password"}`); w.Code != http.StatusOK {
+		t.Fatal(w.Body.String())
+	}
+	g := newGate("/g-fixture", "fixture-password", []byte("gate-only-fixture-key-32-characters"), time.Hour)
+	h := g.wrap(s.requireBasicAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if w.Code != http.StatusOK || w.Body.String() != string(decoyPage) || w.Header().Get("WWW-Authenticate") != "" {
+		t.Fatal("Basic Auth leaked through the outer gate")
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	r.AddCookie(&http.Cookie{Name: gateCookieName, Value: g.signCookie()})
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized || w.Header().Get("WWW-Authenticate") == "" {
+		t.Fatal("passing the outer gate bypassed Basic Auth")
+	}
+}

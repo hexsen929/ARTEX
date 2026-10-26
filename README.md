@@ -7,11 +7,42 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 🌐 **在线 Demo**： [https://artex-demo-ruoji6.vercel.app/](https://artex-demo-ruoji6.vercel.app/)
 
-本 fork 保留 RuoJi6/ARTEX 的更新；v2.3.2 撤销 sharenjun/ARTEX-main 的整合。
+本 fork 保留 RuoJi6/ARTEX 的较新基线，以及 Codex、验证状态和 MCP 生命周期定制，并移植 ARTEX-ymh 的已实现内网工作流。
 
 </div>
 
 本仓库为 [hexsen929/ARTEX](https://github.com/hexsen929/ARTEX)，保留 [RuoJi6/ARTEX](https://github.com/RuoJi6/ARTEX) 的更新、原始提交历史与 AGPL-3.0 许可证。页面在线更新只读取本 fork 的 Releases。Docker 与 Demo 发布默认关闭。
+
+## ARTEX-ymh 工作流移植与升级提示
+
+本分支从 [`panda0x123/artex-ymh@48adc7f`](https://github.com/panda0x123/artex-ymh/tree/48adc7f1d8f62cbc47e658c9a2b47d6f63ca6cb1) 移植已实现的会话、隧道、任务代理、拓扑、凭据、范围审批、阶段移交、chains 与运维能力；保留当前日历、漏洞归并、独立验证状态、Codex 配置、LLM 搜索和按需 MCP 修复。功能与设计边界见 [README-FORK.md](README-FORK.md)。
+
+**升级前先暂停任务并停止 ARTEX/守护程序；只替换已通过云端构建与摘要校验的程序及随包资源，不覆盖已有 `config.json`、数据库、`data/` 或密钥。** 本项目维护工作流使用 GitHub Actions 编译、测试和五平台打包，不要求在本机安装构建依赖。
+
+### 门控访问变化
+
+- 原默认监听 `:8787` 保持不变；由于它是非 loopback 监听，新版默认启用伪装门控。Safari 继续访问原地址时可能先看到固定 nginx 欢迎页，而不是登录页。
+- 门控入口写入 `data/gate.path`，启动日志会提示入口；浏览器先访问该入口并完成门控，再进入原有登录/设置页面。文档中的入口形态为 `/g-<随机串>`，不要公开实际入口、口令、`gate.key` 或 `jwt.key`。
+- 已有管理员密码、JWT 密钥与可选 HTTP Basic Auth 均保留；门控不是替代原登录，也不会要求重建账户。`ARTEX_GATE=off` 可显式关闭门控；仅绑定 `127.0.0.1:8787` 时默认不启用门控。
+
+### 外部工具与 Mac ARM64
+
+会话/隧道能力依赖外部工具。程序包携带 `packaging/tools-manifest.json` 和检查逻辑，**不携带这些工具的二进制，不代表它们已经安装**。工具通常放在 `data/tools/`，或通过清单对应的路径环境变量指定；在工具页注册 `kind=shell` 表示可供 Agent 调用，不负责安装软件。
+
+安装或升级后可运行 `./artex doctor` 检查 PostgreSQL、LLM 配置、数据目录、工具存在性/摘要/平台、门控与回连配置。该命令不启动服务、不运行任务、不下载工具；数据目录可写性检查会创建并立即删除一个临时文件。
+
+清单继承的固定摘要主要来自 Linux amd64，不应拿它们验证 macOS ARM64 版本。Mac 用户需逐项提供适用于宿主平台的隧道/扫描工具；Windows 目标侧资源属于另一类，不能当作 Mac 可执行文件运行。缺失/未钉版/平台不适配会明确提示，不应视为所有功能已经就绪。
+
+### Docker 密钥持久化
+
+源码构建使用 `docker-compose.source.yml`（默认 Dockerfile 为 `Dockerfile.source`）；常规 `docker-compose.yml` 继续保留本 fork 镜像变量。两个部署方式都将数据与私有密钥分别持久化，容器设置 `ARTEX_KEY_DIR=/app/keys`。
+
+**已有容器升级前，先保存其原 `/app/jwt.key` 并放入新的密钥挂载目录 `keys/jwt.key`。** 会话及凭据加密依赖此密钥：数据、数据库和原密钥必须配套保留。不要生成新 key 来“修复”旧凭据的解密错误；原生安装不设置 `ARTEX_KEY_DIR` 时仍使用程序原目录，不会搬动现有密钥。
+
+### 在线更新与可选发布签名
+
+更新源继续固定为 `hexsen929/ARTEX`，不会切换到引入功能的仓库。SHA256SUMS 完整性校验始终保留；默认兼容本 fork 已有的无签名 Release，并明确显示尚未校验发布签名。维护者配置 `MINISIGN_PUBLIC_KEY` 仓库变量与配对的 `MINISIGN_KEY` Secret 后，云端签署校验清单并将公钥编入程序；运维也可用 `ARTEX_UPDATE_PUBLIC_KEY` 固定公钥。配置公钥后，缺签名、错误签名或无效公钥均终止更新，不会静默降级。
+
 
 ---
 

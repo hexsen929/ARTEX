@@ -115,6 +115,9 @@ func (s *Server) runOneTaskArchiveJob() error {
 }
 
 func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
+	if err := s.checkTaskIntranetArchive(s.ctx, job.TaskID); err != nil {
+		return err
+	}
 	taskID := strconv.FormatInt(job.TaskID, 10)
 	if !s.beginTaskDelete(taskID) {
 		return errors.New("任务正在进行其他归档或删除操作")
@@ -132,6 +135,9 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 		return errors.New("任务仍有运行中的 Agent，请先暂停后重试归档")
 	}
 	if err := s.drainTaskSideQuestions(drainCtx, taskID); err != nil {
+		return err
+	}
+	if err := s.checkTaskIntranetArchive(drainCtx, job.TaskID); err != nil {
 		return err
 	}
 	task, err := s.m.pg.GetTask(job.TaskID)
@@ -171,6 +177,9 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 	}
 	if snapshot.ExplorationID != task.ExplorationID {
 		return errors.New("任务探索记录在归档快照期间发生变化")
+	}
+	if snapshot.HasIntranetSecrets() {
+		snapshot.IntranetKeyFingerprint = pgdb.ArchiveIntranetKeyFingerprint(s.jwtKey)
 	}
 	if s.m.traffic != nil && len(snapshot.Hosts) > 0 {
 		_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "snapshot_traffic", 38)
@@ -280,6 +289,9 @@ func (s *Server) restoreTaskArchive(job *pgdb.TaskArchive) (runErr error) {
 	if snapshot.TaskID != job.TaskID || !pgdb.IsTaskArchiveFormatSupported(snapshot.FormatVersion) {
 		return pgdb.ErrTaskArchiveFormatMismatch
 	}
+	if err := s.validateArchiveIntranetKey(&snapshot); err != nil {
+		return err
+	}
 	evidenceSnapshots, err := pgdb.ArchiveEvidenceSnapshots(&snapshot)
 	if err != nil {
 		return err
@@ -290,6 +302,9 @@ func (s *Server) restoreTaskArchive(job *pgdb.TaskArchive) (runErr error) {
 }
 
 func (s *Server) restoreTaskArchivePayload(job *pgdb.TaskArchive, snapshot *pgdb.TaskArchiveSnapshot, extracted string) (runErr error) {
+	if err := s.validateArchiveIntranetKey(snapshot); err != nil {
+		return err
+	}
 	var err error
 	var llmRecordsFile *os.File
 	relative, hasStreamedLLMRecords := snapshot.StreamedTables["llm_records"]
@@ -363,6 +378,19 @@ func (s *Server) restoreTaskArchivePayload(job *pgdb.TaskArchive, snapshot *pgdb
 		return err
 	}
 	s.loadRestoredTask(job.TaskID)
+	return nil
+}
+
+func (s *Server) validateArchiveIntranetKey(snapshot *pgdb.TaskArchiveSnapshot) error {
+	if snapshot == nil {
+		return pgdb.ErrTaskArchiveFormatMismatch
+	}
+	if !snapshot.HasIntranetSecrets() {
+		return nil
+	}
+	if len(s.jwtKey) == 0 || snapshot.IntranetKeyFingerprint == "" || snapshot.IntranetKeyFingerprint != pgdb.ArchiveIntranetKeyFingerprint(s.jwtKey) {
+		return errors.New("归档包含加密会话或凭据，必须使用原实例密钥；当前密钥不匹配，未恢复任何数据")
+	}
 	return nil
 }
 
@@ -471,6 +499,10 @@ func (s *Server) queueTaskArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	numeric, _ := strconv.ParseInt(id, 10, 64)
+	if err := s.checkTaskIntranetArchive(r.Context(), numeric); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
 	item, err := s.m.pg.QueueTaskArchive(numeric)
 	if err != nil {
 		writeArchiveError(w, err)
@@ -537,6 +569,10 @@ func (s *Server) queueTaskArchivesBatch(w http.ResponseWriter, r *http.Request) 
 	ids = s.orderLiveTaskArchiveBatch(ids)
 	for _, id := range ids {
 		numeric, _ := strconv.ParseInt(id, 10, 64)
+		if err := s.checkTaskIntranetArchive(r.Context(), numeric); err != nil {
+			items = append(items, archiveBatchItem{ID: id, Error: err.Error()})
+			continue
+		}
 		archive, err := s.m.pg.QueueTaskArchive(numeric)
 		item := archiveBatchItem{ID: id, OK: err == nil, Queued: err == nil}
 		if err != nil {
