@@ -57,6 +57,14 @@ jobs:
         run: |
           go test -race ./server -run 'Test(LazyMCP|MCPSlotQueue|LeasedMCP|ManagerClose)' -count=1 -timeout=3m
           go test -race ./traffic -run 'TestSharedProxy' -count=1 -timeout=3m
+
+  # Run frontend checks independently: backend compilation failures must not
+  # hide TypeScript or UI regressions during a cross-cutting source port.
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

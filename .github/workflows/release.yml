@@ -15,6 +15,8 @@ permissions:
 
 jobs:
   verify:
+    # Reusable workflow succeeds only after both Go regression and frontend
+    # validation jobs succeed. No release/build job may bypass that result.
     uses: ./.github/workflows/tests.yml
 
   # ① 前端静态导出（一次），产物给交叉编译各平台复用
@@ -39,7 +41,7 @@ jobs:
 
   # ② 五平台交叉编译（内嵌前端）+ 打 zip
   binaries:
-    needs: frontend
+    needs: [verify, frontend]
     runs-on: ubuntu-latest
     strategy:
       matrix:

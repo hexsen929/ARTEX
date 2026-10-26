@@ -50,6 +50,7 @@ type Server struct {
 
 	skillDir  string // root directory for skill subdirectories
 	jwtKey    []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
+	keyDir    string // actual key location used by this server instance
 	basicAuth basicAuthGate
 
 	modelInstructionsDir string // blank resolves next to the executable; test override
@@ -165,11 +166,14 @@ type triggeredRun struct {
 }
 
 func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDir string) *Server {
+	if strings.TrimSpace(keyDir) == "" {
+		keyDir = config.KeyDir()
+	}
 	key, err := loadOrCreateJWTKey(keyDir, dataDir, config.BaseDir())
 	if err != nil {
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
-	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
+	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, keyDir: keyDir, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profChatAgents: map[int64]*agent.ChatAgent{},

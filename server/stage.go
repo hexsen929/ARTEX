@@ -9,13 +9,16 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/stage"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -35,6 +38,41 @@ func (s *Server) initStage(dataDir string) {
 		log.Printf("[stage] disabled: %v", err)
 		return
 	}
+	baseDir, keyDir := config.BaseDir(), config.KeyDir()
+	if s.keyDir != "" {
+		keyDir = s.keyDir
+	}
+	protectedFiles := []string{config.Path(), filepath.Join(baseDir, "config.json"), filepath.Join(baseDir, ".env"),
+		filepath.Join(baseDir, jwtKeyFilename), filepath.Join(baseDir, gateKeyFilename),
+		filepath.Join(keyDir, jwtKeyFilename), filepath.Join(keyDir, gateKeyFilename),
+		filepath.Join(dataDir, "config.json"), filepath.Join(dataDir, ".env"),
+		filepath.Join(dataDir, jwtKeyFilename), filepath.Join(dataDir, gateKeyFilename), filepath.Join(dataDir, gatePathFilename)}
+	protectedDirs := []string{}
+	for _, name := range []string{"sessions", "transcripts", "traffic", "evidence", "reverse", "archives", "task-archives", ".delete-staging", "stage"} {
+		protectedDirs = append(protectedDirs, filepath.Join(dataDir, name))
+		if s.m != nil && s.m.dir != "" {
+			protectedDirs = append(protectedDirs, filepath.Join(s.m.dir, name))
+		}
+	}
+	sameDir := func(a, b string) bool {
+		aa, aerr := filepath.Abs(a)
+		bb, berr := filepath.Abs(b)
+		if aerr == nil && berr == nil && filepath.Clean(aa) == filepath.Clean(bb) {
+			return true
+		}
+		ai, aerr := os.Stat(a)
+		bi, berr := os.Stat(b)
+		return aerr == nil && berr == nil && os.SameFile(ai, bi)
+	}
+	// Native KeyDir defaults to BaseDir, which also contains data/tools and
+	// legitimate task workspaces. Only a dedicated key directory is wholly
+	// private; the default root protects its individual configuration/key files.
+	if !sameDir(keyDir, baseDir) && !sameDir(keyDir, dataDir) {
+		protectedDirs = append(protectedDirs, keyDir)
+	}
+	policy := guard.NewStagePathPolicy(protectedFiles, protectedDirs)
+	m.FilePrecheck = policy.Check
+	m.FilePolicy = policy.CheckOpenFile
 	m.OnEvent = s.recordStageEvent
 	s.stage = m
 	log.Printf("[stage] 受管暂存服务已就绪: GET /s/<token>/<name> (TTL 默认 %v,上限 %v)", stage.DefaultTTL, stage.MaxTTL)

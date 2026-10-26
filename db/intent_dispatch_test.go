@@ -93,3 +93,39 @@ func TestCountOpenIntentsAndCancelOpenIntent(t *testing.T) {
 		t.Fatalf("unrelated intent=%+v err=%v, want open", keep, err)
 	}
 }
+
+// Scheduling and graph_overview deliberately share the same local frontier:
+// closed/history states and another exploration's open work must not count.
+func TestCountOpenIntentsMatchesLocalFrontierWithoutHistory(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	makeStore := func() *ExplorationStore {
+		t.Helper()
+		id, err := d.CreateExploration("count fixture", "local frontier")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM explorations WHERE id=$1`, id) })
+		return d.Exploration(id)
+	}
+	local, other := makeStore(), makeStore()
+	for _, state := range []string{"open", "open", "running", "paused", "done", "blocked", "exhausted", "stopped", "deleted"} {
+		if _, err := local.AddNode(KindIntent, map[string]any{"summary": "count fixture"}, 5, state, "fixture", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := other.AddIntent(map[string]any{"summary": "different exploration"}, 5, nil, "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	frontier, err := local.Frontier(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, err := local.CountOpenIntents()
+	if err != nil || count != 2 || count != len(frontier) {
+		t.Fatalf("local count=%d frontier=%d err=%v", count, len(frontier), err)
+	}
+}

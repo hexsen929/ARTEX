@@ -14,14 +14,8 @@ import (
 //     open 意图尚无 worker、无产出,只需状态落 stopped + 把作废原因挂图留痕,
 //     语义对齐 StopIntentWithReason 的「不销毁数据」原则。
 
-// CountOpenIntents returns the number of this exploration's intents still in
-// state 'open' (the frontier backlog size). Parameterized; no row materialization.
-func (s *ExplorationStore) CountOpenIntents() (int, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM exploration_nodes
-WHERE exploration_id=$1 AND kind='intent' AND state='open'`, s.expID).Scan(&n)
-	return n, err
-}
+// CountOpenIntents is shared with graph_overview and implemented once in
+// exploration.go; dispatch must use the same exploration-local open frontier.
 
 // CancelOpenIntent voids ONE open intent: open → stopped, WITHOUT deleting it.
 // The intent never started, so there are no yielded facts/findings/activities to
