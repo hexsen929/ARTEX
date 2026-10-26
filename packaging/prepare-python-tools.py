@@ -31,7 +31,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 SOURCE_PATH = ROOT / "python-tools-sources.json"
 GROUPS = ("impacket", "nxc", "pypykatz", "lazagne-macos", "penelope")
-PENELOPE_ADAPTER_REVISION = 4
+PENELOPE_ADAPTER_REVISION = 5
 PURPOSES = {
     "impacket": "Windows protocol tool collection; invoke impacket <script.py> [arguments].",
     "nxc": "NetExec protocol test CLI in an isolated Python environment.",
@@ -337,7 +337,10 @@ def adapt_penelope(upstream: bytes) -> bytes:
 \t\t\t\t# HTTPServer's default server_bind performs reverse DNS, which can
 \t\t\t\t# stall loopback MCP startup on macOS. This handler already has a
 \t\t\t\t# configured bind address; no reverse lookup is needed.
-\t\t\t\tsocketserver.TCPServer.server_bind(self)
+\t\t\t\t# Import locally: upstream's legacy fallback also binds the name
+\t\t\t\t# socketserver in start(), but leaves that closure empty on Py3.
+\t\t\t\timport socketserver as _artex_socketserver
+\t\t\t\t_artex_socketserver.TCPServer.server_bind(self)
 \t\t\t\tself.server_name = self.server_address[0]
 \t\t\t\tself.server_port = self.server_address[1]
 '''

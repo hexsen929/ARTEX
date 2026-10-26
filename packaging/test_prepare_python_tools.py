@@ -2,9 +2,8 @@
 import importlib.util
 import io
 import json
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-import socketserver
 import tempfile
 import unittest
 from unittest import mock
@@ -22,6 +21,15 @@ def penelope_fixture():
 \t\tself.basedir = globals().get('_ephemeral_root') or (real_home / f'.{__program__}')
 class MCPServer:
 \tdef start(self):
+\t\ttry:
+\t\t\tfrom http.server import ThreadingHTTPServer
+\t\texcept ImportError:
+\t\t\t# Match upstream's legacy fallback closure binding. This branch is
+\t\t\t# not executed on Python 3.11, so socketserver remains unbound.
+\t\t\timport socketserver
+\t\t\tfrom http.server import HTTPServer
+\t\t\tclass ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+\t\t\t\tpass
 \t\tclass _Server(ThreadingHTTPServer):
 \t\t\tdaemon_threads = True
 \t\treturn _Server
@@ -166,7 +174,7 @@ class PythonToolPreparationTests(unittest.TestCase):
             PREPARE.adapt_penelope(fixture.replace(b"\tmain()", b"\tother_main()"))
 
     def test_penelope_mcp_bind_does_not_call_reverse_dns(self):
-        namespace = {"__name__": "penelope_adapter_fixture", "os": PREPARE.os, "socketserver": socketserver, "ThreadingHTTPServer": ThreadingHTTPServer}
+        namespace = {"__name__": "penelope_adapter_fixture", "os": PREPARE.os}
         with mock.patch.dict("os.environ", {"ARTEX_PENELOPE_STARTUP_DIAGNOSTICS": "0"}):
             exec(compile(PREPARE.adapt_penelope(penelope_fixture()), "penelope-adapter-fixture.py", "exec"), namespace)
         server_type = namespace["MCPServer"]().start()
