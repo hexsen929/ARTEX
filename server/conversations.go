@@ -496,6 +496,7 @@ func (s *Server) conversationRunContext(id int64, busyKey string) (context.Conte
 func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) {
 	defer func() {
 		cancel(agent.AbortChatTurnFinished)
+		s.findingCheckTasks.Delete(c.ID)
 		s.chatMu.Lock()
 		delete(s.chatBusy, busyKey)
 		delete(s.chatCancel, busyKey)

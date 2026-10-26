@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/agent/chainskel"
@@ -113,7 +115,45 @@ func (s *Server) startFindingCheck(w http.ResponseWriter, r *http.Request) {
 // finding_checks 行(pending,含快照+会话)再跑会话;同一 finding 已有活跃
 // check 时去重返回(created=false)。
 func (s *Server) RequestFindingCheck(findingID int64, kind string) (*db.FindingCheck, bool, error) {
-	if s.m.pg == nil {
+	s.concMu.Lock()
+	defer s.concMu.Unlock()
+	return s.requestFindingCheck(findingID, kind)
+}
+
+// Automatic validation belongs to the parent task's execution lifecycle. Both
+// checking eligibility and synchronously registering the new run's cancellation
+// happen under the same lock as persistent pause, so no automatic check slips
+// into the gap between a pause commit and cancellation. Explicit manual checks
+// use RequestFindingCheck, which serializes creation but permits paused tasks.
+func (s *Server) requestAutomaticFindingCheck(findingID int64, kind string) (*db.FindingCheck, bool, error) {
+	s.concMu.Lock()
+	defer s.concMu.Unlock()
+	if s.m == nil || s.m.pg == nil {
+		return nil, false, errors.New("db 未初始化")
+	}
+	finding, err := s.m.pg.GetFinding(findingID)
+	if err != nil {
+		return nil, false, err
+	}
+	if finding == nil || finding.TaskID == nil || s.engine == nil {
+		return nil, false, nil
+	}
+	taskID := strconv.FormatInt(*finding.TaskID, 10)
+	task, ok := s.m.Task(taskID)
+	if !ok || s.engine.IsDeleting(taskID) || s.engine.IsPaused(taskID) || !s.engine.Started(taskID) {
+		return nil, false, nil
+	}
+	lifecycle := task.lifecycleSnapshot()
+	if lifecycle.Paused || lifecycle.Queued || lifecycle.Status != "running" || isTerminalStatus(lifecycle.Status) {
+		return nil, false, nil
+	}
+	return s.requestFindingCheck(findingID, kind)
+}
+
+// Caller holds concMu. Keep the shared creation path free of lifecycle locks to
+// avoid recursive locking from the manual and automatic admission methods.
+func (s *Server) requestFindingCheck(findingID int64, kind string) (*db.FindingCheck, bool, error) {
+	if s.m == nil || s.m.pg == nil {
 		return nil, false, errors.New("db 未初始化")
 	}
 	finding, err := s.m.pg.GetFinding(findingID)
@@ -149,6 +189,9 @@ func (s *Server) RequestFindingCheck(findingID int64, kind string) (*db.FindingC
 	}
 	if created {
 		busyKey := s.convBusyKey(conv.ID)
+		if finding.TaskID != nil {
+			s.findingCheckTasks.Store(conv.ID, strconv.FormatInt(*finding.TaskID, 10))
+		}
 		s.chatMu.Lock()
 		s.chatBusy[busyKey] = true
 		s.chatMu.Unlock()
@@ -170,7 +213,7 @@ func (s *Server) onFindingMerged(findingID int64) {
 	if !findingVerifyAutoEnabled(mode) {
 		return
 	}
-	if _, _, err := s.RequestFindingCheck(findingID, db.FindingCheckKindVerify); err != nil {
+	if _, _, err := s.requestAutomaticFindingCheck(findingID, db.FindingCheckKindVerify); err != nil {
 		log.Printf("[verifier] 合并增量重验 finding %d 派发失败: %v", findingID, err)
 	}
 }
@@ -192,9 +235,108 @@ func (s *Server) dispatchFindingVerify(e db.TaskEvent) {
 		log.Printf("[verifier] node %d 反查 finding 失败: %v", e.NodeID, err)
 		return
 	}
-	if _, _, err := s.RequestFindingCheck(findingID, db.FindingCheckKindVerify); err != nil {
+	if _, _, err := s.requestAutomaticFindingCheck(findingID, db.FindingCheckKindVerify); err != nil {
 		log.Printf("[verifier] 自动验证 finding %d 派发失败: %v", findingID, err)
 	}
+}
+
+// cancelTaskFindingChecks is called after a pause commit while concMu remains
+// held. Cancel known runtime contexts first: a database failure must never let
+// network/tool work continue. Sealing affects only check history, not findings.
+func (s *Server) cancelTaskFindingChecks(taskID string, cause error) error {
+	id, err := strconv.ParseInt(strings.TrimSpace(taskID), 10, 64)
+	if err != nil || id <= 0 {
+		return errors.New("无效任务编号")
+	}
+	taskID = strconv.FormatInt(id, 10)
+	if cause == nil {
+		cause = agent.AbortChatPausedWithTask
+	}
+	var known []context.CancelCauseFunc
+	s.findingCheckTasks.Range(func(key, value any) bool {
+		conversationID, validID := key.(int64)
+		owner, validOwner := value.(string)
+		if !validID || !validOwner || owner != taskID {
+			return true
+		}
+		s.chatMu.Lock()
+		var cancel context.CancelCauseFunc
+		// Cleanup removes attribution before clearing busy/cancel. Revalidate
+		// under chatMu so a stale Range entry cannot cancel a new history turn.
+		if current, ok := s.findingCheckTasks.Load(conversationID); ok && current == taskID {
+			cancel = s.chatCancel[s.convBusyKey(conversationID)]
+		}
+		s.chatMu.Unlock()
+		if cancel != nil {
+			known = append(known, cancel)
+		}
+		return true
+	})
+	for _, cancel := range known {
+		cancel(cause)
+	}
+	if s.m == nil || s.m.pg == nil {
+		return errors.New("验证已请求停止，但数据库未就绪，状态审计未完成")
+	}
+	ctx, cancelAudit := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelAudit()
+	rows, err := s.m.pg.QueryContext(ctx, `SELECT c.id,c.conversation_id FROM finding_checks c JOIN findings f ON f.id=c.finding_id WHERE f.task_id=$1 AND c.status IN ('pending','running')`, id)
+	if err != nil {
+		return err
+	}
+	conversations := map[int64]int64{}
+	for rows.Next() {
+		var checkID int64
+		var conversation sql.NullInt64
+		if err = rows.Scan(&checkID, &conversation); err != nil {
+			rows.Close()
+			return err
+		}
+		if conversation.Valid {
+			conversations[checkID] = conversation.Int64
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	// Snapshot the cancellation function, not just its key. A later explicit
+	// explanation turn on a sealed historical conversation must remain usable.
+	cancels := map[int64]context.CancelCauseFunc{}
+	s.chatMu.Lock()
+	for checkID, conversationID := range conversations {
+		if cancel := s.chatCancel[s.convBusyKey(conversationID)]; cancel != nil {
+			cancels[checkID] = cancel
+		}
+	}
+	s.chatMu.Unlock()
+	sealed := map[int64]bool{}
+	defer func() {
+		for checkID, cancel := range cancels {
+			if err != nil || sealed[checkID] {
+				cancel(cause)
+			}
+		}
+	}()
+	rows, err = s.m.pg.QueryContext(ctx, `UPDATE finding_checks c SET status='stopped',error='任务已暂停，独立漏洞验证已停止',finished_at=now() FROM findings f WHERE c.finding_id=f.id AND f.task_id=$1 AND c.status IN ('pending','running') RETURNING c.id`, id)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var checkID int64
+		if err = rows.Scan(&checkID); err != nil {
+			rows.Close()
+			return err
+		}
+		sealed[checkID] = true
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // Both tools derive the finding from server-owned conversation context. Tool

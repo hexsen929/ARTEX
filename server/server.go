@@ -93,6 +93,9 @@ type Server struct {
 	// cleared alongside chatBusy under chatMu. Aborting a run does NOT touch the P3
 	// trigger queue — the drain goroutine simply proceeds to the next queued fire.
 	chatCancel map[string]context.CancelCauseFunc
+	// Runtime attribution lets task pause cancel independent verification even
+	// when PostgreSQL is temporarily unavailable (conversation id -> task id).
+	findingCheckTasks sync.Map
 
 	// triggerQ buffers P3 trigger fires PER AGENT. A per-agent "pump" launches runs up
 	// to a concurrency limit derived from the agent's策略: serial → limit 1 (+ optional
