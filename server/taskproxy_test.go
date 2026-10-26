@@ -68,25 +68,44 @@ func TestTaskProxySharesCaptureAndResetKeepsParentRecorder(t *testing.T) {
 	transport := &http.Transport{Proxy: http.ProxyURL(proxy)}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
-	resp, err := client.Get(target.URL + "/task-shared-record")
+	wantURL := target.URL + "/task-shared-record"
+	resp, err := client.Get(wantURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if err != nil || string(body) != "shared-record-fixture" {
+	if err != nil || resp.StatusCode != http.StatusOK || string(body) != "shared-record-fixture" {
 		t.Fatalf("unexpected proxy response %q %v", body, err)
 	}
 	records, err := parent.Search("", 0, 10)
-	if err != nil || len(records) != 1 || records[0].Path != "/task-shared-record" {
+	// ExchangeMeta.Path is a legacy on-disk body directory, not the HTTP URL
+	// path. New captures intentionally keep it empty and store bodies in SQLite.
+	if err != nil || len(records) != 1 {
 		t.Fatalf("task traffic missing from global recorder: %+v %v", records, err)
+	}
+	recorded := records[0]
+	if recorded.ID == "" || recorded.URL != wantURL || recorded.Method != http.MethodGet ||
+		recorded.Status != http.StatusOK || recorded.RespLen != len(body) {
+		t.Fatalf("global recorder contains the wrong exchange: %+v", recorded)
+	}
+	requestText, responseText, err := parent.Get(recorded.ID)
+	if err != nil || !strings.Contains(requestText, "GET /task-shared-record ") ||
+		!strings.HasPrefix(responseText, "HTTP 200\n") || !strings.HasSuffix(responseText, string(body)) {
+		t.Fatalf("global evidence read missed child wire data: request=%q response=%q err=%v", requestText, responseText, err)
+	}
+	if rows, total, err := parent.Page(traffic.PageQuery{Path: "/task-shared-record", RespMin: -1, RespMax: -1}, 0, 10); err != nil || total != 1 || len(rows) != 1 || rows[0].ID != recorded.ID {
+		t.Fatalf("global HTTP-path query missed child evidence: total=%d rows=%v err=%v", total, rows, err)
 	}
 	m.ResetCapture()
 	if len(m.proxies) != 0 {
 		t.Fatal("capture reset left task listeners registered")
 	}
-	if records, err = parent.Search("", 0, 10); err != nil || len(records) != 1 {
+	if records, err = parent.Search("", 0, 10); err != nil || len(records) != 1 || records[0].ID != recorded.ID || records[0].URL != wantURL {
 		t.Fatal("closing child listener closed the parent recorder or erased evidence")
+	}
+	if afterRequest, afterResponse, err := parent.Get(recorded.ID); err != nil || afterRequest != requestText || afterResponse != responseText {
+		t.Fatal("capture reset removed or changed the request/response evidence")
 	}
 	if _, _, err = m.ForTaskChecked(context.Background(), 42); err != nil {
 		t.Fatalf("reset manager was not reusable: %v", err)

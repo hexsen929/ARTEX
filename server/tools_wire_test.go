@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/Autumn-27/artex/agent"
@@ -36,8 +37,8 @@ func TestWireTools(t *testing.T) {
 	t.Cleanup(func() { agent.ToolResolve = nil })
 	// Prevent interactive-shell Bash decoration: if the worker agent has
 	// interactive_shell=true in the DB, ToolResolve would append a note to
-	// Bash's description. Disable that for this test so the undecorated
-	// pass-through assertion holds regardless of DB state.
+	// Bash's description. Disable that optional note so this test can assert
+	// the exact mandatory worker-UA addendum independently of database state.
 	t.Setenv("AGENT_CORE_DISABLE_INTERACTIVE_SHELL", "1")
 
 	// Seeding populated the catalog.
@@ -56,16 +57,25 @@ func TestWireTools(t *testing.T) {
 	if _, ok := worker["record_fact"]; !ok {
 		t.Error("worker lost record_fact")
 	}
-	// SDK generic tools aren't seeded → ToolResolve passes them through unchanged
-	// (same object, original description — not decorated). No startup prune touches
-	// non-catalog rows, so future user-defined custom tools survive too.
+	// SDK generic tools retain their original schema/behavior; worker Bash has
+	// the mandatory task-UA description suffix. Other agents must not inherit a
+	// dangling ARTEX_UA instruction because their Bash env does not set it.
 	if bash, ok := worker["Bash"]; !ok {
 		t.Error("worker lost Bash (should pass through)")
-	} else if bash.Description() != actool.NewBash().Description() {
-		t.Error("Bash should pass through undecorated, but description changed")
+	} else {
+		original := actool.NewBash()
+		if bash.Description() != original.Description()+bashUANote {
+			t.Error("worker Bash must preserve its description and append exactly the task-UA note")
+		}
+		if !reflect.DeepEqual(bash.InputSchema(), original.InputSchema()) {
+			t.Error("worker UA note changed the Bash input schema")
+		}
 	}
 	// planner is not bound to record_fact → resolving a base that contains it drops it.
 	planner := names(agent.ToolResolve(ctx, "planner", base))
+	if bash := planner["Bash"]; bash == nil || bash.Description() != actool.NewBash().Description() {
+		t.Error("non-worker Bash lost its original description or gained a dangling worker-UA note")
+	}
 	if _, ok := planner["record_fact"]; ok {
 		t.Error("planner should not get record_fact (not bound)")
 	}

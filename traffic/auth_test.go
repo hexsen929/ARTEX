@@ -184,6 +184,9 @@ func TestOpenTightensPermissions(t *testing.T) {
 	if err := os.Chmod(legacy, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	tr, err := Open(dir, "127.0.0.1:0")
 	if err != nil {
@@ -191,12 +194,14 @@ func TestOpenTightensPermissions(t *testing.T) {
 	}
 	defer tr.Close()
 
-	for _, d := range []string{dir, "_index", "_blobs", "_ca"} {
+	// Entries are relative to dir. Joining dir with the already absolute dir
+	// duplicates the path instead of checking the recorder root itself.
+	for _, d := range []string{".", "_index", "_blobs", "_ca"} {
 		if m := fileMode(t, filepath.Join(dir, d)); m != 0o700 {
 			t.Errorf("dir %s mode=%o, want 700", d, m)
 		}
 	}
-	for _, f := range []string{"_index/index.sqlite", "_auth"} {
+	for _, f := range []string{"_index/index.sqlite", "_auth", permsMigrationMarker} {
 		if m := fileMode(t, filepath.Join(dir, f)); m != 0o600 {
 			t.Errorf("file %s mode=%o, want 600", f, m)
 		}

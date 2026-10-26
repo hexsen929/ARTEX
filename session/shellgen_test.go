@@ -8,9 +8,54 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// The generator deliberately returns bare identifiers shared with the JSP
+// template. PHP's variable sigil belongs to its own template, both at an
+// assignment and at every subsequent reference, including catch variables.
+func TestPHPTemplateVariableSigils(t *testing.T) {
+	variables := regexp.MustCompile(`\{\{\.V[A-Za-z0-9]+\}\}`)
+	matches := variables.FindAllStringIndex(phpEncTemplate, -1)
+	if len(matches) == 0 {
+		t.Fatal("PHP template must retain its variable placeholders")
+	}
+	for _, match := range matches {
+		start := match[0]
+		placeholder := phpEncTemplate[start:match[1]]
+		if start == 0 || phpEncTemplate[start-1] != '$' {
+			t.Errorf("PHP variable %s is missing its sigil", placeholder)
+		}
+		if start >= 2 && phpEncTemplate[start-2] == '$' {
+			t.Errorf("PHP variable %s has an unintended variable-variable sigil", placeholder)
+		}
+	}
+}
+
+func TestGenerateShellPHPVariableIdentifiers(t *testing.T) {
+	assignment := regexp.MustCompile(`(?m)^\$[a-z][a-z0-9]{8} = openssl_get_cipher_methods\(\);$`)
+	catchVariable := regexp.MustCompile(`catch \(Throwable \$[a-z][a-z0-9]{8}\)`)
+	for _, obfuscated := range []bool{false, true} {
+		name := "plain"
+		if obfuscated {
+			name = "obfuscated"
+		}
+		t.Run(name, func(t *testing.T) {
+			generated, err := GenerateShell("php", obfuscated, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !assignment.MatchString(generated.Content) {
+				t.Error("rendered PHP method-list assignment lacks a valid variable identifier")
+			}
+			if !catchVariable.MatchString(generated.Content) {
+				t.Error("rendered PHP catch parameter lacks a valid variable identifier")
+			}
+		})
+	}
+}
 
 // phpLint 对生成的 PHP 马体做 php -l 语法检查;环境无 php 时 skip。
 func phpLint(t *testing.T, content string) {

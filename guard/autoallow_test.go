@@ -47,6 +47,23 @@ func TestAutoAllowKeepsDenyEnforced(t *testing.T) {
 		_ = d.DeleteInterceptRule(askRule.ID)
 		_, _ = d.Exec(`DELETE FROM intercept_pending WHERE tool_input::text LIKE '%' || $1 || '%'`, marker)
 	})
+	// IsToolEnabled above loads BOTH the tool set and rule cache. This fixture
+	// writes directly to the DB, so mirror the management API's invalidation
+	// instead of accidentally testing the pre-insert cached default rules.
+	ic.Invalidate()
+	assertDecision := func(cmd, action string, ruleID int64) {
+		t.Helper()
+		input, err := json.Marshal(map[string]string{"command": cmd})
+		if err != nil {
+			t.Fatal(err)
+		}
+		decision, matched := ic.Match("Bash", input)
+		if !matched || decision.Action != action || decision.RuleID != ruleID {
+			t.Fatalf("fixture decision=%+v matched=%v, want action=%s rule_id=%d", decision, matched, action, ruleID)
+		}
+	}
+	assertDecision(marker+"-deny", "deny", denyRule.ID)
+	assertDecision(marker+"-ask", "ask", askRule.ID)
 
 	g := NewWithInterceptor(ic)
 	call := func(cmd string) bool {
@@ -60,6 +77,9 @@ func TestAutoAllowKeepsDenyEnforced(t *testing.T) {
 	if err := ic.SetAutoAllow(true, 2); err != nil {
 		t.Fatal(err)
 	}
+	// The switch affects only how an ask is handled, never rule classification.
+	assertDecision(marker+"-deny", "deny", denyRule.ID)
+	assertDecision(marker+"-ask", "ask", askRule.ID)
 
 	// deny:照常拦截,且不产生 auto_allow 历史。
 	if !call(marker + "-deny") {
@@ -91,6 +111,8 @@ func TestAutoAllowKeepsDenyEnforced(t *testing.T) {
 	if err := ic.SetAutoAllow(false, 0); err != nil {
 		t.Fatal(err)
 	}
+	assertDecision(marker+"-deny", "deny", denyRule.ID)
+	assertDecision(marker+"-ask", "ask", askRule.ID)
 	if !call(marker + "-deny") {
 		t.Fatal("deny should still block after disabling auto-allow")
 	}
