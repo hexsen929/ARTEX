@@ -67,6 +67,24 @@ func (c *ChatAgent) maxTokens() int {
 // CA cert it trusts (empty addr = direct). Kept for parity with the other agents.
 func (c *ChatAgent) SetProxy(addr, caCert string) { c.proxyAddr, c.proxyCACert = addr, caCert }
 
+type chatProxyOverrideKey struct{}
+type chatProxyOverride struct{ addr, caCert string }
+
+// WithChatProxyOverride scopes the target-traffic proxy to one conversation turn.
+// An explicit empty address disables the ChatAgent's configured default proxy;
+// no override keeps ordinary chat behavior unchanged. Network search has its own
+// independently configured proxy and is deliberately unaffected.
+func WithChatProxyOverride(ctx context.Context, addr, caCert string) context.Context {
+	return context.WithValue(ctx, chatProxyOverrideKey{}, chatProxyOverride{addr: addr, caCert: caCert})
+}
+
+func (c *ChatAgent) proxyForChat(ctx context.Context) (string, string) {
+	if proxy, ok := ctx.Value(chatProxyOverrideKey{}).(chatProxyOverride); ok {
+		return proxy.addr, proxy.caCert
+	}
+	return c.proxyAddr, c.proxyCACert
+}
+
 // SetWebSearch selects the web_search backend for the chat agent (off by default).
 func (c *ChatAgent) SetWebSearch(o WebSearchOpts) { c.webSearch = o }
 
@@ -103,6 +121,7 @@ type chatVars struct{ DataDir, Now string }
 // tool_use / tool_result / text / result), tagged with the agent key as the
 // worker lane.
 func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message string, maxTurns int, maxDuration time.Duration, webSearch bool, emit func(db.Activity)) (string, error) {
+	proxyAddr, proxyCACert := c.proxyForChat(ctx)
 	// gate the global web-search opts by this agent's own flag.
 	ws := c.webSearch
 	if !webSearch {
@@ -119,7 +138,9 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	// visible skills/MCP and lets the DB tools table filter/override. DefaultTools
 	// have no tools-table rows, so they always pass through.
 	base := actool.DefaultTools()
-	ctx = WithRunInfo(ctx, RunInfo{SessionID: sessionID})
+	runInfo := RunInfoFrom(ctx)
+	runInfo.SessionID = sessionID
+	ctx = WithRunInfo(ctx, runInfo)
 	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
 	defer cleanup()
 
@@ -133,8 +154,8 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		UnlockSet:       def.Unlock,
 		PermissionMode:  permission.ModeBypass,
 		EnableWebFetch:  true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
-		WebFetchProxy:   c.proxyAddr,
-		WebFetchCACert:  c.proxyCACert,
+		WebFetchProxy:   proxyAddr,
+		WebFetchCACert:  proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
 		EnableWebSearch:       ws.Enabled,
@@ -145,7 +166,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		DeepSeekSearchAPIKey:  ws.DeepSeekAPIKey,
 		DeepSeekSearchModel:   ws.DeepSeekModel,
 		WebSearchProxy:        ws.Proxy,
-		BashEnv:               proxyEnv(c.proxyAddr, c.proxyCACert), // Bash 子命令默认走代理+信任 CA
+		BashEnv:               proxyEnv(proxyAddr, proxyCACert), // 本轮代理，不修改共享 ChatAgent
 		WorkingDir:            sessionWorkDir,
 		MaxTurns:              maxTurns,
 		MaxDuration:           maxDuration,
