@@ -7,6 +7,30 @@ on:
 permissions:
   contents: read
 jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Compile every test package without running TestMain
+        run: |
+          set -euo pipefail
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          failed=0
+          for package in $(go list ./...); do
+            echo "Compile $package"
+            if ! go test -c -o "$scratch/package.test" "$package" > "$scratch/compiler.log" 2>&1; then
+              cat "$scratch/compiler.log"
+              CI_LOG="$scratch/compiler.log" CI_PACKAGE="$package" python3 -c 'import os,pathlib; s=pathlib.Path(os.environ["CI_LOG"]).read_text(errors="replace")[-18000:]; s=s.replace("%","%25").replace("\r","%0D").replace("\n","%0A"); print("::error title=Go compile "+os.environ["CI_PACKAGE"]+"::"+s)'
+              failed=1
+            fi
+            rm -f "$scratch/package.test"
+          done
+          exit "$failed"
   regression:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -47,8 +71,16 @@ jobs:
             else
               unset ARTEX_INSTRUCTIONS_TEST_DSN
             fi
+            test_log="$(mktemp)"
+            result=0
             ARTEX_PG_DSN="postgres://artex_test:artex_test@127.0.0.1:5432/${database}?sslmode=disable" \
-              go test "$package" -count=1 -timeout=5m
+              go test "$package" -count=1 -timeout=5m > "$test_log" 2>&1 || result=$?
+            cat "$test_log"
+            if [[ "$result" -ne 0 ]]; then
+              CI_LOG="$test_log" CI_PACKAGE="$package" python3 -c 'import os,pathlib; s=pathlib.Path(os.environ["CI_LOG"]).read_text(errors="replace")[-18000:]; s=s.replace("%","%25").replace("\r","%0D").replace("\n","%0A"); print("::error title=Go test "+os.environ["CI_PACKAGE"]+"::"+s)'
+              exit "$result"
+            fi
+            rm -f "$test_log"
             index=$((index + 1))
           done
       - name: Go static checks

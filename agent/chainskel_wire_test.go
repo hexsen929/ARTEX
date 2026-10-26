@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -37,13 +39,19 @@ func TestAddOneIntentChainTags(t *testing.T) {
 	if err != nil || n == nil {
 		t.Fatalf("取意图节点: %v", err)
 	}
-	payload := string(n.Payload)
-	if !strings.Contains(payload, `"chain_tags":["web","priv"]`) {
-		t.Fatalf("payload 应含规整后的 chain_tags, got: %s", payload)
+	var payload struct {
+		Summary   string   `json:"summary"`
+		ChainTags []string `json:"chain_tags"`
+	}
+	if err := json.Unmarshal(n.Payload, &payload); err != nil {
+		t.Fatalf("payload JSON 无效: %v", err)
+	}
+	if !slices.Equal(payload.ChainTags, []string{"web", "priv"}) {
+		t.Fatalf("chain_tags 应精确等于规整后的 [web priv], got: %#v", payload.ChainTags)
 	}
 	// 原有字段不受影响
-	if !strings.Contains(payload, `"summary"`) {
-		t.Fatalf("payload 缺 summary: %s", payload)
+	if payload.Summary != "对 example.com 登录口做 sql 注入测试" {
+		t.Fatalf("payload summary 被改变, got: %q", payload.Summary)
 	}
 }
 

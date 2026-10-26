@@ -232,4 +232,30 @@ func TestGraphOverviewMarksInferredFact(t *testing.T) {
 	if !strings.Contains(conf, "inferred") || !strings.Contains(conf, "待复核") {
 		t.Fatalf("inferred fact must carry 待复核 marker, confidence=%q", conf)
 	}
+	if found["confidence_level"] != FactConfidenceInferred {
+		t.Fatalf("canonical confidence level lost: %#v", found)
+	}
+	if got := factPayload(t, ts, id)["confidence"]; got != FactConfidenceInferred {
+		t.Fatalf("overview display changed persisted confidence: %v", got)
+	}
+}
+
+func TestGraphOverviewFactReviewMarkersKeepBoundedWindow(t *testing.T) {
+	ts := factTestRig(t)
+	for i := 0; i < 23; i++ {
+		_, _, err := ts.recordOneFact(factItem{Summary: fmt.Sprintf("fixture observation %d", i), Confidence: FactConfidenceInferred}, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	facts, _ := ts.graphOverviewData()["recent_facts"].([]map[string]any)
+	if len(facts) != 20 {
+		t.Fatalf("review markers changed the bounded window: got %d facts, want 20", len(facts))
+	}
+	for _, fact := range facts {
+		confidence, _ := fact["confidence"].(string)
+		if !strings.Contains(confidence, "待复核") || fact["confidence_level"] != FactConfidenceInferred {
+			t.Fatalf("bounded inferred fact lost review status: %#v", fact)
+		}
+	}
 }

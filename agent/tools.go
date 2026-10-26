@@ -496,6 +496,12 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		if json.Unmarshal(n.Payload, &fp) == nil {
 			if c, ok := fp["confidence"].(string); ok && c != "" {
 				m["confidence"] = c
+				if c == FactConfidenceInferred {
+					// This is a prompt-facing label, not a persisted confidence change.
+					// Keep the canonical level separately for structured consumers.
+					m["confidence"] = c + "（待复核）"
+					m["confidence_level"] = c
+				}
 			}
 		}
 		recentFacts = append(recentFacts, m)
