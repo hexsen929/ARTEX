@@ -100,7 +100,7 @@ func runDoctor(args []string) int {
 	}
 
 	// 4/5. 外部工具清单：隧道工具逐项 + 军火库存在性汇总
-	manifest, mErr := tools.Load(tools.ManifestPath())
+	manifest, mErr := tools.Load(tools.ManifestPathForData(*dataDir))
 	if mErr != nil && !os.IsNotExist(mErr) {
 		check(docWarn, "工具清单", "解析失败（跳过工具检查）: "+mErr.Error())
 	}
@@ -130,7 +130,7 @@ func runDoctor(args []string) int {
 				continue
 			}
 			parts = append(parts, doctorToolNote(r))
-			if r.Status == tools.StatusMissing || r.Status == tools.StatusMismatch || r.PlatformWarning != "" {
+			if r.Status == tools.StatusMissing || r.Status == tools.StatusMismatch || r.PlatformWarning != "" || r.ResolvedWarning != "" {
 				worst = docWarn // 缺隧道工具只影响隧道功能，不阻断平台
 			}
 		}
@@ -140,15 +140,22 @@ func runDoctor(args []string) int {
 	// 5. Separate host tools from target resources. Presence of a Linux/Windows
 	// payload must never count as a usable tool on a macOS host.
 	for _, group := range []struct {
-		target bool
-		name   string
+		role string
+		name string
 	}{
-		{false, "本机军火库工具"},
-		{true, "目标侧军火库资源"},
+		{"host", "本机军火库工具"},
+		{"target", "目标侧军火库资源"},
+		{"resource", "模板与数据资源"},
 	} {
 		var entries []tools.CheckResult
 		for _, r := range results {
-			if r.Entry.Category == "arsenal" && tools.IsTargetArtifact(r.Entry) == group.target {
+			role := "host"
+			if tools.IsTargetArtifact(r.Entry) {
+				role = "target"
+			} else if r.Entry.Execution == "resource" {
+				role = "resource"
+			}
+			if r.Entry.Category == "arsenal" && role == group.role {
 				entries = append(entries, r)
 			}
 		}
@@ -227,6 +234,9 @@ func runDoctor(args []string) int {
 // doctorToolNote 渲染单个工具的自检片段（doctor 报告用）。
 func doctorToolNote(r tools.CheckResult) string {
 	scope := "本机工具"
+	if r.Entry.Execution == "resource" {
+		scope = "模板与数据资源"
+	}
 	if tools.IsTargetArtifact(r.Entry) {
 		scope = "目标侧资源"
 		if r.Entry.Platform != "" && r.Entry.Platform != "any" {
@@ -234,6 +244,9 @@ func doctorToolNote(r tools.CheckResult) string {
 		}
 	}
 	name := scope + " " + r.Entry.Name
+	if r.ResolvedWarning != "" {
+		return name + " 底层入口待修复（" + r.ResolvedWarning + "）"
+	}
 	if r.PlatformWarning != "" {
 		if r.HostIncompatible {
 			return fmt.Sprintf("%s 本机不可运行（%s；%s）", name, r.PlatformWarning, r.Path)
@@ -262,7 +275,7 @@ func doctorToolSummary(results []tools.CheckResult) (doctorStatus, string) {
 	ready, unpinned := 0, 0
 	var notes []string
 	for _, r := range results {
-		if r.PlatformWarning != "" || r.HostIncompatible || r.Status == tools.StatusMissing || r.Status == tools.StatusMismatch {
+		if r.PlatformWarning != "" || r.ResolvedWarning != "" || r.HostIncompatible || r.Status == tools.StatusMissing || r.Status == tools.StatusMismatch {
 			notes = append(notes, doctorToolNote(r))
 			continue
 		}

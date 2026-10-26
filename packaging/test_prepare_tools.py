@@ -1,12 +1,16 @@
 """Deployment integrity regressions; run in cloud CI, never probe a target."""
 import importlib.util
 import io
+import json
+import os
 from pathlib import Path
 import stat
 import struct
+import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -114,6 +118,93 @@ class InstallationTests(unittest.TestCase):
                 tools.target_path(destination, "tools/../config.json")
             with self.assertRaises(ValueError):
                 tools.target_path(destination, "jwt.key")
+
+
+class HomebrewPythonSelectionTests(unittest.TestCase):
+    def test_preserves_mixed_python_links_pip_script_and_framework(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            prefix, cache = root / "brew", root / "cache"
+            (prefix / "bin").mkdir(parents=True)
+            (prefix / "Frameworks/Python.framework/Versions").mkdir(parents=True)
+            python = prefix / "bin/python3"
+            python.symlink_to("../Cellar/python@3.14/3.14.4/bin/python3")
+            pip = prefix / "bin/pip3"
+            old_pip = b"#!/fixture/python3.11\n# pre-existing pip launcher\n"
+            pip.write_bytes(old_pip)
+            pip.chmod(0o755)
+            current = prefix / "Frameworks/Python.framework/Versions/Current"
+            current.symlink_to("3.14")
+            saved = tools.snapshot_homebrew_python(prefix, cache)
+            for entry in (python, pip, current):
+                backup = cache / "Backup" / entry.relative_to(prefix)
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(entry, backup)
+            python.symlink_to("../Cellar/python@3.15/3.15.0/bin/python3")
+            pip.write_bytes(("#!" + str(prefix / "opt/python@3.15/bin/python3.15") + "\n# new pip\n").encode())
+            current.symlink_to("3.15")
+            (prefix / "opt").mkdir()
+            new_alias = prefix / "opt/python3"
+            new_alias.symlink_to("../Cellar/python@3.15/3.15.0")
+            dependency = prefix / "Cellar/python@3.15/3.15.0"
+            dependency.mkdir(parents=True)
+            self.assertEqual(tools.restore_homebrew_python(saved), 4)
+            self.assertEqual(os.readlink(python), "../Cellar/python@3.14/3.14.4/bin/python3")
+            self.assertEqual(pip.read_bytes(), old_pip)
+            self.assertEqual(stat.S_IMODE(pip.stat().st_mode), 0o755)
+            self.assertEqual(os.readlink(current), "3.14")
+            self.assertFalse(os.path.lexists(new_alias))
+            self.assertTrue(dependency.is_dir())
+            self.assertFalse((cache / "Backup").exists())
+
+    def test_existing_conflicting_backup_stops_before_install(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            prefix, cache = root / "brew", root / "cache"
+            (prefix / "bin").mkdir(parents=True)
+            python = prefix / "bin/python3"
+            python.symlink_to("../Cellar/python@3.14/3.14.4/bin/python3")
+            prior = cache / "Backup/bin/python3"
+            prior.parent.mkdir(parents=True)
+            prior.write_bytes(b"user pre-existing backup")
+            with self.assertRaisesRegex(ValueError, "existing Homebrew backup"):
+                tools.snapshot_homebrew_python(prefix, cache)
+            self.assertEqual(prior.read_bytes(), b"user pre-existing backup")
+            self.assertEqual(os.readlink(python), "../Cellar/python@3.14/3.14.4/bin/python3")
+
+    def test_unrelated_existing_backup_remains(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            prefix, cache = root / "brew", root / "cache"
+            prefix.mkdir()
+            prior = cache / "Backup/bin/other-tool"
+            prior.parent.mkdir(parents=True)
+            prior.write_bytes(b"preserve")
+            saved = tools.snapshot_homebrew_python(prefix, cache)
+            self.assertEqual(tools.restore_homebrew_python(saved), 0)
+            self.assertEqual(prior.read_bytes(), b"preserve")
+
+    def test_failed_brew_install_still_restores_default_python(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            prefix, cache = root / "brew", root / "cache"
+            (prefix / "bin").mkdir(parents=True)
+            python = prefix / "bin/python3"
+            original = "../Cellar/python@3.14/3.14.4/bin/python3"
+            python.symlink_to(original)
+            info = {"formulae": [{"versions": {"stable": "7.992"}, "installed": [], "bottle": {"stable": {"files": {"arm64_fixture": {}}}}}]}
+            def failed_install(*args, **kwargs):
+                backup = cache / "Backup/bin/python3"
+                backup.parent.mkdir(parents=True)
+                os.replace(python, backup)
+                python.symlink_to("../Cellar/python@3.15/3.15.0/bin/python3")
+                raise subprocess.CalledProcessError(1, "brew fixture")
+            item = {"installer": {"formula": "nmap", "version": "7.992"}}
+            with mock.patch.object(tools, "host_platform", return_value="darwin/arm64"), mock.patch.object(tools.shutil, "which", return_value=str(prefix / "bin/brew")), mock.patch.object(tools.subprocess, "check_output", side_effect=[json.dumps(info), str(prefix), str(cache)]), mock.patch.object(tools.subprocess, "run", side_effect=failed_install):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    tools.install_homebrew(item, root / "tools/nmap", True)
+            self.assertEqual(os.readlink(python), original)
+            self.assertFalse((cache / "Backup").exists())
 
 
 if __name__ == "__main__":

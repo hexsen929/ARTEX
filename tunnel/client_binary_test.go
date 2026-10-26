@@ -188,3 +188,74 @@ func TestChiselDeliveryUsesSelectedTargetBytesForSessionFallback(t *testing.T) {
 		t.Fatalf("changed client file was delivered: err=%v bytes=%x", err, sess.written)
 	}
 }
+
+func TestChiselSnapshotRejectsSourceChangeBeforeStagePublication(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	st, err := stage.New(ctx, filepath.Join(t.TempDir(), "stage"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	target := filepath.Join(t.TempDir(), "chisel")
+	data := chiselELFFixture(183)
+	writeChiselFixture(t, target, data)
+	sum := sha256.Sum256(data)
+	client := chiselClientBinary{path: target, platform: "linux/arm64", sha256: hex.EncodeToString(sum[:])}
+	// PutFile previously ran this policy only after deliver's separate path hash.
+	// An in-place update here could publish unchecked bytes under the old hash.
+	st.FilePolicy = func(path string, _ *os.File) error {
+		return os.WriteFile(path, []byte("replacement after selection"), 0o700)
+	}
+	m := &Manager{stage: st}
+	sess := &chiselFixtureSession{kind: "http_php"}
+	p := &Plan{TaskID: 1}
+	if err := m.deliver(ctx, sess, p, client); err == nil {
+		t.Fatal("source mutation was accepted")
+	}
+	if len(st.List()) != 0 || p.StageToken != "" || len(sess.commands) != 0 || sess.written != nil {
+		t.Fatalf("unverified bytes were published or delivered: stages=%d commands=%v", len(st.List()), sess.commands)
+	}
+}
+
+func TestChiselStageAndFallbackShareImmutableSnapshot(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stageDir := filepath.Join(t.TempDir(), "stage")
+	st, err := stage.New(ctx, stageDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.SetBaseURL("http://127.0.0.1:8787")
+	target := filepath.Join(t.TempDir(), "chisel")
+	data := chiselELFFixture(183)
+	writeChiselFixture(t, target, data)
+	sum := sha256.Sum256(data)
+	client := chiselClientBinary{path: target, platform: "linux/arm64", sha256: hex.EncodeToString(sum[:])}
+	var staged []byte
+	st.OnEvent = func(event stage.Event) {
+		if event.Kind != stage.EventPut {
+			return
+		}
+		var readErr error
+		staged, readErr = os.ReadFile(filepath.Join(stageDir, event.Entry.Token, event.Entry.Name))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		// A concurrent tool update after publication must not change the session
+		// fallback bytes or require opening the source pathname again.
+		if err := os.WriteFile(target, []byte("updated source"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := &Manager{stage: st}
+	p := &Plan{TaskID: 1, PlatformAddr: "127.0.0.1:20001", RemoteDir: "/tmp/artex-fixture", RemoteBin: "/tmp/artex-fixture/ch"}
+	sess := &chiselFixtureSession{kind: "http_php"}
+	if err := m.deliver(ctx, sess, p, client); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(staged, data) || !bytes.Equal(sess.written, data) {
+		t.Fatalf("stage and fallback diverged from verified snapshot: stage=%x fallback=%x", staged, sess.written)
+	}
+}

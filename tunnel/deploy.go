@@ -287,10 +287,13 @@ func (m *Manager) deliver(ctx context.Context, sess session.Session, p *Plan, cl
 	if m.stage == nil {
 		return fmt.Errorf("stage 暂存服务未启用，无法投递")
 	}
-	if sum, err := fileSHA256(client.path); err != nil || sum != client.sha256 {
-		return fmt.Errorf("目标侧 chisel 在校验后发生变化，请重新部署")
+	data, err := m.readChiselClient(client)
+	if err != nil {
+		return err
 	}
-	entry, err := m.stage.PutFile(client.path, stage.PutOpts{
+	// Publish the exact checked snapshot. Reopening the source path here would
+	// allow a tool update between checksum verification and stage publication.
+	entry, err := m.stage.PutContent(filepath.Base(client.path), data, stage.PutOpts{
 		OneShot: true, TaskID: strconv.FormatInt(p.TaskID, 10),
 	})
 	if err != nil {
@@ -308,13 +311,8 @@ func (m *Manager) deliver(ctx context.Context, sess session.Session, p *Plan, cl
 	}
 	// 回退：目标无 curl/wget（或被拦）——经会话分块写入（session.WriteFile 内部分块）。
 	log.Printf("[tunnel] 目标直接下载失败，回退会话分块写入（%s)…", p.RemoteDir)
-	data, rerr := os.ReadFile(client.path)
-	if rerr != nil {
-		return fmt.Errorf("读取目标侧 chisel 失败: %w", rerr)
-	}
-	if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != client.sha256 {
-		return fmt.Errorf("目标侧 chisel 在校验后发生变化，已停止会话写入")
-	}
+	// The fallback uses the same checked bytes as the published stage entry,
+	// even if the installed tool is replaced during the download attempt.
 	if _, _, err := sess.Exec(ctx, "mkdir -p "+p.RemoteDir, probeTimeout); err != nil {
 		return fmt.Errorf("远端目录创建失败: %w", err)
 	}
@@ -322,6 +320,46 @@ func (m *Manager) deliver(ctx context.Context, sess session.Session, p *Plan, cl
 		return fmt.Errorf("会话分块写入失败: %w", err)
 	}
 	return m.chmodRemote(ctx, sess, p)
+}
+
+func (m *Manager) readChiselClient(client chiselClientBinary) ([]byte, error) {
+	// Retain PutFile's protected-source checks when publishing a checked in-memory
+	// snapshot with PutContent. FilePolicy sees the opened descriptor, so path
+	// replacement and symlink races do not bypass the platform's file policy.
+	if m.stage.FilePrecheck != nil {
+		if err := m.stage.FilePrecheck(client.path); err != nil {
+			return nil, fmt.Errorf("目标侧 chisel 被平台文件策略拒绝")
+		}
+	}
+	f, err := os.Open(client.path)
+	if err != nil {
+		return nil, fmt.Errorf("读取目标侧 chisel 失败: %w", err)
+	}
+	defer f.Close()
+	if m.stage.FilePolicy != nil {
+		if err := m.stage.FilePolicy(client.path, f); err != nil {
+			return nil, fmt.Errorf("目标侧 chisel 被平台文件策略拒绝")
+		}
+	}
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("目标侧 chisel 不是可读取的普通文件")
+	}
+	const maxClientBytes = 128 << 20
+	if st.Size() > maxClientBytes {
+		return nil, fmt.Errorf("目标侧 chisel 超过 128 MiB 文件上限")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxClientBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("读取目标侧 chisel 失败: %w", err)
+	}
+	if len(data) > maxClientBytes {
+		return nil, fmt.Errorf("目标侧 chisel 超过 128 MiB 文件上限")
+	}
+	if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != client.sha256 {
+		return nil, fmt.Errorf("目标侧 chisel 在校验后发生变化，请重新部署")
+	}
+	return data, nil
 }
 
 // rewriteURLHost 把 stage URL 的主机名替换为 callback host（端口保留）。

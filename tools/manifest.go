@@ -28,25 +28,29 @@ import (
 
 // Entry 是清单里一个外部工具的记录。
 type Entry struct {
-	Name      string    `json:"name"`                // 工具名（唯一）
-	Purpose   string    `json:"purpose"`             // 用途（一行话）
-	Version   string    `json:"version"`             // 钉的版本；空 = 未钉
-	Platform  string    `json:"platform"`            // 适用平台（如 linux/amd64;any = 不限）
-	SHA256    string    `json:"sha256"`              // 钉的 sha256；空串 = 未钉（不校验）
-	Path      string    `json:"path"`                // 相对 data 目录的路径（文件或目录）
-	Env       string    `json:"env"`                 // 可选：覆盖路径的环境变量（如 ARTEX_SUO5_PATH)
-	Category  string    `json:"category"`            // tunnel（隧道） | arsenal（军火库）
-	Execution string    `json:"execution,omitempty"` // host | target; empty preserves legacy target-payload inference
-	Variants  []Variant `json:"variants,omitempty"`  // platform-specific paths and hashes; never inherit another platform hash
+	Name               string    `json:"name"`                          // 工具名（唯一）
+	Purpose            string    `json:"purpose"`                       // 用途（一行话）
+	Version            string    `json:"version"`                       // 钉的版本；空 = 未钉
+	Platform           string    `json:"platform"`                      // 适用平台（如 linux/amd64;any = 不限）
+	SHA256             string    `json:"sha256"`                        // 钉的 sha256；空串 = 未钉（不校验）
+	Path               string    `json:"path"`                          // 相对 data 目录的路径（文件或目录）
+	Env                string    `json:"env"`                           // 可选：覆盖路径的环境变量（如 ARTEX_SUO5_PATH)
+	Category           string    `json:"category"`                      // tunnel（隧道） | arsenal（军火库）
+	Execution          string    `json:"execution,omitempty"`           // host | target | resource; empty preserves legacy target-payload inference
+	Variants           []Variant `json:"variants,omitempty"`            // platform-specific paths and hashes; never inherit another platform hash
+	ResolvedExecutable string    `json:"resolved_executable,omitempty"` // optional real command behind a pinned shim
+	ResolvedSHA256     string    `json:"resolved_sha256,omitempty"`
 }
 
 // Variant pins one host or target platform independently of the legacy entry.
 // A blank hash intentionally means unpinned, even when Entry.SHA256 is set.
 type Variant struct {
-	Platform string `json:"platform"`
-	Path     string `json:"path,omitempty"`
-	Version  string `json:"version,omitempty"`
-	SHA256   string `json:"sha256,omitempty"`
+	Platform           string `json:"platform"`
+	Path               string `json:"path,omitempty"`
+	Version            string `json:"version,omitempty"`
+	SHA256             string `json:"sha256,omitempty"`
+	ResolvedExecutable string `json:"resolved_executable,omitempty"`
+	ResolvedSHA256     string `json:"resolved_sha256,omitempty"`
 }
 
 // Manifest 是 tools-manifest.json 的整体结构。
@@ -64,6 +68,20 @@ func ManifestPath() string {
 		return v
 	}
 	return filepath.Join(config.BaseDir(), "packaging", "tools-manifest.json")
+}
+
+// ManifestPathForData prefers a verified deployment-local manifest while keeping
+// an explicit ARTEX_TOOLS_MANIFEST override and the source catalog fallback.
+// It only checks file metadata; it never generates or rewrites a manifest.
+func ManifestPathForData(dataDir string) string {
+	if v := strings.TrimSpace(os.Getenv("ARTEX_TOOLS_MANIFEST")); v != "" {
+		return v
+	}
+	local := filepath.Join(dataDir, "tools", "tools-manifest.local.json")
+	if st, err := os.Stat(local); err == nil && st.Mode().IsRegular() {
+		return local
+	}
+	return ManifestPath()
 }
 
 // Load 读取并解析清单文件。文件缺失时返回的 error 满足 os.IsNotExist。
@@ -98,6 +116,9 @@ type CheckResult struct {
 	ActualPlatform   string // executable header platform, if recognizable
 	PlatformWarning  string // a different-platform checksum is not a corruption finding
 	HostIncompatible bool   // known host-side executable cannot run on this host
+	ResolvedPath     string // real command behind a pinned shim, when declared
+	ResolvedActual   string // independently calculated hash of that command
+	ResolvedWarning  string // missing, changed or incompatible underlying command
 }
 
 // Check 对清单里每个工具做存在性 + （钉了哈希的）sha256 校验。dataDir 是 data
@@ -123,7 +144,7 @@ func Check(m *Manifest, dataDir string) []CheckResult {
 }
 
 // CheckEntry 校验单个清单条目（见 Check)。
-func CheckEntry(e Entry, dataDir string) CheckResult {
+func CheckEntry(e Entry, dataDir string) (r CheckResult) {
 	host := runtime.GOOS + "/" + runtime.GOARCH
 	selectionWarning := ""
 	if len(e.Variants) > 0 {
@@ -138,10 +159,12 @@ func CheckEntry(e Entry, dataDir string) CheckResult {
 			// An explicit environment override may still point at a valid native
 			// tool. Inspect it, but never apply a checksum from another platform.
 			e.SHA256, e.Version, e.Platform, e.Variants = "", "", "", nil
+			e.ResolvedExecutable, e.ResolvedSHA256 = "", ""
 			selectionWarning = "清单未提供 " + platform + " 的唯一平台版本；请补充匹配平台的工具清单"
 		}
 	}
-	r := CheckResult{Entry: e, Status: StatusMissing, PlatformWarning: selectionWarning}
+	r = CheckResult{Entry: e, Status: StatusMissing, PlatformWarning: selectionWarning}
+	defer func() { checkResolvedEntry(&r, dataDir, host) }()
 	p := ""
 	if e.Env != "" {
 		p = strings.TrimSpace(os.Getenv(e.Env))
@@ -172,13 +195,14 @@ func CheckEntry(e Entry, dataDir string) CheckResult {
 		r.ActualPlatform = InspectExecutablePlatform(p)
 	}
 	target := IsTargetArtifact(e)
-	if !target && r.ActualPlatform != "" && !PlatformMatches(r.ActualPlatform, host) {
+	hostExecution := !target && e.Execution != "resource"
+	if hostExecution && r.ActualPlatform != "" && !PlatformMatches(r.ActualPlatform, host) {
 		r.HostIncompatible = true
 		r.PlatformWarning = "本机工具架构为 " + r.ActualPlatform + "，当前主机为 " + host
 		r.Status = StatusUnpinned
 		return r
 	}
-	if !target && e.Platform != "" && e.Platform != "any" && !PlatformMatches(e.Platform, host) {
+	if hostExecution && e.Platform != "" && e.Platform != "any" && !PlatformMatches(e.Platform, host) {
 		r.PlatformWarning = "清单校验值适用于 " + e.Platform + "，当前主机为 " + host + "；请提供本机版本并单独钉版"
 		r.Status = StatusUnpinned
 		return r
@@ -186,7 +210,7 @@ func CheckEntry(e Entry, dataDir string) CheckResult {
 	if target && r.ActualPlatform != "" && e.Platform != "" && e.Platform != "any" && !PlatformMatches(e.Platform, r.ActualPlatform) {
 		r.PlatformWarning = "目标侧资源架构为 " + r.ActualPlatform + "，清单声明为 " + e.Platform
 	}
-	if !target && r.ActualPlatform != "" && runtime.GOOS != "windows" && st.Mode().Perm()&0o111 == 0 {
+	if hostExecution && r.ActualPlatform != "" && runtime.GOOS != "windows" && st.Mode().Perm()&0o111 == 0 {
 		r.HostIncompatible = true
 		r.PlatformWarning = "本机工具缺少执行权限"
 		r.Status = StatusUnpinned
@@ -207,6 +231,66 @@ func CheckEntry(e Entry, dataDir string) CheckResult {
 		r.Status = StatusMismatch
 	}
 	return r
+}
+
+// checkResolvedEntry pins a real command independently of its launcher shim.
+// Python commands may be plain source files, while native commands also have
+// their headers checked. No supplied command is executed by this check.
+func checkResolvedEntry(r *CheckResult, dataDir, host string) {
+	e := r.Entry
+	if e.ResolvedExecutable == "" && e.ResolvedSHA256 == "" {
+		return // legacy entries do not claim an underlying-command pin
+	}
+	fail := func(status Status, message string) {
+		r.ResolvedWarning = message
+		if r.Status != StatusMissing && (r.Status != StatusMismatch || status == StatusMissing) {
+			r.Status = status
+		}
+	}
+	if strings.TrimSpace(e.ResolvedExecutable) == "" {
+		fail(StatusMissing, "底层入口路径缺失")
+		return
+	}
+	p := filepath.FromSlash(e.ResolvedExecutable)
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(dataDir, p)
+	}
+	r.ResolvedPath = p
+	st, err := os.Stat(p)
+	if err != nil || !st.Mode().IsRegular() {
+		fail(StatusMissing, "底层入口缺失或不是普通文件："+p)
+		return
+	}
+	actualPlatform := InspectExecutablePlatform(p)
+	target := IsTargetArtifact(e)
+	if !target && e.Execution != "resource" && actualPlatform != "" && !PlatformMatches(actualPlatform, host) {
+		r.HostIncompatible = true
+		fail(StatusUnpinned, "底层入口架构为 "+actualPlatform+"，当前主机为 "+host+"："+p)
+		return
+	}
+	if target && actualPlatform != "" && e.Platform != "" && e.Platform != "any" && !PlatformMatches(actualPlatform, e.Platform) {
+		fail(StatusUnpinned, "底层目标入口架构为 "+actualPlatform+"，清单声明为 "+e.Platform+"："+p)
+		return
+	}
+	if !target && e.Execution != "resource" && actualPlatform != "" && runtime.GOOS != "windows" && st.Mode().Perm()&0o111 == 0 {
+		r.HostIncompatible = true
+		fail(StatusUnpinned, "底层入口缺少执行权限："+p)
+		return
+	}
+	want := strings.ToLower(strings.TrimSpace(e.ResolvedSHA256))
+	if want == "" {
+		fail(StatusUnpinned, "底层入口未钉 sha256："+p)
+		return
+	}
+	sum, err := fileSHA256(p)
+	if err != nil {
+		fail(StatusMissing, "底层入口不可读取："+p)
+		return
+	}
+	r.ResolvedActual = sum
+	if sum != want {
+		fail(StatusMismatch, "底层入口 sha256 不匹配（期望 "+want+"，实际 "+sum+"）："+p)
+	}
 }
 
 // IsTargetArtifact reports whether a resource is intended for a remote target.
@@ -246,6 +330,7 @@ func applyVariant(e Entry, v Variant) Entry {
 		e.Path = v.Path
 	}
 	e.Version, e.SHA256, e.Variants = v.Version, v.SHA256, nil
+	e.ResolvedExecutable, e.ResolvedSHA256 = v.ResolvedExecutable, v.ResolvedSHA256
 	return e
 }
 

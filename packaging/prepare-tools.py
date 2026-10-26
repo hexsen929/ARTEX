@@ -18,6 +18,7 @@ import os
 from pathlib import Path, PurePosixPath
 import platform
 import re
+import secrets
 import shlex
 import shutil
 import stat
@@ -291,6 +292,150 @@ def host_platform() -> str:
     return os_name + "/" + arch
 
 
+def python_entry_state(path: Path) -> dict:
+    """Capture only link text or small pip launchers; never copy runtimes."""
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return {"kind": "absent"}
+    if stat.S_ISLNK(st.st_mode):
+        return {"kind": "symlink", "target": os.readlink(path)}
+    if stat.S_ISREG(st.st_mode) and path.name in ("pip", "pip3") and st.st_size <= 65536:
+        blob = path.read_bytes()
+        if b"\0" not in blob:
+            return {"kind": "file", "blob": blob, "mode": stat.S_IMODE(st.st_mode), "mtime_ns": st.st_mtime_ns, "atime_ns": st.st_atime_ns}
+    raise ValueError("unmanaged Python entry type; preserve before installing Homebrew dependencies: " + str(path))
+
+
+def same_python_entry(a: dict, b: dict) -> bool:
+    if a["kind"] != b["kind"]:
+        return False
+    if a["kind"] == "symlink":
+        return a["target"] == b["target"]
+    if a["kind"] == "file":
+        return a["blob"] == b["blob"] and a["mode"] == b["mode"]
+    return True
+
+
+def snapshot_homebrew_python(prefix: Path, cache: Path) -> dict:
+    """Keep existing global Python selection in memory, including absent aliases.
+
+    Homebrew's overwrite backup has a fixed path and may replace a user's old
+    backup. Reject that conflict before running brew rather than touching it.
+    Version-specific python3.X paths and dependency kegs remain unmodified.
+    """
+    prefix, cache = prefix.resolve(), cache.resolve()
+    backup = cache / "Backup"
+    if backup.is_symlink():
+        raise ValueError("Homebrew Backup is a symlink; leave existing backups untouched")
+    names = ("python", "python3", "pythonw", "pythonw3", "python-config", "python3-config", "python3-intel64", "pip", "pip3", "idle", "idle3", "pydoc", "pydoc3", "2to3")
+    relative = ["bin/" + name for name in names]
+    relative += ["share/man/man1/" + name + suffix for name in names for suffix in (".1", ".1.gz")]
+    relative += ["lib/pkgconfig/" + name for name in ("python.pc", "python3.pc", "python-embed.pc", "python3-embed.pc")]
+    relative += ["opt/python", "opt/python3", "include/python3", "lib/libpython.dylib", "lib/libpython3.dylib"]
+    framework = prefix / "Frameworks/Python.framework"
+    if framework.is_symlink():
+        relative.append("Frameworks/Python.framework")
+    else:
+        relative += ["Frameworks/Python.framework/" + name for name in ("Python", "Headers", "Resources", "Versions/Current")]
+    states, parents, existing_backups = {}, {}, set()
+    for name in relative:
+        path = prefix / name
+        # An outer alias is restored as one entry; never write through it.
+        if any(p.is_symlink() for p in path.parents if p != prefix and prefix in p.parents):
+            continue
+        state = python_entry_state(path)
+        old_backup = backup / name
+        if os.path.lexists(old_backup):
+            existing_backups.add(old_backup)
+        if state["kind"] != "absent" and os.path.lexists(old_backup):
+            raise ValueError("existing Homebrew backup would be overwritten; preserve it: " + str(old_backup))
+        states[path] = state
+        for parent in path.parents:
+            if parent == prefix.parent:
+                break
+            if parent.is_dir() and not parent.is_symlink():
+                st = parent.stat()
+                parents[parent] = (st.st_dev, st.st_ino)
+    existing_dirs = set()
+    if backup.exists():
+        existing_dirs.add(backup)
+        for base, dirs, _ in os.walk(backup, followlinks=False):
+            existing_dirs.update(Path(base) / name for name in dirs)
+    return {"prefix": prefix, "backup": backup, "states": states, "parents": parents, "existing_backup_dirs": existing_dirs, "existing_backups": existing_backups}
+
+
+def is_homebrew_python_entry(path: Path, state: dict, prefix: Path) -> bool:
+    if state["kind"] == "symlink":
+        target = Path(os.path.normpath(path.parent / state["target"]))
+        try:
+            rel = target.relative_to(prefix)
+        except ValueError:
+            return False
+        return bool(re.match(r"(?:Cellar|opt)/python(?:@\d+(?:\.\d+)*)?(?:/|$)", rel.as_posix())) or rel.as_posix().startswith("Frameworks/Python.framework/")
+    if state["kind"] == "file":
+        first = state["blob"].split(b"\n", 1)[0]
+        return str(prefix).encode() in first and b"python" in first
+    return state["kind"] == "absent"
+
+
+def restore_homebrew_python(snapshot: dict) -> int:
+    """Restore only entries that brew replaced; discard only this run's backups."""
+    prefix, backup = snapshot["prefix"], snapshot["backup"]
+    restored, new_backup_dirs = 0, set()
+    for path, before in snapshot["states"].items():
+        for parent in path.parents:
+            if parent == prefix.parent:
+                break
+            expected = snapshot["parents"].get(parent)
+            if parent.is_symlink() or (expected and (parent.stat().st_dev, parent.stat().st_ino) != expected):
+                raise ValueError("Python entry parent changed during Homebrew installation: " + str(parent))
+        current = python_entry_state(path)
+        if not same_python_entry(before, current):
+            if not is_homebrew_python_entry(path, current, prefix):
+                raise ValueError("Python entry changed outside this Homebrew installation; preserve it: " + str(path))
+            if before["kind"] == "absent":
+                path.unlink()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = path.parent / ("." + path.name + ".artex-python-" + secrets.token_hex(12))
+                try:
+                    if before["kind"] == "symlink":
+                        os.symlink(before["target"], temporary)
+                    else:
+                        with temporary.open("xb") as stream:
+                            stream.write(before["blob"])
+                            stream.flush()
+                            os.fchmod(stream.fileno(), before["mode"])
+                            os.fsync(stream.fileno())
+                        os.utime(temporary, ns=(before["atime_ns"], before["mtime_ns"]))
+                    os.replace(temporary, path)
+                finally:
+                    if os.path.lexists(temporary):
+                        temporary.unlink()
+            restored += 1
+        if not same_python_entry(before, python_entry_state(path)):
+            raise ValueError("original Python entry was not restored: " + str(path))
+        item = backup / path.relative_to(prefix)
+        if os.path.lexists(item) and item not in snapshot["existing_backups"]:
+            # Matching pre-existing backups were rejected before brew. A newly
+            # created backup is removed only after its original entry is back.
+            if before["kind"] == "absent" or not same_python_entry(before, python_entry_state(item)):
+                raise ValueError("unexpected Homebrew backup contents; preserve it: " + str(item))
+            item.unlink()
+            for parent in item.parents:
+                if parent == backup.parent:
+                    break
+                if parent not in snapshot["existing_backup_dirs"]:
+                    new_backup_dirs.add(parent)
+    for directory in sorted(new_backup_dirs, key=lambda p: len(p.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass  # A prior or unrelated backup must remain in place.
+    return restored
+
+
 def make_plan(manifest: dict, selected_platform: str, names: set[str] | None, host_only: bool) -> tuple[list[dict], list[dict]]:
     plan, skipped = [], []
     known = {entry["name"] for entry in manifest["tools"]}
@@ -348,7 +493,15 @@ def install_homebrew(item: dict, path: Path, allow: bool) -> tuple[dict, dict]:
     if not installed:
         if not info.get("bottle", {}).get("stable", {}).get("files"):
             raise ValueError("Homebrew nmap has no precompiled bottle")
-        subprocess.run([brew, "install", "--force-bottle", formula], env=env, check=True)
+        brew_prefix = Path(subprocess.check_output([brew, "--prefix"], env=env, text=True).strip())
+        brew_cache = Path(subprocess.check_output([brew, "--cache"], env=env, text=True).strip())
+        python_selection = snapshot_homebrew_python(brew_prefix, brew_cache)
+        try:
+            subprocess.run([brew, "install", "--force-bottle", formula], env=env, check=True)
+        finally:
+            count = restore_homebrew_python(python_selection)
+            if count:
+                print(f"Preserved {count} pre-existing global Python entries after Homebrew dependency installation", flush=True)
     info = json.loads(subprocess.check_output([brew, "info", "--json=v2", formula], env=env, text=True))["formulae"][0]
     installed = info.get("installed", [])
     if not installed or installed[-1]["version"].split("_")[0] != item["installer"]["version"]:

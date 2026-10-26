@@ -249,3 +249,146 @@ func TestMissingToolPathDoesNotCountDataDirectoryAsInstalled(t *testing.T) {
 		t.Fatalf("data directory was incorrectly treated as an installed tool: %+v", r)
 	}
 }
+
+func TestManifestPathForDataPrecedence(t *testing.T) {
+	t.Setenv("ARTEX_TOOLS_MANIFEST", "")
+	dir := t.TempDir()
+	fallback := ManifestPath()
+	if got := ManifestPathForData(dir); got != fallback {
+		t.Fatalf("without local manifest got %q, want catalog %q", got, fallback)
+	}
+	local := filepath.Join(dir, "tools", "tools-manifest.local.json")
+	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, []byte(`{"tools":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ManifestPathForData(dir); got != local {
+		t.Fatalf("local manifest got %q, want %q", got, local)
+	}
+	override := filepath.Join(t.TempDir(), "explicit.json")
+	t.Setenv("ARTEX_TOOLS_MANIFEST", " "+override+" ")
+	if got := ManifestPathForData(dir); got != override {
+		t.Fatalf("explicit override got %q, want %q", got, override)
+	}
+	t.Setenv("ARTEX_TOOLS_MANIFEST", "")
+	if err := os.Remove(local); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(local, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := ManifestPathForData(dir); got != fallback {
+		t.Fatalf("directory was accepted as local manifest: %q", got)
+	}
+}
+
+func TestPinnedShimAlsoChecksResolvedEntry(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind string
+		want Status
+	}{
+		{"matching-source", "valid", StatusOK},
+		{"changed-source", "changed", StatusMismatch},
+		{"missing-source", "missing", StatusMissing},
+		{"directory-instead-of-source", "directory", StatusMissing},
+		{"missing-source-pin", "unpinned", StatusUnpinned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			shim := []byte("#!/bin/sh\nexec python3 command.py\n")
+			shimSum := sha256.Sum256(shim)
+			if err := os.WriteFile(filepath.Join(dir, "shim"), shim, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			entry := []byte("print('runtime entry')\n")
+			entrySum := sha256.Sum256(entry)
+			path := filepath.Join(dir, "command.py")
+			switch tc.kind {
+			case "directory":
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "missing":
+			default:
+				if tc.kind == "changed" {
+					entry = append(entry, []byte("# replaced\n")...)
+				}
+				if err := os.WriteFile(path, entry, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pin := hex.EncodeToString(entrySum[:])
+			if tc.kind == "unpinned" {
+				pin = ""
+			}
+			r := CheckEntry(Entry{Name: "python-tool", Path: "shim", Execution: "host", SHA256: hex.EncodeToString(shimSum[:]), ResolvedExecutable: "command.py", ResolvedSHA256: pin}, dir)
+			if r.Status != tc.want || r.ResolvedPath != path {
+				t.Fatalf("resolved entry status=%v, want %v: %+v", r.Status, tc.want, r)
+			}
+			if (tc.kind == "valid") != (r.ResolvedWarning == "") {
+				t.Fatalf("resolved warning is inconsistent with entry: %+v", r)
+			}
+		})
+	}
+}
+
+func TestResolvedAbsoluteExecutableIsReadOnlyAndPlatformChecked(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum, err := fileSHA256(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	shim := []byte("#!/bin/sh\n")
+	shimSum := sha256.Sum256(shim)
+	if err := os.WriteFile(filepath.Join(dir, "shim"), shim, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r := CheckEntry(Entry{Name: "native-shim", Path: "shim", SHA256: hex.EncodeToString(shimSum[:]), ResolvedExecutable: executable, ResolvedSHA256: sum}, dir)
+	if r.Status != StatusOK || r.ResolvedWarning != "" || r.ResolvedActual != sum {
+		t.Fatalf("absolute native entry failed read-only verification: %+v", r)
+	}
+	foreign := elfFixture(62)
+	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+		foreign = elfFixture(183)
+	}
+	foreignPath := filepath.Join(dir, "foreign-native")
+	if err := os.WriteFile(foreignPath, foreign, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	foreignSum := sha256.Sum256(foreign)
+	r = CheckEntry(Entry{Name: "wrong-native-shim", Path: "shim", SHA256: hex.EncodeToString(shimSum[:]), ResolvedExecutable: foreignPath, ResolvedSHA256: hex.EncodeToString(foreignSum[:])}, dir)
+	if !r.HostIncompatible || r.ResolvedWarning == "" || r.Status == StatusOK {
+		t.Fatalf("shim concealed incompatible underlying executable: %+v", r)
+	}
+}
+
+func TestResolvedTargetEntryUsesTargetPlatform(t *testing.T) {
+	dir := t.TempDir()
+	shim := []byte("target launch instructions")
+	shimSum := sha256.Sum256(shim)
+	if err := os.WriteFile(filepath.Join(dir, "shim"), shim, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := elfFixture(183)
+	targetSum := sha256.Sum256(target)
+	if err := os.WriteFile(filepath.Join(dir, "client"), target, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := Entry{Name: "target-shim", Path: "shim", Execution: "target", Platform: "linux/arm64", SHA256: hex.EncodeToString(shimSum[:]), ResolvedExecutable: "client", ResolvedSHA256: hex.EncodeToString(targetSum[:])}
+	r := CheckEntry(e, dir)
+	if r.Status != StatusOK || r.ResolvedWarning != "" || r.HostIncompatible {
+		t.Fatalf("target resource was checked against the host: %+v", r)
+	}
+	e.Platform = "linux/amd64"
+	r = CheckEntry(e, dir)
+	if r.ResolvedWarning == "" || r.Status == StatusOK || r.HostIncompatible {
+		t.Fatalf("wrong target architecture was not reported independently: %+v", r)
+	}
+}

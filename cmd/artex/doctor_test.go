@@ -45,6 +45,14 @@ func TestDoctorDirectoryIsNotReportedAsHashVerified(t *testing.T) {
 	}
 }
 
+func TestDoctorToolSummaryRejectsChangedResolvedCommand(t *testing.T) {
+	result := tools.CheckResult{Entry: tools.Entry{Name: "python-shim"}, Status: tools.StatusMismatch, ResolvedWarning: "底层入口 sha256 不匹配"}
+	status, note := doctorToolSummary([]tools.CheckResult{result})
+	if status != docWarn || !strings.Contains(note, "0/1") || !strings.Contains(note, "底层入口 sha256 不匹配") {
+		t.Fatalf("valid shim concealed a changed underlying command: status=%v note=%q", status, note)
+	}
+}
+
 func TestDoctorLoopbackMatchesListenerDefaults(t *testing.T) {
 	for _, addr := range []string{":8787", "0.0.0.0:8787", "[::]:8787"} {
 		if doctorLoopback(addr) {

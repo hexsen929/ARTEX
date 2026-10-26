@@ -22,6 +22,7 @@ jobs:
           test "$(uname -m)" = arm64
           python3 -m unittest discover -s packaging -p 'test_*.py'
       - name: Build fixed Python dependencies in the cloud
+        id: build-wheels
         run: |
           python3 packaging/prepare-python-tools.py --build-wheelhouse \
             --wheelhouse "$RUNNER_TEMP/artex-python-wheelhouse" \
@@ -37,6 +38,7 @@ jobs:
           python3 packaging/smoke-python-tools.py \
             --tools-dir "$RUNNER_TEMP/artex-python-smoke/data/tools"
       - uses: actions/upload-artifact@v4
+        if: ${{ always() && steps.build-wheels.outcome == 'success' }}
         with:
           name: python-tools-darwin-arm64-py311
           path: ${{ runner.temp }}/artex-python-wheelhouse
@@ -64,6 +66,9 @@ jobs:
           tool_dir="$RUNNER_TEMP/artex-native-smoke/data/tools"
           "$tool_dir/suo5" --help
           "$tool_dir/chisel" --version
+          "$tool_dir/gogo" -h
+          "$tool_dir/fscan" -h
+          "$tool_dir/ligolo-proxy" -h
           "$tool_dir/httpx" -version
           "$tool_dir/katana" -version
           "$tool_dir/naabu" -version

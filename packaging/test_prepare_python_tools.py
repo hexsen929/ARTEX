@@ -86,6 +86,20 @@ class PythonToolPreparationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Unsupported"):
             PREPARE.make_wrapper(Path("/tools/python"), Path("/tools/entry.py"), {"HOME": "/different-home"})
 
+    def test_fresh_runtime_parents_exist_before_tools_first_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary).resolve() / "data" / "tools"
+            destination.mkdir(parents=True)
+            with mock.patch.dict("os.environ", {"NXC_PATH": "/user/custom/nxc", "ARTEX_PENELOPE_DATA_DIR": "/user/custom/penelope"}):
+                for name in ("nxc", "penelope"):
+                    PREPARE.ensure_runtime_parents(name, destination)
+                    PREPARE.ensure_runtime_parents(name, destination)
+                    leaf = Path(next(iter(PREPARE.runtime_defaults(name, destination).values())))
+                    self.assertTrue(leaf.parent.is_dir())
+                    self.assertFalse(leaf.exists())
+                self.assertEqual(PREPARE.os.environ["NXC_PATH"], "/user/custom/nxc")
+                self.assertEqual(PREPARE.os.environ["ARTEX_PENELOPE_DATA_DIR"], "/user/custom/penelope")
+
     def test_offline_requirements_reject_git_dependency_in_wheel(self):
         with tempfile.TemporaryDirectory() as temporary:
             wheel = Path(temporary) / "fixture.whl"
@@ -101,6 +115,22 @@ class PythonToolPreparationTests(unittest.TestCase):
         self.assertEqual(entry["resolved_executable"], record["resolved_executable"])
         self.assertEqual(entry["resolved_sha256"], "source-hash")
         self.assertNotIn("python_executable", entry)
+
+    def test_rerun_rejects_a_changed_wheel_lock_without_touching_existing_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary).resolve() / "tools"
+            destination.mkdir()
+            wrapper = destination / "impacket"
+            entry = destination / "entry.py"
+            wrapper.write_bytes(b"wrapper")
+            entry.write_bytes(b"entry")
+            record = {"name": "impacket", "path": "tools/impacket", "sha256": PREPARE.digest(wrapper), "resolved_executable": "tools/entry.py", "resolved_sha256": PREPARE.digest(entry), "version": "0.13.1", "sources_sha256": PREPARE.digest(PREPARE.SOURCE_PATH), "wheelhouse_group": {"wheels": ["old-wheel"]}}
+            sources = {"packages": {"impacket": ["impacket==0.13.1"]}}
+            PREPARE.verify_existing_record(record, destination, sources, {"groups": {"impacket": record["wheelhouse_group"]}})
+            with self.assertRaisesRegex(RuntimeError, "different wheel lock"):
+                PREPARE.verify_existing_record(record, destination, sources, {"groups": {"impacket": {"wheels": ["new-wheel"]}}})
+            self.assertEqual(wrapper.read_bytes(), b"wrapper")
+            self.assertEqual(entry.read_bytes(), b"entry")
 
 
 if __name__ == "__main__":

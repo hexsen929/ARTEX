@@ -15,7 +15,7 @@ import (
 
 // checkToolsManifest 执行启动自检并打日志；任何失败都只记日志，不拖垮启动。
 func checkToolsManifest(dataDir string) {
-	m, err := tools.Load(tools.ManifestPath())
+	m, err := tools.Load(tools.ManifestPathForData(dataDir))
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Printf("[tools] 清单解析失败（跳过自检）: %v", err)
@@ -24,10 +24,15 @@ func checkToolsManifest(dataDir string) {
 	}
 	var ok, unpinned, missing, mismatch, incompatible, platformWarnings []string
 	for _, r := range tools.Check(m, dataDir) {
+		if r.ResolvedWarning != "" {
+			log.Printf("[tools] ⚠ %s 实际入口: %s", r.Entry.Name, r.ResolvedWarning)
+		}
 		if r.PlatformWarning != "" {
 			role := "本机"
 			if tools.IsTargetArtifact(r.Entry) {
 				role = "目标侧"
+			} else if r.Entry.Execution == "resource" {
+				role = "资源"
 			}
 			label := role + "/" + r.Entry.Name
 			if r.Entry.Platform != "" {

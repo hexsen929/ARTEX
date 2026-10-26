@@ -270,6 +270,52 @@ def manifest_entry(record: dict) -> dict:
     return {key: record[key] for key in fields if key in record}
 
 
+def runtime_defaults(name: str, destination: Path) -> dict[str, str]:
+    if name == "nxc":
+        return {"NXC_PATH": str(destination / "runtime" / "nxc")}
+    if name == "penelope":
+        return {"ARTEX_PENELOPE_DATA_DIR": str(destination.parent / "reverse" / "penelope")}
+    return {}
+
+
+def ensure_runtime_parents(name: str, destination: Path) -> None:
+    # NetExec creates its own leaf with os.mkdir, so its parent must exist first.
+    # Leave the leaf to the tool's first-run setup and preserve environment
+    # overrides; no HOME changes or credential/session operations occur here.
+    for value in runtime_defaults(name, destination).values():
+        parent = Path(value).parent
+        safe_path(parent)
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+
+def expected_version(name: str, sources: dict) -> str:
+    if name == "penelope":
+        return sources["sources"]["penelope"]["commit"]
+    if name == "nxc":
+        return sources["sources"]["netexec"]["version"]
+    if name == "lazagne-macos":
+        return sources["sources"][name]["version"]
+    return sources["packages"][name][0].split("==", 1)[1]
+
+
+def verify_existing_record(record: dict, destination: Path, sources: dict, index: dict) -> None:
+    name = record["name"]
+    if record.get("sources_sha256") != digest(SOURCE_PATH) or record.get("version") != expected_version(name, sources):
+        fail("Existing tool uses a different source/version; preserve it and prepare a new destination: " + name)
+    if name != "penelope" and record.get("wheelhouse_group") != index["groups"].get(name):
+        fail("Existing tool uses a different wheel lock; preserve it and prepare a new destination: " + name)
+    for path_key, hash_key in (("path", "sha256"), ("resolved_executable", "resolved_sha256")):
+        if path_key not in record:
+            fail("Existing Python record lacks entry provenance: " + name)
+        relative = PurePosixPath(record[path_key])
+        if relative.is_absolute() or ".." in relative.parts:
+            fail("Unsafe existing Python record path")
+        path = destination.parent / relative
+        safe_path(path)
+        if not path.resolve().is_relative_to(destination.resolve()) or not path.is_file() or digest(path) != record[hash_key]:
+            fail("Existing installed Python tool changed: " + name)
+
+
 def install(args: argparse.Namespace, sources: dict) -> None:
     if host_platform() != "darwin/arm64" or python_version(args.python) != (3, 11):
         fail("This deployment profile requires native Mac ARM64 Python 3.11")
@@ -284,15 +330,10 @@ def install(args: argparse.Namespace, sources: dict) -> None:
     records = {record["name"]: record for record in previous["records"]}
     entries = []
     for name in args.tools:
+        ensure_runtime_parents(name, destination)
         if name in records:
             record = records[name]
-            entry = destination.parent / record["path"]
-            if not entry.is_file() or digest(entry) != record["sha256"]:
-                fail("Existing installed Python tool changed: " + name)
-            if record.get("resolved_executable"):
-                resolved = destination.parent / record["resolved_executable"]
-                if not resolved.is_file() or digest(resolved) != record["resolved_sha256"]:
-                    fail("Existing Python tool entry changed: " + name)
+            verify_existing_record(record, destination, sources, index)
             entries.append(manifest_entry(record))
             print("UNCHANGED", name, flush=True)
             continue
@@ -329,7 +370,7 @@ def install(args: argparse.Namespace, sources: dict) -> None:
                 entry = destination / "penelope.py"
                 atomic_bytes(entry, patched, 0o755)
                 wrapper = destination / "penelope"
-                atomic_bytes(wrapper, make_wrapper(python, entry, {"ARTEX_PENELOPE_DATA_DIR": str(destination.parent / "reverse" / "penelope")}), 0o755)
+                atomic_bytes(wrapper, make_wrapper(python, entry, runtime_defaults(name, destination)), 0o755)
                 version = spec["commit"]
             elif name == "lazagne-macos":
                 spec = sources["sources"][name]
@@ -357,10 +398,9 @@ def install(args: argparse.Namespace, sources: dict) -> None:
                     entry = bindir / name
                     if not entry.is_file():
                         fail("Installed tool console entry missing: " + str(entry))
-                    defaults = {"NXC_PATH": str(destination / "runtime" / "nxc")} if name == "nxc" else None
-                    content = make_wrapper(python, entry, defaults)
+                    content = make_wrapper(python, entry, runtime_defaults(name, destination))
                 atomic_bytes(wrapper, content, 0o755)
-                version = "1.5.1" if name == "nxc" else sources["packages"][name][0].split("==", 1)[1]
+                version = expected_version(name, sources)
             record = {"name": name, "purpose": PURPOSES[name], "execution": execution, "platform": host_platform(), "path": wrapper.relative_to(destination.parent).as_posix(), "sha256": digest(wrapper), "version": version, "resolved_executable": entry.relative_to(destination.parent).as_posix(), "resolved_sha256": digest(entry), "python_executable": str(python), "source_url": "https://github.com/" + sources["sources"]["penelope" if name == "penelope" else "netexec" if name == "nxc" else "lazagne-macos"]["repository"] if name in ("penelope", "nxc", "lazagne-macos") else "https://pypi.org/project/" + name + "/" + version + "/", "sources_sha256": digest(SOURCE_PATH)}
             if name != "penelope":
                 record["wheelhouse_group"] = index["groups"][name]
