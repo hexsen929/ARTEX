@@ -1315,6 +1315,7 @@ export interface MissingSkill {
   calls: number;
   agents: string[];
   last_used?: string;
+  library_present?: boolean;
 }
 
 // ---- Tools (内置工具目录) ----

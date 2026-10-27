@@ -1054,8 +1054,8 @@ func (s *Server) fsSkillUsage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"calls": calls})
 }
 
-// fsMissingSkills lists skill names agents asked for that do not exist — the gap
-// list, i.e. which procedures are worth writing next.
+// fsMissingSkills lists historical names the current Agent registry failed to
+// resolve. The response also reports whether the library directory exists.
 func (s *Server) fsMissingSkills(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {
@@ -1067,7 +1067,27 @@ func (s *Server) fsMissingSkills(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"missing": missing})
+	view := make([]map[string]any, 0, len(missing))
+	for _, item := range missing {
+		_, statErr := os.Stat(filepath.Join(s.skillDir, item.Skill, "SKILL.md"))
+		view = append(view, map[string]any{
+			"skill": item.Skill, "calls": item.Calls, "agents": item.Agents,
+			"last_used": item.LastUsed, "library_present": statErr == nil,
+		})
+	}
+	writeJSON(w, 200, map[string]any{"missing": view})
+}
+
+func (s *Server) fsClearMissingSkills(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	if err := pg.ClearMissingSkillUsage(); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"cleared": true})
 }
 
 // cleanStrs trims each string and drops empties.
