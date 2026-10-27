@@ -43,6 +43,9 @@ func nullableSideID(id int64) any {
 }
 
 func (d *DB) SaveSideSnapshot(ctx context.Context, s sidequestion.Snapshot) error {
+	if err := s.Parent.Validate(); err != nil {
+		return err
+	}
 	b, err := json.Marshal(s)
 	if err != nil {
 		return err
@@ -160,6 +163,9 @@ func (d *DB) SideReplay(ctx context.Context, key string) ([]sidequestion.Exchang
 }
 
 func (d *DB) StartSideRequest(ctx context.Context, s sidequestion.Snapshot, clientID, question string) (*sidequestion.Exchange, bool, error) {
+	if err := s.Parent.Validate(); err != nil {
+		return nil, false, err
+	}
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, false, err
