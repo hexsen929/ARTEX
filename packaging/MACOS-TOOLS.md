@@ -39,8 +39,11 @@ python3 packaging/prepare-tools.py --platform darwin/arm64 --destination "$PWD/d
 python3 packaging/prepare-python-tools.py --build-wheelhouse --wheelhouse WHEELHOUSE --python PYTHON311
 ```
 
-运行 `release` 工作流时启用 `prepare_macos_tools`，云端会构建 wheelhouse 并验收命令帮助和 Penelope 本机回环 MCP。
-下载同一工作流的 `python-tools-darwin-arm64-py311` artifact 并核对其来源后，本机使用已有 Python 3.11 安装：
+正式标签的 Release 附带独立可选的 `artex-python-tools-版本-darwin-arm64-py311.zip`，并与平台 ZIP 一起记录在 `SHA256SUMS` 中。下载匹配版本、按清单校验并解压后，将其中 `python-tools-darwin-arm64-py311` 目录作为 `WHEELHOUSE`。该附件包含依赖 wheel、固定上游脚本及来源索引。
+
+维护者手动运行 `release` 工作流时可启用 `prepare_macos_tools`，云端会构建 wheelhouse 并验收命令帮助和 Penelope 本机回环 MCP；手动分支构建仍可从同次工作流的 `python-tools-darwin-arm64-py311` artifact 取安装材料。正式 Release 附件长期保留，不依赖该短期 artifact。
+
+本机使用已有 Python 3.11 安装：
 
 ```sh
 python3 packaging/prepare-python-tools.py --install --destination "$PWD/data/tools" --wheelhouse WHEELHOUSE --python PYTHON311

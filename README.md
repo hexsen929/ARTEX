@@ -31,7 +31,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 安装或升级后可运行 `./artex doctor` 检查 PostgreSQL、LLM 配置、数据目录、工具存在性/摘要/平台、门控与回连配置。该命令不启动服务、不运行任务、不下载工具；数据目录可写性检查会创建并立即删除一个临时文件。
 
-清单继承的固定摘要主要来自 Linux amd64，不应拿它们验证 macOS ARM64 版本。Mac 用户需逐项提供适用于宿主平台的隧道/扫描工具；Windows 目标侧资源属于另一类，不能当作 Mac 可执行文件运行。缺失/未钉版/平台不适配会明确提示，不应视为所有功能已经就绪。
+清单按平台分别记录版本和摘要，Mac ARM64 成品工具、Python 独立环境与 Linux/Windows 目标资源通过专门的准备脚本部署，详见 [Mac 工具部署](packaging/MACOS-TOOLS.md)。目标资源不计作本机可执行工具；缺失、未钉版或平台不适配会分别提示。
 
 ### Docker 密钥持久化
 
@@ -245,7 +245,7 @@ git push origin v0.3.17
 
 工作流固定构建提交，先运行独立的 Go 编译、带隔离 PostgreSQL 的全量回归和前端单测/类型检查/静态构建；全部成功后生成内嵌前端的五个平台 ZIP。推送版本标签时创建 Release 并生成 `SHA256SUMS`；手动构建只保存 Actions 安装包，不自动公开正式 Release。Docker 镜像是另行显式开启的发布分支，不应将程序包构建通过等同于所有容器运行场景均已验证。已公开的同版本不应覆盖，应发布新标签。
 
-需要发布 Docker 镜像时，维护者另设置 `PUBLISH_DOCKER=true`，并在本仓库 Settings → Secrets and variables → Actions 中配置变量 `ARTEX_DOCKER_IMAGE`（Docker Hub 用户名/镜像名）和 Secrets `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`（有镜像推送权限）。程序包通过 GitHub 自带 `GITHUB_TOKEN` 上传，镜像通过上述凭据推送到 Docker Hub。凭据只供工作流登录使用，不写入源码或镜像。镜像地址同时记录在 `.env.example` 和 Compose 默认值中。
+需要发布 Docker 镜像时，维护者另设置 `PUBLISH_DOCKER=true`，并在本仓库 Settings → Secrets and variables → Actions 中配置变量 `DOCKER_IMAGE`（Docker Hub 用户名/镜像名）和 Secrets `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`（有镜像推送权限）。程序包通过 GitHub 自带 `GITHUB_TOKEN` 上传，镜像通过上述凭据推送到 Docker Hub。凭据只供工作流登录使用，不写入源码或镜像。镜像地址同时记录在 `.env.example` 和 Compose 默认值中。
 
 ### 已有 Docker 部署迁移到本仓库镜像
 
@@ -268,7 +268,7 @@ docker compose up -d --no-deps artex
 docker compose logs --tail=50 artex
 ```
 
-继续使用原部署目录和 Compose 项目名称，确保 `./data`、`./skills` 和 PostgreSQL 数据卷仍指向原数据。迁移后程序从 `RuoJi6/ARTEX` 检查在线更新；后续可用页面更新程序或上述命令更新整个镜像。
+继续使用原部署目录和 Compose 项目名称，确保 `./data`、`./skills` 和 PostgreSQL 数据卷仍指向原数据。迁移后程序从 `hexsen929/ARTEX` 检查在线更新；页面更新仅替换程序，不同步 skills、工具或部署脚本。从旧版本首次迁移到 2.4.1 时，还需从完整安装包合并新增 `skills/chains-*` 和 `packaging/` 资源，保留已有自定义文件；容器的 skills 挂载也需补齐对应资源。
 
 首次迁移已有 Docker 部署时，将已校验的新 ARM64 ZIP 解压到宿主机，备份原程序，然后只替换已有容器中的 `/app/artex`。例如现有容器名为 `artex-artex-1`：
 
@@ -661,4 +661,4 @@ https://github.com/oritera/Cairn
 
 Worker 可调用 `record_intelligence`，或在 `record_fact` 的单条/批量事实中附带 `intelligence` 数组一起提交。`insert_assets` 本次提交的服务 `auth` 自动登记为未验证凭据，避免重复上报。任务、执行节点由系统绑定，记录需要真实来源证据；获取凭据不等于登录成功。
 
-页面支持分类、标题/上报者搜索、状态筛选、分页、状态更新及来源查看。凭据、敏感数据的正文和来源证据直接展示在列表及详情中，无需额外点击显示。直接关联任务的记录标明继承且只读；在资产页选择一项资产后点击「关联情报」可查看同一份记录。情报随任务归档、恢复和删除；新版归档格式为 v4，仍支持读取 v1–v3。此功能不自动补提取历史会话。
+页面支持分类、标题/上报者搜索、状态筛选、分页、状态更新及来源查看。凭据、敏感数据的正文和来源证据直接展示在列表及详情中，无需额外点击显示。直接关联任务的记录标明继承且只读；在资产页选择一项资产后点击「关联情报」可查看同一份记录。情报随任务归档、恢复和删除；新版归档格式为 v5，兼容读取 v1–v5。此功能不自动补提取历史会话。

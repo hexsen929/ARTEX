@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   tool-runtimes:
-    if: ${{ inputs.prepare_macos_tools == true }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.prepare_macos_tools == true }}
     uses: ./.github/workflows/tools-macos.yml
     with:
       python_wheelhouse_run: ${{ inputs.python_wheelhouse_run || '' }}
@@ -109,7 +109,7 @@ jobs:
 
   # ③ 汇总所有 zip → 创建 GitHub Release
   release:
-    needs: binaries
+    needs: [binaries, tool-runtimes]
     # 仅在推送 tag（refs/tags/*）时创建 GitHub Release；手动触发时跳过。
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -133,6 +133,27 @@ jobs:
           pattern: pkg-*
           merge-multiple: true
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-tools-darwin-arm64-py311
+          path: release-tools/python-tools-darwin-arm64-py311
+      - name: Package optional offline Mac Python runtime
+        run: |
+          python3 - <<'PYTOOLS'
+          import hashlib, json, os, zipfile
+          from pathlib import Path
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          root = Path("release-tools/python-tools-darwin-arm64-py311")
+          index = json.loads((root / "wheelhouse-index.json").read_text())
+          assert index["platform"] == "darwin/arm64" and index["python"] == "3.11"
+          assert index["sources_sha256"] == hashlib.sha256(Path("packaging/python-tools-sources.json").read_bytes()).hexdigest()
+          target = Path("dist") / f"artex-python-tools-{version}-darwin-arm64-py311.zip"
+          with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+              for path in sorted(root.rglob("*")):
+                  assert not path.is_symlink(), "unexpected runtime symlink"
+                  if path.is_file():
+                      archive.write(path, path.relative_to(root.parent).as_posix())
+          PYTOOLS
       - name: Generate checksums
         working-directory: dist
         run: sha256sum *.zip > SHA256SUMS
