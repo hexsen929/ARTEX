@@ -3658,7 +3658,7 @@ func (s *Server) getTrafficBlob(w http.ResponseWriter, r *http.Request) {
 // is returned as a boolean presence flag (brave_key_set), never the value itself,
 // so the UI can show "configured" without echoing the secret back.
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, s.settingsPayload())
+	s.writeSettingsPayload(w)
 }
 
 func (s *Server) settingsPayload() map[string]any {
@@ -3758,6 +3758,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		TavilyKey        *string `json:"tavily_search_api_key"`
 		WebSearchProxy   *string `json:"web_search_proxy"`   // 独立出口代理(http/https/socks5)；null=不改，""=清空
 		GlobalProxy      *string `json:"global_proxy"`       // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
+		CallbackAddr     *string `json:"callback_addr"`      // 对新建回连/隧道即时生效；空串显式停用，不改已有资源
 		PythonInterp     *string `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
 		Workers          *int    `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
 		// 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
@@ -3781,6 +3782,17 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	callbackValue, status, err := s.prepareCallbackUpdate(req.CallbackAddr)
+	if err != nil {
+		writeErr(w, status, err.Error())
+		return
+	}
+	if req.CallbackAddr != nil {
+		if err := s.m.pg.SetSettingContext(r.Context(), config.CallbackAddrSetting, callbackValue); err != nil {
+			writeErr(w, 500, "回连地址保存失败")
+			return
+		}
 	}
 	if req.FindingInlineMerge != nil {
 		if err := s.m.pg.SetBool(db.SettingFindingInlineMerge, *req.FindingInlineMerge); err != nil {
@@ -3951,7 +3963,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, 200, s.settingsPayload())
+	s.writeSettingsPayload(w)
 }
 
 // testWebSearch runs a real "test" search with the given (or currently saved)

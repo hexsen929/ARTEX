@@ -17,6 +17,7 @@ import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSend
 import type { Settings } from "@/lib/types";
 
 import { BasicAuthCard } from "./_components/basic-auth-card";
+import { CallbackAddressCard } from "./_components/callback-address-card";
 import { UpdateCard } from "./_components/update-card";
 
 export default function SystemSettingsPage() {
@@ -426,6 +427,8 @@ export default function SystemSettingsPage() {
             </p>
           </CardContent>
         </Card>
+
+        <CallbackAddressCard />
 
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>

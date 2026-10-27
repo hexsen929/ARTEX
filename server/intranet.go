@@ -21,6 +21,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/session"
 )
@@ -803,7 +804,16 @@ func (s *Server) intranetTopology(w http.ResponseWriter, r *http.Request) {
 		}
 		tunnels = filtered
 	}
-	cb, _ := callbackHost() // 未配置回连地址时 is_callback 全 false
+	callback, err := s.callbackAddress()
+	if err != nil {
+		writeErr(w, 500, "回连地址读取失败："+err.Error())
+		return
+	}
+	cb, err := config.CallbackHostname(callback.Address)
+	if err != nil {
+		writeErr(w, 500, "回连地址格式无效："+err.Error())
+		return
+	}
 	writeJSON(w, 200, buildTopology(assets, recs, tunnels, cb))
 }
 
