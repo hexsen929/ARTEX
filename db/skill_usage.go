@@ -22,7 +22,7 @@ type SkillUsage struct {
 	IntentID      int64  `json:"intent_id"`      // worker's intent node; 0 for planner/mainagent/chat
 	SessionID     string `json:"session_id"`     // chat conversation id; empty for task runs
 	ArgsLen       int    `json:"args_len"`
-	Found         bool   `json:"found"` // false = the model named a skill that does not exist
+	Found         bool   `json:"found"` // false = current Agent registry could not resolve it (unassigned or absent)
 }
 
 // InsertSkillUsage appends one ledger row. Best-effort: callers log and continue on
@@ -33,6 +33,12 @@ INSERT INTO skill_usage(skill, agent_key, task_id, exploration_id, intent_id, se
 VALUES ($1, NULLIF($2,''), $3, $4, $5, NULLIF($6,''), $7, $8)`,
 		u.Skill, u.AgentKey, nullIfZero(u.TaskID), nullIfZero(u.ExplorationID),
 		nullIfZero(u.IntentID), u.SessionID, u.ArgsLen, u.Found)
+	return err
+}
+
+// ClearMissingSkillUsage removes historical unresolved Skill() calls only.
+func (d *DB) ClearMissingSkillUsage() error {
+	_, err := d.Exec(`DELETE FROM skill_usage WHERE NOT found`)
 	return err
 }
 
@@ -100,9 +106,9 @@ ORDER BY COUNT(*) DESC, skill`)
 	return mergeArchivedSkillStats(out, archived, false), nil
 }
 
-// MissingSkillStats returns the skill names agents asked for that do not exist,
-// most-requested first — the "wished it existed" gap list. Names come from the model
-// so they are shown as-is (already length-capped at insert time).
+// MissingSkillStats returns names the current Agent registry failed to resolve,
+// most-requested first. A miss may mean the skill was not visible to that Agent or
+// the directory was absent; names come from the model and are length-capped.
 func (d *DB) MissingSkillStats(limit int) ([]SkillStat, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20

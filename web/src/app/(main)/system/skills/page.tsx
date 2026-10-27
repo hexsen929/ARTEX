@@ -186,7 +186,7 @@ function SkillsOverview({
     { label: "Skill 总数", value: skills.length, hint: `${agg.usedCount} 个被调用过` },
     { label: "累计调用", value: agg.totalCalls },
     { label: "未使用", value: agg.neverUsed.length, hint: agg.neverUsed.length > 0 ? "从未被任何 agent 加载" : "全部用过" },
-    { label: "未命中调用", value: agg.missingCalls, hint: missing.length > 0 ? `${missing.length} 个不存在的 skill` : "无" },
+    { label: "未解析调用", value: agg.missingCalls, hint: missing.length > 0 ? `${missing.length} 条历史记录` : "无" },
   ];
 
   return (
@@ -707,23 +707,39 @@ export default function SkillsPage() {
           <h1 className="text-sm font-semibold leading-tight">Skill</h1>
           <p className="text-muted-foreground text-xs">技能库 · agentskills.io 规范 · 按 Agent 授权可见</p>
         </div>
-        {/* 缺口清单：agent 点名调用、但库里没有的 skill —— 直接是该补什么的依据。 */}
+        {/* 历史未解析调用：可能是未分配给当时的 Agent，也可能是目录不存在。 */}
         {missing.length > 0 && (
           <Popover>
             <PopoverTrigger asChild>
               <Button size="sm" variant="outline" className="ml-auto">
                 <AlertTriangleIcon className="size-3.5 text-amber-500" />
-                {missing.length} 个未命中调用
+                {missing.length} 条历史未解析调用
               </Button>
             </PopoverTrigger>
             <PopoverContent align="end" className="w-80">
-              <p className="mb-2 text-xs text-muted-foreground">
-                Agent 点名调用、但技能库里不存在的 skill。按被点名次数排序。
-              </p>
+              <div className="mb-2 flex items-start justify-between gap-2">
+                <p className="text-xs text-muted-foreground">
+                  Agent 曾点名调用，但当时没有在该 Agent 的可见 Skill 注册表中解析成功；可能是未分配，也可能目录不存在。
+                </p>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="shrink-0 text-xs"
+                  onClick={async () => {
+                    if (!window.confirm("清除历史未解析调用记录？不会删除 Skill 文件或成功调用记录。")) return;
+                    await api.clearMissingSkills();
+                    setMissing([]);
+                  }}
+                >
+                  清除记录
+                </Button>
+              </div>
               <div className="space-y-1">
                 {missing.map((m) => (
                   <div key={m.skill} className="flex items-center gap-2 text-sm">
                     <code className="min-w-0 flex-1 truncate font-mono text-xs" title={m.skill}>{m.skill}</code>
+                    <span className="shrink-0 text-[10px] text-muted-foreground">{m.library_present ? "库中存在" : "目录缺失"}</span>
                     <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{m.calls} 次</span>
                     <span className="shrink-0 text-xs text-muted-foreground">{fmtTime(m.last_used)}</span>
                   </div>

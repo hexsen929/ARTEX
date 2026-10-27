@@ -367,7 +367,22 @@ ON CONFLICT DO NOTHING`, r.kind, r.pattern, r.note); err != nil {
 // declares `mcps: ScopeSentry`, which only takes effect once it's made visible and
 // that MCP is enabled/configured.
 var builtinSkillVisibility = map[string][]string{
-	"api-recon": {"auto", "pentest", "worker"},
+	"chains-meta":              {"goals", "planner", "pentest", "worker.intranet"},
+	"chains-recon":             {"goals", "planner", "pentest", "retester", "verifier", "worker", "worker.intranet"},
+	"chains-web":               {"pentest", "planner", "retester", "verifier", "worker"},
+	"chains-ad":                {"pentest", "planner", "worker", "worker.intranet"},
+	"chains-pivot":             {"pentest", "planner", "worker", "worker.intranet"},
+	"chains-priv":              {"pentest", "planner", "worker", "worker.intranet"},
+	"chains-app":               {"pentest", "planner", "worker"},
+	"chains-rev":               {"pentest", "planner", "worker"},
+	"chains-pwn":               {"pentest", "planner", "worker"},
+	"api-recon":                {"pentest", "planner", "retester", "verifier", "worker"},
+	"cve-search":               {"pentest", "planner", "reporter", "retester", "verifier", "worker", "worker.intranet"},
+	"shodan":                   {"pentest", "planner", "worker", "worker.intranet"},
+	"playwright-cli":           {"pentest", "retester", "verifier", "worker"},
+	"bool-sqli-admin-takeover": {"pentest"},
+	"ctf-web":                  {"pentest"},
+	"ctf-ai-ml":                {"pentest"},
 }
 
 // seedBuiltinSkillVisibility binds the shipped built-in skills to their default
