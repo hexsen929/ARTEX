@@ -112,6 +112,12 @@ func ValidateCallbackAddr(raw string) (string, error) {
 		if err != nil || port == "" {
 			return "", fmt.Errorf("回连地址格式应为 IP、域名或 host:port；IPv6 附端口时使用方括号")
 		}
+		if strings.HasPrefix(address, "[") {
+			ip, err := netip.ParseAddr(host)
+			if err != nil || !ip.Is6() {
+				return "", fmt.Errorf("方括号仅用于 IPv6 地址")
+			}
+		}
 		for _, r := range port {
 			if r < '0' || r > '9' {
 				return "", fmt.Errorf("回连端口应为 1 到 65535 的整数")

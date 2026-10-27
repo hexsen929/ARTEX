@@ -137,7 +137,7 @@ func TestValidateCallbackRejectsInvalidAndCommandForms(t *testing.T) {
 		"http://host", "https://host:443", "host/path", "user@host", "host?x", "host#x",
 		"host;id", "host|id", "host&id", "$(id)", "`id`", "host'", `host"`, "host\\path",
 		"host name", "host\n", "\thost", "host\x00", "host\u2003name", "host:0", "host:65536",
-		"host:-1", "host:+1", "host:", ":443", "host:port", "[]", "[host]:443", "[::1]:0",
+		"host:-1", "host:+1", "host:", ":443", "host:port", "[]", "[host]:443", "[192.0.2.15]:443", "[::1]:0",
 		"0.0.0.0", "0.0.0.0:443", "::", "[::]:443", "224.0.0.1", "ff02::1",
 		"255.255.255.255", "::ffff:0.0.0.0", "::ffff:255.255.255.255", "999.1.1.1",
 		"-host", "host-", "host..test", ".host", "host_name", "[fe80::1%en0;id]:443",
