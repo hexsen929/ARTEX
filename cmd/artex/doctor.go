@@ -180,20 +180,34 @@ func runDoctor(args []string) int {
 		}
 	}
 
-	// 7. ARTEX_CALLBACK_ADDR：反弹 shell / 隧道回连平台用
-	// 注意 systemd 部署常用 EnvironmentFile 注入（packaging/artex.service 约定
-	// /etc/artex.env），doctor 从 shell 直跑时读不到进程环境，需兜底解析该文件。
-	cb := config.CallbackAddr()
-	cbSrc := ""
-	if cb == "" {
-		if v, ok := readEnvFileValue("/etc/artex.env", "ARTEX_CALLBACK_ADDR"); ok {
-			cb, cbSrc = v, "（来自 /etc/artex.env）"
+	// 7. Resolve UI/file/env configuration through the runtime's shared rules.
+	// The read-only probe never opens migrations or creates missing settings.
+	{
+		var callback config.CallbackAddress
+		var callbackErr error
+		if dbOK {
+			callback, callbackErr = db.ProbeCallbackAddr(dsn)
+		} else {
+			callback, callbackErr = config.ResolveCallbackAddr(nil)
 		}
-	}
-	if cb != "" {
-		check(docOK, "回连地址", "ARTEX_CALLBACK_ADDR = "+cb+cbSrc)
-	} else {
-		check(docWarn, "回连地址", "ARTEX_CALLBACK_ADDR 未设置——反弹 shell / 隧道（期 3/5）回连平台不可用；立足点（webshell）功能不受影响")
+		if callbackErr == nil && callback.Source == "unset" {
+			// A systemd-only environment file is a diagnostic fallback when no
+			// UI value (including an explicit clear) or file value is present.
+			if value, found := readEnvFileValue("/etc/artex.env", "ARTEX_CALLBACK_ADDR"); found {
+				callback.Address, callbackErr = config.ValidateCallbackAddr(value)
+				callback.Source = "/etc/artex.env"
+			}
+		}
+		switch {
+		case callbackErr != nil:
+			check(docFail, "回连地址", "读取失败（不会回落旧地址）: "+callbackErr.Error())
+		case !dbOK && callback.Source != "env":
+			check(docSkip, "回连地址", "数据库不可达，后台生效值未核对；环境变量未设置")
+		case callback.Address != "":
+			check(docOK, "回连地址", callback.Address+"（来源: "+callback.Source+"；用于新建连接，端口由监听/隧道另行指定）")
+		default:
+			check(docWarn, "回连地址", "未配置或已在后台清空——新建反向连接/反向隧道需要该地址；普通扫描、爬虫和 HTTP 会话不受影响")
+		}
 	}
 
 	// Keys encrypt stored session/credential secrets as well as signing JWTs.

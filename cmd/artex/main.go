@@ -118,11 +118,14 @@ func run() int {
 		skillDir = abs
 	}
 	log.Printf("[config] skill 目录: %s", skillDir)
-	// ARTEX_CALLBACK_ADDR:反弹 shell/隧道(期 3/5)回连平台用;期 1a 仅启动校验提示。
-	if cb := config.CallbackAddr(); cb != "" {
-		log.Printf("[config] 回连地址(ARTEX_CALLBACK_ADDR): %s", cb)
+	// Read the same runtime setting as new connection requests, including an
+	// explicitly cleared UI value. This does not start or reconfigure a listener.
+	if cb, cbErr := mgr.CallbackAddress(); cbErr != nil {
+		log.Printf("[config] 回连地址读取失败: %v", cbErr)
+	} else if cb.Address != "" {
+		log.Printf("[config] 回连地址(%s): %s", cb.Source, cb.Address)
 	} else {
-		log.Printf("[config] ARTEX_CALLBACK_ADDR 未设置：反弹 shell/隧道(期 3/5)需要平台回连地址,立足点(webshell)功能不受影响")
+		log.Printf("[config] 回连地址未配置：可在系统设置按需填写；普通扫描、爬虫与 HTTP 会话功能不受影响")
 	}
 	srv := server.New(ctx, mgr, skillDir, *dataDir, config.KeyDir())
 

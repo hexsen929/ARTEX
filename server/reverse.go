@@ -820,7 +820,7 @@ func (s *Server) reverseListenTool() actool.CoreTool {
 			if net.ParseIP(a.Iface) == nil {
 				return actool.Errorf("iface 非法(需 IP): " + a.Iface), nil
 			}
-			host, err := callbackHost()
+			host, err := s.callbackHost()
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}

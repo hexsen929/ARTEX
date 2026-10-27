@@ -71,16 +71,15 @@ func (s *Server) initTunnels(dataDir string) {
 }
 
 // callbackHost 取目标回连平台用的主机地址（ARTEX_CALLBACK_ADDR 的 host 部分）。
-func callbackHost() (string, error) {
-	addr := config.CallbackAddr()
-	if addr == "" {
-		return "", fmt.Errorf("未配置平台回连地址：设 ARTEX_CALLBACK_ADDR=<目标可达的平台IP:端口> 后重试")
-	}
-	host, _, err := net.SplitHostPort(addr)
+func (s *Server) callbackHost() (string, error) {
+	callback, err := s.callbackAddress()
 	if err != nil {
-		return addr, nil //  bare host（无端口）也接受
+		return "", fmt.Errorf("回连地址读取失败：%w", err)
 	}
-	return host, nil
+	if callback.Address == "" {
+		return "", fmt.Errorf("未配置平台回连地址：在系统设置填写目标可访问的 IP 或域名后重试")
+	}
+	return config.CallbackHostname(callback.Address)
 }
 
 // roeCheckHost 校验目标 host 是否在本任务 RoE 范围内（与 register_session 同一套：
@@ -188,7 +187,7 @@ func (s *Server) tunnelProbeTool() actool.CoreTool {
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			host, err := callbackHost()
+			host, err := s.callbackHost()
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
@@ -245,10 +244,6 @@ func (s *Server) tunnelDeployTool() actool.CoreTool {
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			cbHost, err := callbackHost()
-			if err != nil {
-				return actool.Errorf(err.Error()), nil
-			}
 			kind := strings.TrimSpace(a.Kind)
 			adapter := strings.ToLower(strings.TrimSpace(a.Adapter))
 			if adapter == "" {
@@ -261,6 +256,12 @@ func (s *Server) tunnelDeployTool() actool.CoreTool {
 			}
 			if adapter == tunnel.AdapterSuo5 && kind != tunnel.KindSocks {
 				return actool.Errorf("suo5 适配器只支持 kind=socks（无出网场景的 HTTP socks 隧道）;portfwd 请用 chisel"), nil
+			}
+			// Explicit HTTP tunnels do not ask the target to connect back. Keep
+			// this path usable when the callback setting is intentionally empty.
+			cbHost, err := s.callbackHostForTunnel(adapter)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
 			}
 			if adapter == "auto" {
 				// probe 结论驱动：portfwd 只能 chisel;socks 现场跑 probe,
