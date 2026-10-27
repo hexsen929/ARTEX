@@ -1089,6 +1089,9 @@ func (d *DB) SetAgentSkillVisibility(agentID int64, names []string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockSkillVisibilityAgent(tx, agentID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM agent_skill_visibility WHERE agent_id=$1`, agentID); err != nil {
 		return err
 	}
@@ -1098,18 +1101,32 @@ ON CONFLICT (agent_id,skill_name) DO UPDATE SET enabled=true`, agentID, name); e
 			return err
 		}
 	}
+	if err := markSkillVisibilityConfigured(tx, agentID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 // ToggleSkillVisibility sets one (agent, skill_name) visibility on/off.
 func (d *DB) ToggleSkillVisibility(agentID int64, skillName string, on bool) error {
-	if on {
-		_, err := d.Exec(`INSERT INTO agent_skill_visibility(agent_id,skill_name,enabled) VALUES ($1,$2,true)
-ON CONFLICT (agent_id,skill_name) DO UPDATE SET enabled=true`, agentID, skillName)
+	tx, err := d.Begin()
+	if err != nil {
 		return err
 	}
-	_, err := d.Exec(`DELETE FROM agent_skill_visibility WHERE agent_id=$1 AND skill_name=$2`, agentID, skillName)
-	return err
+	defer tx.Rollback()
+	if err := lockSkillVisibilityAgent(tx, agentID); err != nil {
+		return err
+	}
+	// Keep an explicit false row as a tombstone for older installations and
+	// concurrent initialization; hiding a Skill is an intentional selection.
+	if _, err := tx.Exec(`INSERT INTO agent_skill_visibility(agent_id,skill_name,enabled) VALUES ($1,$2,$3)
+ON CONFLICT (agent_id,skill_name) DO UPDATE SET enabled=EXCLUDED.enabled`, agentID, skillName, on); err != nil {
+		return err
+	}
+	if err := markSkillVisibilityConfigured(tx, agentID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // DeleteSkillVisibility removes all visibility rows for a skill (called on skill delete).

@@ -275,6 +275,12 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		if err := s.seedFindingVerifier(); err != nil { // 反证验证 agent(需求二方案甲)
 			log.Printf("[verifier] seed: %v", err)
 		}
+		// Reporter, retester and verifier are created after the DB's built-in
+		// rows. Give new installations their default Skills on this startup,
+		// while per-Agent initialization markers preserve all existing choices.
+		if err := m.pg.SeedBuiltinSkillVisibility(); err != nil {
+			log.Printf("[skills] seed auxiliary Agent defaults: %v", err)
+		}
 		go s.evidenceStore().RunGC(s.ctx)
 		s.seedPythonInterpreter() // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
 		// Calendar scheduler starts after persisted tasks are restored.
@@ -1060,7 +1066,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/skills", s.fsCreateSkill)
 	mux.HandleFunc("POST /api/skills/upload", s.fsUploadSkill)
 	mux.HandleFunc("DELETE /api/skills/{name}", s.fsDeleteSkill)
-	mux.HandleFunc("GET /api/skills/missing", s.fsMissingSkills)   // 未命中(想调但不存在)的 skill 名
+	mux.HandleFunc("GET /api/skills/missing", s.fsMissingSkills) // 未命中(想调但不存在)的 skill 名
 	mux.HandleFunc("DELETE /api/skills/missing", s.fsClearMissingSkills)
 	mux.HandleFunc("GET /api/skills/{name}/usage", s.fsSkillUsage) // 单个 skill 的最近调用
 	mux.HandleFunc("PUT /api/skills/{name}/meta", s.fsUpdateSkillMeta)

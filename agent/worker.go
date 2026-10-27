@@ -497,8 +497,19 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 收敛工具面、减少低价值调用。其余 SDK 默认工具(Read/Write/Edit/LS/Bash/Sleep)照常。
 	base = append(base, defaultToolsExcept("MultiEdit", "Glob", "Grep")...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
+	// Freeze the phase once for this run: the prompt and Skill visibility must
+	// describe the same state even if sessions/tunnels change during assembly.
+	intranet := w.intranetForTask(taskID)
+	skillAgent := "worker"
+	if intranet {
+		skillAgent = "worker.intranet"
+	}
+	ctx = WithSkillVisibilityAgent(ctx, "worker", skillAgent)
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
+	if def.AssemblyError != nil {
+		return harness.ReasonHookStopped, WriteCounts{}, fmt.Errorf("执行 Skill 授权未就绪，未执行本轮操作: %w", def.AssemblyError)
+	}
 
 	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标资产
 	// 原始数据一起放进 system prompt：system 每次 run 都重新拼一遍、绝不会被 compaction 压掉，
@@ -512,7 +523,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// inherit a parent run's background into the action reviewer.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
-	sysBody := workerSystem(proxyAddr, proxyCA, w.workDir, runDir, w.intranetForTask(taskID))
+	sysBody := workerSystem(proxyAddr, proxyCA, w.workDir, runDir, intranet)
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}

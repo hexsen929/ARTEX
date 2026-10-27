@@ -43,6 +43,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
+import { acknowledgeMissingSkillNotices, missingSkillLibraryLabel, missingSkillNoticeSummary } from "@/lib/missing-skill-notices";
 import type { Agent, SkillItem, MCPServer, SkillCall, MissingSkill } from "@/lib/types";
 
 function fmtTime(ts?: string) {
@@ -186,7 +187,7 @@ function SkillsOverview({
     { label: "Skill 总数", value: skills.length, hint: `${agg.usedCount} 个被调用过` },
     { label: "累计调用", value: agg.totalCalls },
     { label: "未使用", value: agg.neverUsed.length, hint: agg.neverUsed.length > 0 ? "从未被任何 agent 加载" : "全部用过" },
-    { label: "未解析调用", value: agg.missingCalls, hint: missing.length > 0 ? `${missing.length} 条历史记录` : "无" },
+    { label: "待处理未解析调用", value: agg.missingCalls, hint: missing.length > 0 ? `涉及 ${missing.length} 个 Skill` : "无" },
   ];
 
   return (
@@ -335,16 +336,64 @@ export default function SkillsPage() {
   const [deleting, setDeleting] = React.useState(false);
 
   // 调用统计：列表页的次数/最近调用随 api.skills() 一起回来；选中某个 skill 时再拉它的
-  // 最近调用明细。missing = 被点名但不存在的 skill（想用但没有）。
+  // 最近调用明细。missing = 当时 Agent 的可见注册表未解析成功、尚未处理的调用。
   const [usageCalls, setUsageCalls] = React.useState<SkillCall[]>([]);
   const [usageLoading, setUsageLoading] = React.useState(false);
   const [missing, setMissing] = React.useState<MissingSkill[]>([]);
+  const [missingError, setMissingError] = React.useState("");
+  const [clearingMissing, setClearingMissing] = React.useState(false);
+  const missingGeneration = React.useRef(0);
+  const clearingMissingRef = React.useRef(false);
+  const missingMounted = React.useRef(false);
+
+  const refreshMissing = React.useCallback(async () => {
+    if (clearingMissingRef.current) return;
+    const generation = ++missingGeneration.current;
+    try {
+      const notices = await api.missingSkills(200);
+      if (missingMounted.current && generation === missingGeneration.current) {
+        setMissing(notices);
+        setMissingError("");
+      }
+    } catch (error) {
+      if (missingMounted.current && generation === missingGeneration.current) {
+        setMissingError(`读取提示失败：${(error as Error).message}`);
+      }
+    }
+  }, []);
+
+  const clearMissing = async () => {
+    if (clearingMissingRef.current) return;
+    if (!window.confirm("将此前的未解析提示标记为已处理？原始调用账本（含归档）、Skill 文件和成功调用记录都会保留；之后的新未解析调用仍会提示。")) return;
+    clearingMissingRef.current = true;
+    setClearingMissing(true);
+    setMissingError("");
+    const generation = ++missingGeneration.current;
+    try {
+      const notices = await acknowledgeMissingSkillNotices(
+        () => api.clearMissingSkills(),
+        () => api.missingSkills(200),
+      );
+      if (missingMounted.current && generation === missingGeneration.current) {
+        setMissing(notices);
+        toast.success("历史提示已标记处理，原始调用记录已保留");
+      }
+    } catch (error) {
+      if (missingMounted.current && generation === missingGeneration.current) {
+        // Keep the old list visible when the save or following reload fails.
+        setMissingError(`清除或刷新失败：${(error as Error).message}。请重新加载确认，原始记录未删除。`);
+      }
+    } finally {
+      clearingMissingRef.current = false;
+      if (missingMounted.current) setClearingMissing(false);
+    }
+  };
 
   // ── Data ──────────────────────────────────────────────────────────────────
   const load = React.useCallback(() => {
     api.agents().then(setAgents).catch(() => {});
     api.mcpServers().then(setMcpOptions).catch(() => {});
-    api.missingSkills().then(setMissing).catch(() => {});
+    void refreshMissing();
     api.skills().then((ss) => {
       setSkills(ss);
       ss.forEach((s) =>
@@ -353,9 +402,16 @@ export default function SkillsPage() {
           .catch(() => {}),
       );
     }).catch(() => {});
-  }, []);
+  }, [refreshMissing]);
 
-  React.useEffect(() => { load(); }, [load]);
+  React.useEffect(() => {
+    missingMounted.current = true;
+    load();
+    return () => {
+      missingMounted.current = false;
+      missingGeneration.current += 1;
+    };
+  }, [load]);
 
   // ── Upload a .zip skill ───────────────────────────────────────────────────
   async function uploadZip(file: File, overwrite = false) {
@@ -713,41 +769,46 @@ export default function SkillsPage() {
             <PopoverTrigger asChild>
               <Button size="sm" variant="outline" className="ml-auto">
                 <AlertTriangleIcon className="size-3.5 text-amber-500" />
-                {missing.length} 条历史未解析调用
+                {missingSkillNoticeSummary(missing).skills} 个 Skill · {missingSkillNoticeSummary(missing).calls} 次历史未解析
               </Button>
             </PopoverTrigger>
             <PopoverContent align="end" className="w-80">
               <div className="mb-2 flex items-start justify-between gap-2">
                 <p className="text-xs text-muted-foreground">
-                  Agent 曾点名调用，但当时没有在该 Agent 的可见 Skill 注册表中解析成功；可能是未分配，也可能目录不存在。
+                  Agent 曾点名调用，但当时未在其可见 Skill 注册表中解析成功，可能是未分配或文件缺失。当前文件存在不等于 Agent 已获授权。
                 </p>
                 <Button
                   type="button"
                   size="sm"
                   variant="ghost"
                   className="shrink-0 text-xs"
-                  onClick={async () => {
-                    if (!window.confirm("清除历史未解析调用记录？不会删除 Skill 文件或成功调用记录。")) return;
-                    await api.clearMissingSkills();
-                    setMissing([]);
-                  }}
+                  disabled={clearingMissing}
+                  onClick={() => void clearMissing()}
                 >
-                  清除记录
+                  {clearingMissing ? "处理中…" : "清除提示"}
                 </Button>
               </div>
               <div className="space-y-1">
                 {missing.map((m) => (
                   <div key={m.skill} className="flex items-center gap-2 text-sm">
                     <code className="min-w-0 flex-1 truncate font-mono text-xs" title={m.skill}>{m.skill}</code>
-                    <span className="shrink-0 text-[10px] text-muted-foreground">{m.library_present ? "库中存在" : "目录缺失"}</span>
+                    <span className="shrink-0 text-[10px] text-muted-foreground">{missingSkillLibraryLabel(m.library_present)}</span>
                     <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{m.calls} 次</span>
                     <span className="shrink-0 text-xs text-muted-foreground">{fmtTime(m.last_used)}</span>
                   </div>
                 ))}
               </div>
+              {missingError ? <p role="alert" className="mt-2 break-words text-xs text-destructive">{missingError}</p> : null}
+              {missingError ? <Button type="button" variant="ghost" size="sm" disabled={clearingMissing} onClick={() => void refreshMissing()}>重新加载提示</Button> : null}
             </PopoverContent>
           </Popover>
         )}
+        {missing.length === 0 && missingError ? (
+          <div role="alert" className="ml-auto flex items-center gap-2 text-xs text-destructive">
+            <span>{missingError}</span>
+            <Button type="button" variant="ghost" size="sm" onClick={() => void refreshMissing()}>重试</Button>
+          </div>
+        ) : null}
       </div>
       <div className="flex flex-1 overflow-hidden">
         {/* ── 左侧文件树 ── */}

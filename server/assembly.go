@@ -27,8 +27,13 @@ import (
 // filters them per-agent binding. Empty/nil → no host tools this run (capture off).
 func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string), taskDialers ...taskMCPDialer) {
 	agent.ToolAugment = func(ctx context.Context, agentKey string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
+		skillAgentKey := agent.SkillVisibilityAgent(ctx, agentKey)
+		separateSkillRole := skillAgentKey != agentKey
 		a, err := pg.GetAgentByKey(agentKey)
 		if err != nil || a == nil {
+			if separateSkillRole {
+				return nil, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取执行角色 %s 失败", agentKey)}, nil
+			}
 			return nil, agent.DeferredInfo{}, nil
 		}
 		var extra []actool.CoreTool
@@ -40,18 +45,53 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 
 		// --- skills: load visible skills into reg (used for the Skill meta-tool
 		// and to know which MCP servers are skill-gated). ---
+		skillAgent := a
+		if separateSkillRole {
+			skillAgent, err = pg.GetAgentByKey(skillAgentKey)
+			if err != nil || skillAgent == nil {
+				return nil, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 Skill 角色 %s 失败", skillAgentKey)}, nil
+			}
+		}
+		names, skillErr := pg.AgentSkillNames(skillAgent.ID)
+		if skillErr != nil && separateSkillRole {
+			return nil, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 Skill 角色 %s 的授权失败: %w", skillAgentKey, skillErr)}, nil
+		}
+		// A prompt variant may choose a different Skill set, but cannot obtain a
+		// new MCP grant merely by referencing a server from that Skill. Preserve
+		// the execution role's direct grants and its ordinary Skill-gated grants.
+		baseSkillMCPs := map[string]bool{}
+		var baseSkillNames []string
+		if separateSkillRole {
+			baseSkillNames, err = pg.AgentSkillNames(a.ID)
+			if err != nil {
+				return nil, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取执行角色 %s 的 Skill 授权失败: %w", agentKey, err)}, nil
+			}
+		}
 		var reg *skill.Registry
-		if names, _ := pg.AgentSkillNames(a.ID); len(names) > 0 {
+		if len(names) > 0 || len(baseSkillNames) > 0 {
 			nameSet := make(map[string]bool, len(names))
 			for _, n := range names {
 				nameSet[n] = true
 			}
-			if allReg, err := skill.LoadDir(skillDir); err == nil && allReg != nil {
+			baseNameSet := make(map[string]bool, len(baseSkillNames))
+			for _, n := range baseSkillNames {
+				baseNameSet[n] = true
+			}
+			allReg, loadErr := skill.LoadDir(skillDir)
+			if loadErr != nil && separateSkillRole {
+				return nil, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 Skill 库失败: %w", loadErr)}, nil
+			}
+			if loadErr == nil && allReg != nil {
 				reg = skill.NewRegistry()
 				for _, s := range allReg.List() {
 					// match by directory name (Base of Dir), not by skill display Name
 					if s.Dir != "" && nameSet[filepath.Base(s.Dir)] {
 						reg.Add(s)
+					}
+					if s.Dir != "" && baseNameSet[filepath.Base(s.Dir)] {
+						for _, srv := range s.MCPs {
+							baseSkillMCPs[srv] = true
+						}
 					}
 				}
 				if len(reg.List()) == 0 {
@@ -87,7 +127,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 					continue
 				}
 				directVisible := want[m.ID]
-				skillGated := gated[m.Name]
+				skillGated := gated[m.Name] && (!separateSkillRole || directVisible || baseSkillMCPs[m.Name])
 				if !directVisible && !skillGated {
 					continue // neither directly visible nor referenced by a visible skill
 				}

@@ -1309,13 +1309,13 @@ export interface SkillCall {
   args_len: number;
 }
 
-// MissingSkill 是被点名但不存在的 skill —— "想用但没有"的缺口。
+// MissingSkill 是当时 Agent 可见注册表中未解析成功且尚未标记处理的调用。
 export interface MissingSkill {
   skill: string;
   calls: number;
   agents: string[];
   last_used?: string;
-  library_present?: boolean;
+  library_present?: boolean; // 当前文件存在性，不代表当时或当前 Agent 已获授权。
 }
 
 // ---- Tools (内置工具目录) ----
