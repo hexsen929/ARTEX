@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
@@ -20,14 +21,88 @@ import (
 	"github.com/Autumn-27/norma/llm"
 )
 
-// judgeWorkerLane is the usage-ledger "worker" label for intercept fallback-judge
-// calls, so judge spend can be queried apart from the worker/planner/main lanes.
+// judgeWorkerLane attributes fallback-review model usage separately.
 const judgeWorkerLane = "judge"
 
-// chatGuard returns a guard wired with the manager's interceptor, used for chat
-// conversations. Called once per applyLLM so a new LLM config always gets a fresh guard.
-func (s *Server) chatGuard() *guard.Guard {
-	return guard.NewWithInterceptor(s.m.interceptor)
+// chatGuard retains the existing chat wiring while applying the shared policy.
+func (s *Server) chatGuard() *guard.Guard { return s.agentGuard() }
+
+// settingRoEEnforcement is the settings 键 for the RoE scope-enforcement mode:
+// "off" | "warn"(默认) | "strict". See guard.RoEConfig.
+const settingRoEEnforcement = "roe_enforcement"
+
+// agentGuard returns a fresh guard wired with the manager's interceptor, used
+// for chat conversations and for the planner / main-agent. Each agent build
+// gets its own guard instance so a new LLM config never shares audit state with
+// the old one.
+func (s *Server) agentGuard() *guard.Guard {
+	if s.m == nil {
+		return guard.New()
+	}
+	g := guard.NewWithInterceptor(s.m.interceptor)
+	g.SetRoE(newRoEConfig(s.m.pg))
+	g.SetEgress(s.m.egress) // 批 5 B2 出口审查:chat/planner/mainagent 同样过敏感指纹拦截
+	return g
+}
+
+// newRoEConfig builds the guard RoE wiring backed by pg: mode from the
+// roe_enforcement settings 键, scope rules lazily read from task_scope per call
+// (范围随 add_task_scope 即时生效,guard 不缓存)。
+func newRoEConfig(pg *db.DB) guard.RoEConfig {
+	if pg == nil {
+		return guard.RoEConfig{}
+	}
+	return guard.RoEConfig{
+		Mode: func() string {
+			v, _, err := pg.GetSetting(settingRoEEnforcement)
+			if err != nil {
+				return "strict"
+			}
+			return v
+		},
+		Scope: func(taskID int64) []guard.ScopeRule {
+			rows, err := pg.Assets().ListTaskScope(taskID)
+			if err != nil {
+				// 读取失败按未登记范围处理(Unknown → 放行),与覆盖度 fail-open 一致。
+				return nil
+			}
+			return scopeRulesFromRows(rows)
+		},
+		ScopeWithError: func(taskID int64) ([]guard.ScopeRule, error) {
+			rows, err := pg.Assets().ListTaskScope(taskID)
+			if err != nil {
+				return nil, err
+			}
+			return scopeRulesFromRows(rows), nil
+		},
+		TaskIDOf: func(ctx context.Context) int64 {
+			return agent.RunInfoFrom(ctx).TaskID
+		},
+	}
+}
+
+// scopeRulesFromRows normalizes db task_scope rows into guard scope rules:
+// root_domain/subdomain → domain;ip(/32、/128 网段)与 cidr → cidr;icp 原样;
+// company/keyword 无可匹配的主机值,跳过(keyword 本来就是死规则)。
+func scopeRulesFromRows(rows []db.TaskScope) []guard.ScopeRule {
+	out := make([]guard.ScopeRule, 0, len(rows))
+	for _, r := range rows {
+		switch r.Kind {
+		case "root_domain", "subdomain":
+			if r.Domain != "" {
+				out = append(out, guard.ScopeRule{Kind: "domain", Value: r.Domain})
+			}
+		case "ip", "cidr":
+			if r.Net != "" {
+				out = append(out, guard.ScopeRule{Kind: "cidr", Value: r.Net})
+			}
+		case "icp":
+			if r.Value != "" {
+				out = append(out, guard.ScopeRule{Kind: "icp", Value: r.Value})
+			}
+		}
+	}
+	return out
 }
 
 // wireInterceptReviewer installs the LLM fallback judge into the interceptor. The
@@ -68,7 +143,9 @@ func reviewCompletion(ctx context.Context, prov llm.Provider, prompt string, inp
 	if err != nil {
 		return "", err
 	}
-	return streamCollectText(ctx, prov, prompt, string(user))
+	// 整个 ReviewInput(工具参数/历史/任务背景)都含目标侧可控文本,按不可信数据
+	// 包裹后再喂给裁判模型,防止其中的注入文本被当成指令。
+	return streamCollectText(ctx, prov, prompt, agent.WrapUntrustedData("tool-input", string(user)))
 }
 
 // streamCollectText runs a single non-streaming-style completion (thinking off,
@@ -157,6 +234,10 @@ func (s *Server) interceptUpdateRule(w http.ResponseWriter, r *http.Request) {
 	}
 	rule, err := pg.UpdateInterceptRule(id, req.Name, req.MatchTarget, req.MatchType, req.Pattern, req.Action, req.Message, req.Priority, req.Enabled, req.TimeoutEnabled, req.TimeoutSeconds, req.TimeoutAction)
 	if err != nil {
+		if errors.Is(err, db.ErrBuiltinRule) {
+			writeErr(w, 400, err.Error())
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -175,6 +256,10 @@ func (s *Server) interceptDeleteRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := pg.DeleteInterceptRule(id); err != nil {
+		if errors.Is(err, db.ErrBuiltinRule) {
+			writeErr(w, 400, err.Error())
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -200,6 +285,10 @@ func (s *Server) interceptToggleRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := pg.ToggleInterceptRule(id, req.Enabled); err != nil {
+		if errors.Is(err, db.ErrBuiltinRule) {
+			writeErr(w, 400, err.Error())
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -356,9 +445,9 @@ func interceptFilterParams(q url.Values) (db.InterceptApprovalFilter, error) {
 		return filter, fmt.Errorf("status 必须是 pending、allowed、denied 或 timeout")
 	}
 	switch filter.DecisionSource {
-	case "", "model", "rule", "manual", "unknown":
+	case "", "model", "rule", "manual", "auto_allow", "unknown":
 	default:
-		return filter, fmt.Errorf("decision_source 必须是 model、rule、manual 或 unknown")
+		return filter, fmt.Errorf("decision_source 必须是 model、rule、manual、auto_allow 或 unknown")
 	}
 	return filter, nil
 }
@@ -404,6 +493,32 @@ func (s *Server) interceptDecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// --- guard auto-allow (一键放行) ---
+
+// guardAutoAllowGet returns the current auto-allow status, including the
+// remaining validity seconds. Expiry is enforced lazily on read.
+func (s *Server) guardAutoAllowGet(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, s.m.interceptor.AutoAllowStatus())
+}
+
+// guardAutoAllowSet enables/disables the one-click auto-allow switch. When
+// enabling, hours 夹逼到 {2,4,8};when disabling, hours is ignored.
+func (s *Server) guardAutoAllowSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+		Hours   int  `json:"hours"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := s.m.interceptor.SetAutoAllow(req.Enabled, req.Hours); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, s.m.interceptor.AutoAllowStatus())
 }
 
 // --- tool-config (全局工具拦截范围) ---

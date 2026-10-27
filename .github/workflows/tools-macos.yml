@@ -1,0 +1,102 @@
+name: macOS tool runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_wheelhouse_run:
+        required: false
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      python_wheelhouse_run:
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  python-wheelhouse:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: arm64
+      - name: Confirm native runner and validate deployment scripts
+        run: |
+          test "$(uname -m)" = arm64
+          python3 -m unittest discover -s packaging -p 'test_*.py'
+      - name: Build fixed Python dependencies in the cloud
+        id: build-wheels
+        if: ${{ inputs.python_wheelhouse_run == '' }}
+        run: |
+          python3 packaging/prepare-python-tools.py --build-wheelhouse \
+            --wheelhouse "$RUNNER_TEMP/artex-python-wheelhouse" \
+            --python "$(command -v python3)"
+      - name: Download an explicitly selected wheelhouse from this repository
+        id: reuse-wheels
+        if: ${{ inputs.python_wheelhouse_run != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: python-tools-darwin-arm64-py311
+          path: ${{ runner.temp }}/artex-python-wheelhouse
+          run-id: ${{ inputs.python_wheelhouse_run }}
+          github-token: ${{ github.token }}
+      - name: Install offline wheelhouse into isolated smoke environments
+        run: |
+          python3 packaging/prepare-python-tools.py --install \
+            --destination "$RUNNER_TEMP/artex-python-smoke/data/tools" \
+            --wheelhouse "$RUNNER_TEMP/artex-python-wheelhouse" \
+            --python "$(command -v python3)"
+      - name: Python command acceptance without target operations
+        run: |
+          python3 packaging/smoke-python-tools.py \
+            --tools-dir "$RUNNER_TEMP/artex-python-smoke/data/tools"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && (steps.build-wheels.outcome == 'success' || steps.reuse-wheels.outcome == 'success') }}
+        with:
+          name: python-tools-darwin-arm64-py311
+          path: ${{ runner.temp }}/artex-python-wheelhouse
+          retention-days: 7
+
+  native-acceptance:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Native macOS platform and client-selection regressions
+        run: |
+          test "$(uname -m)" = arm64
+          go test ./tools ./tunnel -count=1 -timeout=3m
+      - name: Prepare pinned native tools
+        run: |
+          python3 packaging/prepare-tools.py --platform darwin/arm64 \
+            --destination "$RUNNER_TEMP/artex-native-smoke/data/tools" \
+            --host-only --tools suo5,chisel,gogo,naabu,httpx,katana,fscan,ligolo-proxy,nuclei,ffuf --install
+      - name: Native command acceptance without target operations
+        run: |
+          tool_dir="$RUNNER_TEMP/artex-native-smoke/data/tools"
+          "$tool_dir/suo5" --help
+          "$tool_dir/chisel" --version
+          "$tool_dir/gogo" -h
+          "$tool_dir/fscan" --help
+          "$tool_dir/ligolo-proxy" -h
+          "$tool_dir/httpx" -version
+          "$tool_dir/katana" -version
+          "$tool_dir/naabu" -version
+          "$tool_dir/nuclei" -version
+          "$tool_dir/ffuf" -V
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-tools-darwin-arm64
+          path: ${{ runner.temp }}/artex-native-smoke/data/tools
+          retention-days: 7

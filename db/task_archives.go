@@ -16,7 +16,9 @@ import (
 )
 
 const (
-	TaskArchiveFormatVersion       = 4
+	// v5 carries intranet ciphertext/resources and independent check/raw-report
+	// audit. Older binaries must reject it rather than silently omit those rows.
+	TaskArchiveFormatVersion       = 5
 	TaskArchiveLegacyFormatVersion = 1
 	TaskArchiveLLMRecordsPath      = "database/llm_records.ndjson"
 )
@@ -115,18 +117,19 @@ type TaskArchivePage struct {
 // Small tables remain JSON arrays in Tables. Large v2 tables are streamed to
 // package files listed in StreamedTables so their size is not bounded by memory.
 type TaskArchiveSnapshot struct {
-	FormatVersion     int                        `json:"format_version"`
-	CreatedAt         time.Time                  `json:"created_at"`
-	TaskID            int64                      `json:"task_id"`
-	ExplorationID     int64                      `json:"exploration_id"`
-	SourceTaskIDs     []int64                    `json:"source_task_ids"`
-	Hosts             []string                   `json:"hosts"`
-	ExclusiveHosts    []string                   `json:"exclusive_hosts"`
-	ExclusiveAssetIDs []int64                    `json:"exclusive_asset_ids"`
-	Tables            map[string]json.RawMessage `json:"tables"`
-	StreamedTables    map[string]string          `json:"streamed_tables,omitempty"`
-	DataCounts        map[string]int64           `json:"data_counts"`
-	AggregateStats    map[string]any             `json:"aggregate_stats"`
+	IntranetKeyFingerprint string                     `json:"intranet_key_fingerprint,omitempty"`
+	FormatVersion          int                        `json:"format_version"`
+	CreatedAt              time.Time                  `json:"created_at"`
+	TaskID                 int64                      `json:"task_id"`
+	ExplorationID          int64                      `json:"exploration_id"`
+	SourceTaskIDs          []int64                    `json:"source_task_ids"`
+	Hosts                  []string                   `json:"hosts"`
+	ExclusiveHosts         []string                   `json:"exclusive_hosts"`
+	ExclusiveAssetIDs      []int64                    `json:"exclusive_asset_ids"`
+	Tables                 map[string]json.RawMessage `json:"tables"`
+	StreamedTables         map[string]string          `json:"streamed_tables,omitempty"`
+	DataCounts             map[string]int64           `json:"data_counts"`
+	AggregateStats         map[string]any             `json:"aggregate_stats"`
 }
 
 func scanTaskArchive(sc interface{ Scan(...any) error }) (*TaskArchive, error) {
@@ -536,7 +539,10 @@ UNION SELECT value::bigint FROM findings finding
       ) value WHERE finding.task_id=$1 AND value ~ '^[0-9]+$'
 UNION SELECT value::bigint FROM task_intelligence intelligence
       CROSS JOIN LATERAL jsonb_array_elements_text(intelligence.asset_ids) value
-      WHERE intelligence.task_id=$1 AND value ~ '^[0-9]+$'`
+      WHERE intelligence.task_id=$1 AND value ~ '^[0-9]+$'
+UNION SELECT host_asset_id FROM credentials WHERE task_id=$1 AND host_asset_id IS NOT NULL
+UNION SELECT s.host_asset_id FROM sessions s WHERE s.host_asset_id IS NOT NULL AND
+      (s.created_by_task=$1 OR EXISTS(SELECT 1 FROM task_session_bindings b WHERE b.task_id=$1 AND b.session_id=s.id))`
 }
 
 // SnapshotTaskArchive reads one repeatable PostgreSQL snapshot. Task-owned Agent
@@ -591,6 +597,14 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"task_scope", `SELECT * FROM task_scope WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"findings", `SELECT * FROM findings WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"task_intelligence", `SELECT * FROM task_intelligence WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"credentials", `SELECT * FROM credentials WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"pending_scope", `SELECT * FROM pending_scope WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"sessions", `SELECT s.* FROM sessions s WHERE s.created_by_task=$1 OR EXISTS(SELECT 1 FROM task_session_bindings b WHERE b.task_id=$1 AND b.session_id=s.id) ORDER BY s.id`, []any{taskID}},
+		{"task_session_bindings", `SELECT * FROM task_session_bindings WHERE task_id=$1 ORDER BY session_id`, []any{taskID}},
+		{"tunnels", `SELECT * FROM tunnels WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"finding_checks", `SELECT c.* FROM finding_checks c JOIN findings f ON f.id=c.finding_id WHERE f.task_id=$1 ORDER BY c.id`, []any{taskID}},
+		{"finding_verification_events", `SELECT e.* FROM finding_verification_events e JOIN findings f ON f.id=e.finding_id WHERE f.task_id=$1 ORDER BY e.id`, []any{taskID}},
+		{"finding_inline_merge_events", `SELECT e.* FROM finding_inline_merge_events e JOIN findings f ON f.id=e.finding_id WHERE f.task_id=$1 ORDER BY e.id`, []any{taskID}},
 		{"finding_traffic_bindings", `SELECT b.* FROM finding_traffic_bindings b JOIN findings f ON f.id=b.finding_id WHERE f.task_id=$1 ORDER BY b.finding_id,b.position,b.id`, []any{taskID}},
 		{"traffic_evidence_snapshots", `SELECT s.* FROM traffic_evidence_snapshots s WHERE EXISTS(SELECT 1 FROM finding_traffic_bindings b JOIN findings f ON f.id=b.finding_id WHERE b.snapshot_id=s.id AND f.task_id=$1) ORDER BY s.id`, []any{taskID}},
 		{"llm_records", `SELECT * FROM llm_records WHERE COALESCE(task_id,'')=$1 ORDER BY id`, []any{strconv.FormatInt(taskID, 10)}},
@@ -687,6 +701,8 @@ func archiveAssetMetadata(tx *sql.Tx, taskID, expID int64, assetRows json.RawMes
 SELECT asset.id FROM assets asset JOIN candidate ON candidate.id=asset.id
 WHERE asset.company_id IS NULL
 AND NOT EXISTS (SELECT 1 FROM tasks task WHERE task.id<>$1 AND task.deleted_at IS NULL AND task.id=ANY(asset.task_ids))
+AND NOT EXISTS (SELECT 1 FROM sessions resource WHERE resource.host_asset_id=asset.id)
+AND NOT EXISTS (SELECT 1 FROM credentials credential WHERE credential.host_asset_id=asset.id AND credential.task_id<>$1)
 AND NOT EXISTS (
  SELECT 1 FROM exploration_anchors anchor JOIN exploration_nodes node ON node.id=anchor.node_id
  JOIN tasks task ON task.exploration_id=node.exploration_id

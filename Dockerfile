@@ -1,45 +1,46 @@
 # syntax=docker/dockerfile:1
-#
-# 运行镜像（不在镜像里编译）：只装常用工具，放入**预编译好的 Linux 单二进制**。
-# 二进制由 CI 的 binaries job 交叉编译（纯 Go、无 QEMU），按目标架构放在
-# 构建上下文的 dist/<TARGETARCH>/artex。这样多架构构建时 arm64 只需模拟 apt 层，
-# 不再模拟 Next/Go 编译，速度快得多。
-#
-# 本地手动构建镜像时，先自行准备二进制：
-#   cd web && npm run build:static && cd ..
-#   cp -r web/out server/webui/dist
-#   CGO_ENABLED=0 GOARCH=amd64 go build -tags embedui -o dist/amd64/artex ./cmd/artex
-#   docker build -t artex:local .
+# Runtime-only image. CI provides dist/<TARGETARCH>/artex; external intranet tools
+# are deliberately not installed from unverified/floating download sources.
 FROM python:3.12-slim-bookworm
+# Official fixed-version Node archive, verified before installation. No mutable
+# NodeSource setup script is piped into a shell. TARGETARCH is supplied by BuildKit.
 ARG TARGETARCH
-# 常用工具：ripgrep / curl / vim，加一批 recon 常备件（按需增删）。
-# Node 从 NodeSource 装 22.x，与前端构建使用的主版本一致。
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG NODE_VERSION=24.22.0
+ARG NODE_DIST_BASE=https://nodejs.org/dist
+ARG NPM_REGISTRY=https://registry.npmjs.org
+ARG APT_MIRROR=
+ARG PLAYWRIGHT_DOWNLOAD_HOST=
+RUN if [ -n "$APT_MIRROR" ]; then \
+      sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates ripgrep curl wget vim git jq unzip \
       dnsutils iputils-ping netcat-openbsd inetutils-telnet whois nmap \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
-# 预装 Playwright MCP 与 CLI（全局），运行时不再 npx 联网下载。
-# @playwright/mcp：browser MCP 直接 `npx @playwright/mcp`（已全局装好，无需 -y/@latest）。
-# @playwright/cli：提供 playwright-cli，装完顺带 --help 验证可执行。
-# 再装 playwright（提供浏览器管理），装完用 --with-deps 预置 chromium 及其系统依赖，
-# 这样容器内 MCP/CLI 首次启动即可用，不再联网下载浏览器。
-RUN npm install -g @playwright/mcp@latest @playwright/cli@latest playwright@latest \
+RUN set -eu; \
+    case "$TARGETARCH" in amd64) node_arch=x64 ;; arm64) node_arch=arm64 ;; *) echo "Unsupported Node architecture: $TARGETARCH" >&2; exit 1 ;; esac; \
+    archive="node-v${NODE_VERSION}-linux-${node_arch}.tar.gz"; \
+    cd /tmp; \
+    curl -fsSL -o "$archive" "${NODE_DIST_BASE}/v${NODE_VERSION}/$archive"; \
+    curl -fsSL -o SHASUMS256.txt "${NODE_DIST_BASE}/v${NODE_VERSION}/SHASUMS256.txt"; \
+    grep -F "  $archive" SHASUMS256.txt | sha256sum -c -; \
+    tar -xzf "$archive" -C /usr/local --strip-components=1; \
+    rm -f "$archive" SHASUMS256.txt
+RUN npm config set registry "$NPM_REGISTRY" \
+    && npm install -g @playwright/mcp@0.0.80 @playwright/cli@0.1.19 playwright@1.63.0 \
     && playwright-cli --help \
-    && playwright install --with-deps chromium \
+    && if [ -n "$PLAYWRIGHT_DOWNLOAD_HOST" ]; then \
+         PLAYWRIGHT_DOWNLOAD_HOST="$PLAYWRIGHT_DOWNLOAD_HOST" playwright install --with-deps chromium; \
+       else playwright install --with-deps chromium; fi \
     && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-# 预编译好的对应架构二进制（dist/amd64/artex 或 dist/arm64/artex）
 COPY dist/${TARGETARCH}/artex /app/artex
-# 守护启动脚本：进程退出后按退出码决定是否重新拉起，页面一键更新靠它完成换装。
-# 它同时负责把 SIGTERM 转发给 artex —— docker stop 只把信号发给 PID 1，
-# 不转发的话 artex 收不到、做不了优雅关闭，10 秒后被 SIGKILL 硬杀。
+WORKDIR /app
 COPY start.sh /app/start.sh
-RUN chmod +x /app/artex /app/start.sh
 COPY skills/ /app/skills/
-# data/（SQLite + jwt.key）持久化点
-VOLUME ["/app/data"]
+COPY packaging/tools-manifest.json /app/packaging/tools-manifest.json
+RUN mkdir -p /app/keys && chmod 700 /app/keys && chmod +x /app/artex /app/start.sh
+ENV ARTEX_KEY_DIR=/app/keys
+VOLUME ["/app/data", "/app/keys"]
 EXPOSE 8787 8788
 ENTRYPOINT ["/app/start.sh"]
 CMD ["-addr", ":8787", "-proxy", ":8788"]

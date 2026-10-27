@@ -75,14 +75,29 @@ VALUES(?,'GET /x','','HTTP 200','老数据正文')`, row[0]); err != nil {
 	defer tr.Close()
 
 	// 1. 必须是同一个文件，不能悄悄开了个新空库
-	if st2, err := os.Stat(path); err != nil || st2.Size() == 0 {
+	if st2, err := os.Stat(path); err != nil || st2.Size() == 0 || !os.SameFile(stat, st2) {
 		t.Fatalf("原索引文件异常: size=%v err=%v", st2, err)
 	}
-	if entries, _ := os.ReadDir(filepath.Join(dir, "_index")); len(entries) > 3 {
-		for _, e := range entries {
-			t.Logf("_index 下: %s", e.Name())
+	entries, err := os.ReadDir(filepath.Join(dir, "_index"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The permission migration adds one known sentinel alongside SQLite's
+	// index/WAL/SHM files. Allow exactly those names rather than relaxing a
+	// count: an unknown file must still fail even when WAL or SHM is absent.
+	allowed := map[string]bool{
+		"index.sqlite":                      true,
+		"index.sqlite-wal":                  true,
+		"index.sqlite-shm":                  true,
+		filepath.Base(permsMigrationMarker): true,
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !allowed[entry.Name()] {
+			t.Fatalf("_index 下出现了预期外的条目 %q，DSN 可能指向了别的库", entry.Name())
 		}
-		t.Fatal("_index 下出现了预期外的文件，DSN 可能指向了别的库")
+	}
+	if marker, err := os.ReadFile(filepath.Join(dir, permsMigrationMarker)); err != nil || string(marker) != "0600/0700\n" {
+		t.Fatalf("权限迁移标记异常: %q err=%v", marker, err)
 	}
 	t.Logf("旧库 %d 字节，新版本接管后仍是同一文件", stat.Size())
 

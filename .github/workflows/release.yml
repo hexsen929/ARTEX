@@ -9,12 +9,31 @@ on:
         required: false
         type: string
         default: ""
+      prepare_macos_tools:
+        description: "验证 Mac ARM64 外部工具并生成 Python wheelhouse（云端构建依赖）"
+        required: false
+        type: boolean
+        default: false
+      python_wheelhouse_run:
+        description: "可选：复用本仓库已构建的 Python wheelhouse 工作流编号，安装时仍核对固定来源与全部摘要"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write # 创建 Release 需要
+  actions: read # 显式复用本仓库已验证的依赖构建产物
 
 jobs:
+  tool-runtimes:
+    if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.prepare_macos_tools == true }}
+    uses: ./.github/workflows/tools-macos.yml
+    with:
+      python_wheelhouse_run: ${{ inputs.python_wheelhouse_run || '' }}
+
   verify:
+    # Reusable workflow succeeds only after both Go regression and frontend
+    # validation jobs succeed. No release/build job may bypass that result.
     uses: ./.github/workflows/tests.yml
 
   # ① 前端静态导出（一次），产物给交叉编译各平台复用
@@ -39,7 +58,7 @@ jobs:
 
   # ② 五平台交叉编译（内嵌前端）+ 打 zip
   binaries:
-    needs: frontend
+    needs: [verify, frontend]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -64,6 +83,7 @@ jobs:
           ARTEX_TARGET_OS: ${{ matrix.goos }}
           ARTEX_TARGET_ARCH: ${{ matrix.goarch }}
           ARTEX_BUILD_VERSION: ${{ inputs.build_version || github.ref_name }}
+          ARTEX_RELEASE_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
           ARTEX_SKIP_FRONTEND: "1"
           ARTEX_SKIP_NPM_CI: "1"
           # UPX 自解压 ELF 在部分 Linux 内核、虚拟化和安全策略下会崩溃。
@@ -89,7 +109,7 @@ jobs:
 
   # ③ 汇总所有 zip → 创建 GitHub Release
   release:
-    needs: binaries
+    needs: [binaries, tool-runtimes]
     # 仅在推送 tag（refs/tags/*）时创建 GitHub Release；手动触发时跳过。
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -113,14 +133,53 @@ jobs:
           pattern: pkg-*
           merge-multiple: true
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-tools-darwin-arm64-py311
+          path: release-tools/python-tools-darwin-arm64-py311
+      - name: Package optional offline Mac Python runtime
+        run: |
+          python3 - <<'PYTOOLS'
+          import hashlib, json, os, zipfile
+          from pathlib import Path
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          root = Path("release-tools/python-tools-darwin-arm64-py311")
+          index = json.loads((root / "wheelhouse-index.json").read_text())
+          assert index["platform"] == "darwin/arm64" and index["python"] == "3.11"
+          assert index["sources_sha256"] == hashlib.sha256(Path("packaging/python-tools-sources.json").read_bytes()).hexdigest()
+          target = Path("dist") / f"artex-python-tools-{version}-darwin-arm64-py311.zip"
+          with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+              for path in sorted(root.rglob("*")):
+                  assert not path.is_symlink(), "unexpected runtime symlink"
+                  if path.is_file():
+                      archive.write(path, path.relative_to(root.parent).as_posix())
+          PYTOOLS
       - name: Generate checksums
         working-directory: dist
         run: sha256sum *.zip > SHA256SUMS
+      - name: Sign checksums when this fork has a release key
+        if: ${{ vars.MINISIGN_PUBLIC_KEY != '' }}
+        working-directory: dist
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+          MINISIGN_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$MINISIGN_KEY"
+          curl -fsSL -o minisign.tar.gz https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  minisign.tar.gz" | sha256sum -c -
+          tar xzf minisign.tar.gz
+          umask 077
+          trap 'rm -f minisign.key' EXIT
+          printf '%s\n' "$MINISIGN_KEY" > minisign.key
+          ./minisign-linux/x86_64/minisign -S -s minisign.key -m SHA256SUMS
+          ./minisign-linux/x86_64/minisign -Vm SHA256SUMS -P "$MINISIGN_PUBLIC_KEY"
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.zip
             dist/SHA256SUMS
+            dist/*.minisig
           body_path: release-notes.md
 
   # ④ 多架构镜像 → 推 Docker Hub（复用 binaries 编好的 Linux 二进制，
@@ -153,7 +212,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: autumn27/artex
+          images: ${{ vars.DOCKER_IMAGE || 'hexsen929/artex' }}
           tags: |
             type=ref,event=tag
             type=raw,value=latest

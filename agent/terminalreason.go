@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -47,6 +48,7 @@ var reasonHint = map[harness.TerminalReason]string{
 // terminalText renders a terminal event with no final text into a compact summary
 // and a Markdown detail block.
 func terminalText(ctx context.Context, term *harness.Terminal, tr *runTrace) (string, string) {
+	term = normalizeCallTimeoutTerminal(ctx, term)
 	reason := term.Reason
 	aborted := reason == harness.ReasonAbortedStreaming || reason == harness.ReasonAbortedTools
 	// Prompt may return ctx.Err directly without a terminal event. Preserve the
@@ -116,6 +118,21 @@ func terminalText(ctx context.Context, term *harness.Terminal, tr *runTrace) (st
 		fmt.Fprintf(&b, "- **中断前最后一个工具**: `%s`（已正常返回）\n", tr.name)
 	}
 	return sum, b.String()
+}
+
+// A single model call can reach its own wall clock while the task context is
+// still live. Do not present that provider failure as the task's run budget.
+func normalizeCallTimeoutTerminal(ctx context.Context, term *harness.Terminal) *harness.Terminal {
+	if term == nil || ctx.Err() != nil {
+		return term
+	}
+	var callTimeout *CallTimeoutError
+	if !errors.As(term.Err, &callTimeout) {
+		return term
+	}
+	copy := *term
+	copy.Reason = harness.ReasonModelError
+	return &copy
 }
 
 func terminalReasonLabel(reason harness.TerminalReason) string {

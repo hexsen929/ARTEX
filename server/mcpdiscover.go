@@ -27,7 +27,20 @@ func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
 		if m.Command == "" {
 			return nil, fmt.Errorf("stdio 传输缺少命令")
 		}
-		return mcp.NewStdioClient(ctx, m.Name, m.Command, jsonStrMap(m.Env), jsonStrSlice(m.Args)...)
+		waitCtx, cancelWait := context.WithTimeout(ctx, 60*time.Second)
+		defer cancelWait()
+		release, err := jshookSlots.acquire(waitCtx, jshookLimit(m))
+		if err != nil {
+			return nil, fmt.Errorf("MCP %s 等待可用实例时终止: %w", m.Name, err)
+		}
+		startCtx, cancelStart := context.WithTimeout(ctx, 20*time.Second)
+		defer cancelStart()
+		cl, err := mcp.NewStdioClient(startCtx, m.Name, m.Command, jsonStrMap(m.Env), jsonStrSlice(m.Args)...)
+		if err != nil {
+			release()
+			return nil, fmt.Errorf("MCP %s 初始化失败（请检查启动配置、实例上限或服务端错误）: %w", m.Name, err)
+		}
+		return &leasedMCPClient{mcpClient: cl, release: release}, nil
 	case "http":
 		if m.URL == "" {
 			return nil, fmt.Errorf("http 传输缺少 URL")
@@ -47,20 +60,8 @@ func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
 // discoverAndCacheMCP connects to one MCP, lists its tools, and persists the tool
 // names to mcp_tools_cache so the UI shows them without a live connection.
 func (s *Server) discoverAndCacheMCP(ctx context.Context, m *db.MCPServer) error {
-	cl, err := connectMCP(ctx, m)
+	tools, err := cacheMCPMetadata(ctx, s.m.pg, m, true)
 	if err != nil {
-		return err
-	}
-	defer cl.Close()
-	ts, err := cl.Tools(ctx)
-	if err != nil {
-		return err
-	}
-	tools := make([]db.MCPTool, 0, len(ts))
-	for _, t := range ts {
-		tools = append(tools, db.MCPTool{Name: t.Name(), Description: t.Description()})
-	}
-	if err := s.m.pg.SaveMCPTools(m.ID, tools); err != nil {
 		return err
 	}
 	log.Printf("[mcp] %s 发现 %d 个工具并已缓存", m.Name, len(tools))
@@ -78,11 +79,15 @@ func (s *Server) discoverEmptyMCPsOnStartup() {
 		return
 	}
 	for _, m := range servers {
-		if !m.Enabled || len(m.Tools) > 0 {
+		if !m.Enabled {
+			continue
+		}
+		metadata, err := s.m.pg.MCPToolsDetailed(m.ID)
+		if err == nil && mcpSchemasReady(metadata) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(s.ctx, 90*time.Second)
-		if err := s.discoverAndCacheMCP(ctx, m); err != nil {
+		if _, err := cacheMCPMetadata(ctx, s.m.pg, m, false); err != nil {
 			log.Printf("[mcp] 启动自动发现 %s 失败: %v", m.Name, err)
 		}
 		cancel()

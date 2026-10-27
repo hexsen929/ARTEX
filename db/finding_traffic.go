@@ -336,6 +336,13 @@ type RecordedFinding struct {
 	FindingID int64           `json:"finding_id,string"`
 	NodeID    int64           `json:"finding_node_id,string"`
 	Traffic   *FindingTraffic `json:"traffic"`
+
+	// 档 A 同入口合并(db/finding_merge.go):命中既有 confirmed/pending finding
+	// 时不新增行/节点,Merged=true,MergedInto* 指向聚合目标(与
+	// FindingID/NodeID 相同,冗余字段只是让调用方无需比较即可判断走了合并)。
+	Merged              bool  `json:"merged"`
+	MergedIntoFindingID int64 `json:"merged_into_finding_id,string,omitempty"`
+	MergedIntoNodeID    int64 `json:"merged_into_node_id,string,omitempty"`
 }
 
 // ctx 由调用方传入本次事务所用的上下文（而非在内部取 context.Background）：
@@ -367,6 +374,21 @@ func RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, pre
 		}
 		if !ok {
 			return nil, errors.New("intent_id 必须是本任务的意图（关联任务意图只读）")
+		}
+	}
+	// Opt-in only: preserve every raw submission by default, and never combine
+	// records with different verification states or human verification notes.
+	var inlineMerge bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM settings WHERE key=$1 AND value IN ('true','1'))`, SettingFindingInlineMerge).Scan(&inlineMerge); err != nil {
+		return nil, err
+	}
+	if inlineMerge {
+		candidate, err := findMergeCandidateTx(tx, in)
+		if err != nil {
+			return nil, err
+		}
+		if candidate != nil {
+			return mergeFindingTx(tx, candidate, in, prepared)
 		}
 	}
 	payload, _ := json.Marshal(map[string]any{"verification_status": in.VerificationStatus, "verification_note": in.VerificationNote, "vulnclass": in.VulnClass, "name": in.Name, "severity": in.Severity, "summary": in.Summary, "evidence": map[string]any{"by": in.Worker, "poc": in.Evidence}})

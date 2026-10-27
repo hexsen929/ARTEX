@@ -141,6 +141,11 @@ func (s *Server) pgDeleteTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
+	numericID, _ := strconv.ParseInt(id, 10, 64)
+	if err := s.checkTaskIntranetArchive(r.Context(), numericID); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
 	if !s.beginTaskDelete(id) {
 		writeErr(w, http.StatusConflict, "任务正在删除")
 		return
@@ -163,6 +168,10 @@ func (s *Server) pgDeleteTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.drainTaskSideQuestions(drainCtx, id); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err := s.checkTaskIntranetArchive(drainCtx, numericID); err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -1870,6 +1879,7 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	s.registerEgressFingerprints()
 	// Editing a profile rebuilds any task pinned to it on its next round. Reapply
 	// the active profile too: the global fallback and explicit task chains must
 	// repopulate the same provider-cache entry and therefore share one limiter.
@@ -1935,6 +1945,7 @@ func (s *Server) pgDeleteProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.registerEgressFingerprints()
 	s.invalidateProfileAgents() // drop cached agents for the removed profile
 	s.llmHealth.Reset(id)       // its breaker state is meaningless now (row is FK-cascaded away)
 	s.restoreTasksAfterProfileDelete(pg)

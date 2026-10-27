@@ -5,13 +5,44 @@
 AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 
-🌐 **在线 Demo**： [https://artex-demo-ruoji6.vercel.app/](https://artex-demo-ruoji6.vercel.app/)
+🌐 **上游 Demo（不包含本分支新增工作流）**： [https://artex-demo-ruoji6.vercel.app/](https://artex-demo-ruoji6.vercel.app/)
 
-本 fork 保留 RuoJi6/ARTEX 的更新；v2.3.2 撤销 sharenjun/ARTEX-main 的整合。
+本 fork 保留 RuoJi6/ARTEX 的较新基线，以及 Codex、验证状态和 MCP 生命周期定制，并移植 ARTEX-ymh 的已实现内网工作流。
 
 </div>
 
 本仓库为 [hexsen929/ARTEX](https://github.com/hexsen929/ARTEX)，保留 [RuoJi6/ARTEX](https://github.com/RuoJi6/ARTEX) 的更新、原始提交历史与 AGPL-3.0 许可证。页面在线更新只读取本 fork 的 Releases。Docker 与 Demo 发布默认关闭。
+
+## ARTEX-ymh 工作流移植与升级提示
+
+本分支从 [`panda0x123/artex-ymh@48adc7f`](https://github.com/panda0x123/artex-ymh/tree/48adc7f1d8f62cbc47e658c9a2b47d6f63ca6cb1) 移植已实现的会话、隧道、任务代理、拓扑、凭据、范围审批、阶段移交、chains 与运维能力；保留当前日历、漏洞归并、独立验证状态、Codex 配置、LLM 搜索和按需 MCP 修复。功能与设计边界见 [README-FORK.md](README-FORK.md)。
+
+**升级前先暂停任务并停止 ARTEX/守护程序；只替换已通过云端构建与摘要校验的程序及随包资源，不覆盖已有 `config.json`、数据库、`data/` 或密钥。** 本项目维护工作流使用 GitHub Actions 编译、测试和五平台打包，不要求在本机安装构建依赖。
+
+### 门控访问变化
+
+- 原默认监听 `:8787` 保持不变；由于它是非 loopback 监听，新版默认启用伪装门控。Safari 继续访问原地址时可能先看到固定 nginx 欢迎页，而不是登录页。
+- 门控入口写入 `data/gate.path`，启动日志会提示入口；浏览器先访问该入口并完成门控，再进入原有登录/设置页面。文档中的入口形态为 `/g-<随机串>`，不要公开实际入口、口令、`gate.key` 或 `jwt.key`。
+- 已有管理员密码、JWT 密钥与可选 HTTP Basic Auth 均保留；门控不是替代原登录，也不会要求重建账户。`ARTEX_GATE=off` 可显式关闭门控；仅绑定 `127.0.0.1:8787` 时默认不启用门控。
+
+### 外部工具与 Mac ARM64
+
+会话/隧道能力依赖外部工具。程序包携带 `packaging/tools-manifest.json` 和检查逻辑，**不携带这些工具的二进制，不代表它们已经安装**。工具通常放在 `data/tools/`，或通过清单对应的路径环境变量指定；在工具页注册 `kind=shell` 表示可供 Agent 调用，不负责安装软件。
+
+安装或升级后可运行 `./artex doctor` 检查 PostgreSQL、LLM 配置、数据目录、工具存在性/摘要/平台、门控与回连配置。该命令不启动服务、不运行任务、不下载工具；数据目录可写性检查会创建并立即删除一个临时文件。
+
+清单按平台分别记录版本和摘要，Mac ARM64 成品工具、Python 独立环境与 Linux/Windows 目标资源通过专门的准备脚本部署，详见 [Mac 工具部署](packaging/MACOS-TOOLS.md)。目标资源不计作本机可执行工具；缺失、未钉版或平台不适配会分别提示。
+
+### Docker 密钥持久化
+
+源码构建使用 `docker-compose.source.yml`（默认 Dockerfile 为 `Dockerfile.source`）；常规 `docker-compose.yml` 继续保留本 fork 镜像变量。两个部署方式都将数据与私有密钥分别持久化，容器设置 `ARTEX_KEY_DIR=/app/keys`。
+
+**已有容器升级前，先保存其原 `/app/jwt.key` 并放入新的密钥挂载目录 `keys/jwt.key`。** 会话及凭据加密依赖此密钥：数据、数据库和原密钥必须配套保留。不要生成新 key 来“修复”旧凭据的解密错误；原生安装不设置 `ARTEX_KEY_DIR` 时仍使用程序原目录，不会搬动现有密钥。
+
+### 在线更新与可选发布签名
+
+更新源继续固定为 `hexsen929/ARTEX`，不会切换到引入功能的仓库。SHA256SUMS 完整性校验始终保留；默认兼容本 fork 已有的无签名 Release，并明确显示尚未校验发布签名。维护者配置 `MINISIGN_PUBLIC_KEY` 仓库变量与配对的 `MINISIGN_KEY` Secret 后，云端签署校验清单并将公钥编入程序；运维也可用 `ARTEX_UPDATE_PUBLIC_KEY` 固定公钥。配置公钥后，缺签名、错误签名或无效公钥均终止更新，不会静默降级。
+
 
 ---
 
@@ -116,24 +147,24 @@ cd ARTEX
 
 脚本会：检测 / 自动安装 Docker → 让你选 **① 全部 Docker** 或 **② 本地编译运行**：
 
-- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 自动写 `.env` → `docker compose up -d`。
+- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 自动写 `.env` → 使用 `docker-compose.source.yml` 从本仓库源码构建并启动。
 - **② 本地运行**：选数据库（连已有 / 用 Docker 起一个）→ 生成 `config.json` → `go` 编译内嵌单二进制 → 启动。
 
 装好后打开 **http://localhost:8787**（首次进入 `/setup` 设置管理员密码）。
 
-### 方式二：Docker Compose（手动）
+### 方式二：Docker Compose（源码模式）
 
 ```bash
 git clone https://github.com/hexsen929/ARTEX.git
 cd ARTEX
-cp .env.example .env          # 填 POSTGRES_PASSWORD、可选 ANTHROPIC_API_KEY
-docker compose up -d          # 拉取 ruoji6/artex 镜像 + postgres
-# → http://localhost:8787
+cp .env.example .env
+# 填 POSTGRES_PASSWORD；密钥目录 keys/ 与 data/ 都必须持久化。
+docker compose -f docker-compose.source.yml up -d --build
 ```
 
-镜像已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
+此模式使用本仓库的 `Dockerfile.source`，构建发生在 Docker 内，不会误拉上游原版镜像。它仍需要构建时间、网络与磁盘空间；本项目的本机维护默认使用 GitHub Actions 构建的程序包，而不是执行本地构建。门控开启后，请按启动日志或 `data/gate.path` 先进入门控，再访问登录页。
 
-`.env` 中默认 `ARTEX_IMAGE=hexsen929/artex`，`ARTEX_TAG=latest` 使用最新镜像，也可固定为 `v0.3.17`（完整镜像地址 `hexsen929/artex:v0.3.17`）。镜像支持 `linux/amd64` 和 `linux/arm64`，Docker 会自动选择与宿主机匹配的架构，ARM64 Kali 无需自行编译。初次部署请修改 `POSTGRES_PASSWORD`；运行服务无需配置 Docker Hub 发布 Token。
+`docker-compose.yml` 另保留预构建镜像模式：仅在维护者已经发布对应镜像时，设置自己的 `ARTEX_IMAGE` 和实际存在的 `ARTEX_TAG` 后使用。镜像发布在本 fork 默认关闭，不能假设 `hexsen929/artex:latest` 已存在或已包含本次移植，也不要用上游原版镜像冒充本分支。已有 `skills`、`data`、数据库卷和 `keys` 挂载必须保留。
 
 远程 MCP 可在系统设置中选择 `http`（Streamable HTTP）或 `sse`（旧版 SSE）。
 旧版 SSE 服务通常使用 `GET /sse` 建立事件流，再通过服务返回的
@@ -212,9 +243,9 @@ git tag v0.3.17
 git push origin v0.3.17
 ```
 
-工作流固定标签对应的提交，用 Node.js 22 导出前端，按照 `go.mod` 指定的 Go 版本编译内嵌前端的五个平台程序，并生成 ZIP 与 `SHA256SUMS`。AMD64 和 ARM64 镜像分别在 GitHub 原生 runner 上构建，连接临时 PostgreSQL 验证程序启动、版本和内嵌前端；两种架构都通过后发布多架构镜像的版本标签与 `latest`。镜像发布成功后上传完整 ZIP 和校验文件，最后公开 Release。已公开的同版本不允许覆盖，应发布新标签。
+工作流固定构建提交，先运行独立的 Go 编译、带隔离 PostgreSQL 的全量回归和前端单测/类型检查/静态构建；全部成功后生成内嵌前端的五个平台 ZIP。推送版本标签时创建 Release 并生成 `SHA256SUMS`；手动构建只保存 Actions 安装包，不自动公开正式 Release。Docker 镜像是另行显式开启的发布分支，不应将程序包构建通过等同于所有容器运行场景均已验证。已公开的同版本不应覆盖，应发布新标签。
 
-维护者需在本仓库 Settings → Secrets and variables → Actions 中配置变量 `ARTEX_DOCKER_IMAGE`（Docker Hub 用户名/镜像名）和 Secrets `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`（有镜像推送权限）。程序包通过 GitHub 自带 `GITHUB_TOKEN` 上传，镜像通过上述凭据推送到 Docker Hub。凭据只供工作流登录使用，不写入源码或镜像。镜像地址同时记录在 `.env.example` 和 Compose 默认值中。
+需要发布 Docker 镜像时，维护者另设置 `PUBLISH_DOCKER=true`，并在本仓库 Settings → Secrets and variables → Actions 中配置变量 `DOCKER_IMAGE`（Docker Hub 用户名/镜像名）和 Secrets `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`（有镜像推送权限）。程序包通过 GitHub 自带 `GITHUB_TOKEN` 上传，镜像通过上述凭据推送到 Docker Hub。凭据只供工作流登录使用，不写入源码或镜像。镜像地址同时记录在 `.env.example` 和 Compose 默认值中。
 
 ### 已有 Docker 部署迁移到本仓库镜像
 
@@ -232,11 +263,12 @@ services:
 ```bash
 docker compose pull artex
 docker compose up -d --no-deps artex
-curl --fail http://127.0.0.1:8787/api/health
+
+# 门控开启时先访问门控入口；无 cookie 的 /api/health 可能只是欢迎页，不能据此证明版本。
 docker compose logs --tail=50 artex
 ```
 
-继续使用原部署目录和 Compose 项目名称，确保 `./data`、`./skills` 和 PostgreSQL 数据卷仍指向原数据。迁移后程序从 `RuoJi6/ARTEX` 检查在线更新；后续可用页面更新程序或上述命令更新整个镜像。
+继续使用原部署目录和 Compose 项目名称，确保 `./data`、`./skills` 和 PostgreSQL 数据卷仍指向原数据。迁移后程序从 `hexsen929/ARTEX` 检查在线更新；页面更新仅替换程序，不同步 skills、工具或部署脚本。从旧版本首次迁移到 2.4.1 时，还需从完整安装包合并新增 `skills/chains-*` 和 `packaging/` 资源，保留已有自定义文件；容器的 skills 挂载也需补齐对应资源。
 
 首次迁移已有 Docker 部署时，将已校验的新 ARM64 ZIP 解压到宿主机，备份原程序，然后只替换已有容器中的 `/app/artex`。例如现有容器名为 `artex-artex-1`：
 
@@ -629,4 +661,4 @@ https://github.com/oritera/Cairn
 
 Worker 可调用 `record_intelligence`，或在 `record_fact` 的单条/批量事实中附带 `intelligence` 数组一起提交。`insert_assets` 本次提交的服务 `auth` 自动登记为未验证凭据，避免重复上报。任务、执行节点由系统绑定，记录需要真实来源证据；获取凭据不等于登录成功。
 
-页面支持分类、标题/上报者搜索、状态筛选、分页、状态更新及来源查看。凭据、敏感数据的正文和来源证据直接展示在列表及详情中，无需额外点击显示。直接关联任务的记录标明继承且只读；在资产页选择一项资产后点击「关联情报」可查看同一份记录。情报随任务归档、恢复和删除；新版归档格式为 v4，仍支持读取 v1–v3。此功能不自动补提取历史会话。
+页面支持分类、标题/上报者搜索、状态筛选、分页、状态更新及来源查看。凭据、敏感数据的正文和来源证据直接展示在列表及详情中，无需额外点击显示。直接关联任务的记录标明继承且只读；在资产页选择一项资产后点击「关联情报」可查看同一份记录。情报随任务归档、恢复和删除；新版归档格式为 v5，兼容读取 v1–v5。此功能不自动补提取历史会话。

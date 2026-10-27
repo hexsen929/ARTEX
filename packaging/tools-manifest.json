@@ -1,0 +1,1181 @@
+{
+  "_comment": "ARTEX 外部工具清单。path 相对 data 目录；execution=host 使用本机平台 variant，execution=target 按目标平台分别保存和检查。variants 下载记录中的 SHA256 是官方发布归档/原文件校验值；解包后二进制 SHA256 由 prepare-tools.py 写入部署本地清单。空 SHA 表示未钉版，不将归档 SHA 冒充二进制 SHA。Python 工具在独立环境部署。下载脚本默认只读计划，--install 才写入；不编译源码。",
+  "tools": [
+    {
+      "name": "suo5",
+      "purpose": "HTTP 隧道 CLI：目标无出网时经 webshell payload 建 socks5",
+      "version": "",
+      "platform": "linux/amd64",
+      "sha256": "629dc3e537d611e2da7e5e0274900213e817d4057b344e6cb82bd95dee937d3b",
+      "path": "tools/suo5",
+      "env": "ARTEX_SUO5_PATH",
+      "category": "tunnel",
+      "execution": "host",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/suo5",
+          "version": "2.2.0",
+          "sha256": "f5681a08ed2a5bbe8223584f3b827a09cf65878864685b862120dd010961a9f4",
+          "download": {
+            "url": "https://github.com/zema1/suo5/releases/download/v2.2.0/suo5-darwin-arm64",
+            "sha256": "f5681a08ed2a5bbe8223584f3b827a09cf65878864685b862120dd010961a9f4",
+            "size": 11019778,
+            "format": "raw"
+          }
+        },
+        {
+          "platform": "darwin/amd64",
+          "path": "tools/suo5",
+          "version": "2.2.0",
+          "sha256": "f8fef1c1c9e9208fa34331829d5b146e217e1763782134ae5edf7a682fea92a9",
+          "download": {
+            "url": "https://github.com/zema1/suo5/releases/download/v2.2.0/suo5-darwin-amd64",
+            "sha256": "f8fef1c1c9e9208fa34331829d5b146e217e1763782134ae5edf7a682fea92a9",
+            "size": 11819312,
+            "format": "raw"
+          }
+        },
+        {
+          "platform": "linux/amd64",
+          "path": "tools/suo5",
+          "version": "2.2.0",
+          "sha256": "629dc3e537d611e2da7e5e0274900213e817d4057b344e6cb82bd95dee937d3b",
+          "download": {
+            "url": "https://github.com/zema1/suo5/releases/download/v2.2.0/suo5-linux-amd64",
+            "sha256": "629dc3e537d611e2da7e5e0274900213e817d4057b344e6cb82bd95dee937d3b",
+            "size": 11456674,
+            "format": "raw"
+          }
+        },
+        {
+          "platform": "linux/arm64",
+          "path": "tools/suo5",
+          "version": "2.2.0",
+          "sha256": "06ce70daa0b33a2abfbac790a8923df732dcd2b524a107763b8ac77df4fc6842",
+          "download": {
+            "url": "https://github.com/zema1/suo5/releases/download/v2.2.0/suo5-linux-arm64",
+            "sha256": "06ce70daa0b33a2abfbac790a8923df732dcd2b524a107763b8ac77df4fc6842",
+            "size": 10616994,
+            "format": "raw"
+          }
+        },
+        {
+          "platform": "windows/amd64",
+          "path": "tools/suo5.exe",
+          "version": "2.2.0",
+          "sha256": "e0e83bbcdae5bddc0cf1367207f454b32b6c110ebfa2a46589c18932fdb946ac",
+          "download": {
+            "url": "https://github.com/zema1/suo5/releases/download/v2.2.0/suo5-windows-amd64.exe",
+            "sha256": "e0e83bbcdae5bddc0cf1367207f454b32b6c110ebfa2a46589c18932fdb946ac",
+            "size": 11940352,
+            "format": "raw"
+          }
+        }
+      ]
+    },
+    {
+      "name": "suo5-payloads",
+      "purpose": "suo5 的 webshell payload 目录（suo5.jsp/php/aspx，按会话语言选用）",
+      "version": "",
+      "platform": "any",
+      "sha256": "",
+      "path": "tools/suo5-payloads",
+      "env": "ARTEX_SUO5_PAYLOADS_DIR",
+      "category": "tunnel",
+      "execution": "target",
+      "resources": [
+        {
+          "name": "suo5-php",
+          "path": "tools/suo5-payloads/suo5.php",
+          "platform": "any",
+          "version": "2.2.0",
+          "sha256": "fd324c46f155c49f843429171b7aeabaf93f07474c0f58f937d8d3f2666fe883",
+          "download": {
+            "url": "https://raw.githubusercontent.com/zema1/suo5/v2.2.0/assets/php/suo5.php",
+            "sha256": "fd324c46f155c49f843429171b7aeabaf93f07474c0f58f937d8d3f2666fe883",
+            "size": 34669,
+            "format": "raw"
+          }
+        },
+        {
+          "name": "suo5-jsp",
+          "path": "tools/suo5-payloads/suo5.jsp",
+          "platform": "any",
+          "version": "2.2.0",
+          "sha256": "dce872632388cd739190e1c7ffbb48beb89d8653e44ffa805852a2857699f13f",
+          "download": {
+            "url": "https://raw.githubusercontent.com/zema1/suo5/v2.2.0/assets/java/suo5.jsp",
+            "sha256": "dce872632388cd739190e1c7ffbb48beb89d8653e44ffa805852a2857699f13f",
+            "size": 46753,
+            "format": "raw"
+          }
+        },
+        {
+          "name": "suo5-aspx",
+          "path": "tools/suo5-payloads/suo5.aspx",
+          "platform": "any",
+          "version": "2.2.0",
+          "sha256": "6e159e3e0ee8d5dc17a26b89c985761e35f0c52c0702027b88d8c5f8135d21af",
+          "download": {
+            "url": "https://raw.githubusercontent.com/zema1/suo5/v2.2.0/assets/dotnet/suo5.aspx",
+            "sha256": "6e159e3e0ee8d5dc17a26b89c985761e35f0c52c0702027b88d8c5f8135d21af",
+            "size": 43633,
+            "format": "raw"
+          }
+        }
+      ]
+    },
+    {
+      "name": "chisel",
+      "purpose": "反向 TCP 隧道：目标能出网时建反向 socks5 / 单端口转发",
+      "version": "",
+      "platform": "linux/amd64",
+      "sha256": "b84450974bd3f1fc5dc09ec0edeec50647df81716e305ef391c9115c751aab17",
+      "path": "tools/chisel",
+      "env": "ARTEX_CHISEL_PATH",
+      "category": "tunnel",
+      "execution": "host",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/chisel",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_darwin_arm64.gz",
+            "sha256": "707a4b932eea214765146504a0df246cefc415b4297af65a80dd67cf69ba85a9",
+            "size": 4433894,
+            "format": "gz"
+          }
+        },
+        {
+          "platform": "darwin/amd64",
+          "path": "tools/chisel",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_darwin_amd64.gz",
+            "sha256": "4aeae36c867f11c8e8c3f2b913a0e063ea3c6d29e1c14a52ed2e6eef8cfc4395",
+            "size": 4810408,
+            "format": "gz"
+          }
+        },
+        {
+          "platform": "linux/amd64",
+          "path": "tools/chisel",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_linux_amd64.gz",
+            "sha256": "f3f180f1d93aa72cce4e6386f98cc06569a0146fbd65eb4423cf83e6434bcfe6",
+            "size": 4724737,
+            "format": "gz"
+          }
+        },
+        {
+          "platform": "linux/arm64",
+          "path": "tools/chisel",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_linux_arm64.gz",
+            "sha256": "2ec6152cd2c74fe0146d4d79e4e7aa174521368c56e433d55e023a92ea404ec3",
+            "size": 4265191,
+            "format": "gz"
+          }
+        },
+        {
+          "platform": "windows/amd64",
+          "path": "tools/chisel.exe",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_windows_amd64.zip",
+            "sha256": "600a8ad6f03bc7f6d285fd01ab6a3f8a657204adaafa5666ade9451d18df1ebc",
+            "size": 4873570,
+            "format": "zip",
+            "member": "chisel.exe"
+          }
+        }
+      ]
+    },
+    {
+      "name": "gogo",
+      "purpose": "内网端口扫描与服务识别（红队向，低噪声；端口参数 -p 1-1000，预设名为 top1/top2）",
+      "version": "",
+      "platform": "linux/amd64",
+      "sha256": "3b51080a909023f7d484e2443740b572307ce0054eb9e32d98f0a06bfcd2db90",
+      "path": "tools/gogo",
+      "env": "",
+      "category": "arsenal",
+      "execution": "host",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/gogo",
+          "version": "2.15.0",
+          "sha256": "1f705ca1065191c5bdfbadf5722e69c85a6640a45de67a83e4fb6f1b9064cdca",
+          "download": {
+            "url": "https://github.com/chainreactors/gogo/releases/download/v2.15.0/gogo_darwin_arm64",
+            "sha256": "1f705ca1065191c5bdfbadf5722e69c85a6640a45de67a83e4fb6f1b9064cdca",
+            "size": 11461410,
+            "format": "raw"
+          }
+        },
+        {
+          "platform": "darwin/amd64",
+          "path": "tools/gogo",
+          "version": "2.15.0",
+          "sha256": "7006f48316d79c311119b8942e30c5624835043ee09c7a565ec5a7ef173d8215",
+          "download": {
+            "url": "https://github.com/chainreactors/gogo/releases/download/v2.15.0/gogo_darwin_amd64",
+            "sha256": "7006f48316d79c311119b8942e30c5624835043ee09c7a565ec5a7ef173d8215",
+            "size": 10932128,
+            "format": "raw"
+          }
+        },
+        {
+          "platform": "linux/amd64",
+          "path": "tools/gogo",
+          "version": "2.15.0",
+          "sha256": "3b51080a909023f7d484e2443740b572307ce0054eb9e32d98f0a06bfcd2db90",
+          "download": {
+            "url": "https://github.com/chainreactors/gogo/releases/download/v2.15.0/gogo_linux_amd64",
+            "sha256": "3b51080a909023f7d484e2443740b572307ce0054eb9e32d98f0a06bfcd2db90",
+            "size": 4340260,
+            "format": "raw"
+          }
+        },
+        {
+          "platform": "linux/arm64",
+          "path": "tools/gogo",
+          "version": "2.15.0",
+          "sha256": "f34e248bc1d0f8e18101655850082b9f48f5f9f5a102cbac107086f3798c20a9",
+          "download": {
+            "url": "https://github.com/chainreactors/gogo/releases/download/v2.15.0/gogo_linux_arm64",
+            "sha256": "f34e248bc1d0f8e18101655850082b9f48f5f9f5a102cbac107086f3798c20a9",
+            "size": 10223616,
+            "format": "raw"
+          }
+        },
+        {
+          "platform": "windows/amd64",
+          "path": "tools/gogo.exe",
+          "version": "2.15.0",
+          "sha256": "c3f56039ca1b647d2f64a4c541877638d8d39631eeea7a23f9595cf578a46d87",
+          "download": {
+            "url": "https://github.com/chainreactors/gogo/releases/download/v2.15.0/gogo_windows_amd64.exe",
+            "sha256": "c3f56039ca1b647d2f64a4c541877638d8d39631eeea7a23f9595cf578a46d87",
+            "size": 4307456,
+            "format": "raw"
+          }
+        }
+      ]
+    },
+    {
+      "name": "naabu",
+      "purpose": "快速端口扫描（projectdiscovery）",
+      "version": "",
+      "platform": "linux/amd64",
+      "sha256": "6c0aac4253aebe95bbc13d4712a5f8caf7db9c9b62d6bc1fb4c56594cfa45165",
+      "path": "tools/naabu",
+      "env": "",
+      "category": "arsenal",
+      "execution": "host",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/naabu",
+          "version": "2.6.1",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/naabu/releases/download/v2.6.1/naabu_2.6.1_macOS_arm64.zip",
+            "sha256": "2f3a100210ddd42d8cf49ae30210c9823488b4687e2b7a869ab0ffc64b26cfba",
+            "size": 11443993,
+            "format": "zip",
+            "member": "naabu"
+          }
+        },
+        {
+          "platform": "darwin/amd64",
+          "path": "tools/naabu",
+          "version": "2.6.1",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/naabu/releases/download/v2.6.1/naabu_2.6.1_macOS_amd64.zip",
+            "sha256": "b26e2d7fb91b833ac38cb7abb810cb8af6e7f6489a1c298cb63e584cd1f890a2",
+            "size": 12104192,
+            "format": "zip",
+            "member": "naabu"
+          }
+        },
+        {
+          "platform": "linux/amd64",
+          "path": "tools/naabu",
+          "version": "2.6.1",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/naabu/releases/download/v2.6.1/naabu_2.6.1_linux_amd64.zip",
+            "sha256": "018c4c9884dea971eda860435ede3021d1150732f34cfd245498c6726d8cab90",
+            "size": 11858775,
+            "format": "zip",
+            "member": "naabu"
+          }
+        },
+        {
+          "platform": "linux/arm64",
+          "path": "tools/naabu",
+          "version": "2.6.1",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/naabu/releases/download/v2.6.1/naabu_2.6.1_linux_arm64.zip",
+            "sha256": "3adc2bb2395c3efff89623499b20eea66ef54924c485d3ae86762393a31736ea",
+            "size": 10945734,
+            "format": "zip",
+            "member": "naabu"
+          }
+        },
+        {
+          "platform": "windows/amd64",
+          "path": "tools/naabu.exe",
+          "version": "2.6.1",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/naabu/releases/download/v2.6.1/naabu_2.6.1_windows_amd64.zip",
+            "sha256": "4efaa341f36a0c6e676164f75e2d93d5a72f4090d690fd1bc293f5a4b79c202b",
+            "size": 12042383,
+            "format": "zip",
+            "member": "naabu.exe"
+          }
+        }
+      ]
+    },
+    {
+      "name": "httpx",
+      "purpose": "HTTP 服务探活与指纹/标题识别（projectdiscovery）",
+      "version": "",
+      "platform": "linux/amd64",
+      "sha256": "6d78b83b4da452a7e0bd3613c4fae04cbf523209f083904b563f4d4406a680b0",
+      "path": "tools/httpx",
+      "env": "",
+      "category": "arsenal",
+      "execution": "host",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/httpx",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/httpx/releases/download/v1.12.0/httpx_1.12.0_macOS_arm64.zip",
+            "sha256": "21d60328b383dba8a9fe249ac76b12edda4ec2e52a9cb21876c0a79123675569",
+            "size": 18856626,
+            "format": "zip",
+            "member": "httpx"
+          }
+        },
+        {
+          "platform": "darwin/amd64",
+          "path": "tools/httpx",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/httpx/releases/download/v1.12.0/httpx_1.12.0_macOS_amd64.zip",
+            "sha256": "16760b5e2122b66f57b9fbdb59f564b1181507c093d6a36066f40e5de38e8fa9",
+            "size": 19702544,
+            "format": "zip",
+            "member": "httpx"
+          }
+        },
+        {
+          "platform": "linux/amd64",
+          "path": "tools/httpx",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/httpx/releases/download/v1.12.0/httpx_1.12.0_linux_amd64.zip",
+            "sha256": "9d8439e8b6c9aa7d1e2314817a392e00d5178da3af5652f7475f88868f418f76",
+            "size": 19200026,
+            "format": "zip",
+            "member": "httpx"
+          }
+        },
+        {
+          "platform": "linux/arm64",
+          "path": "tools/httpx",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/httpx/releases/download/v1.12.0/httpx_1.12.0_linux_arm64.zip",
+            "sha256": "fd7b123c1dfbc3d69f19f524e4eebcd6ec06b9a6cbd56813c76f11645197331e",
+            "size": 17927774,
+            "format": "zip",
+            "member": "httpx"
+          }
+        },
+        {
+          "platform": "windows/amd64",
+          "path": "tools/httpx.exe",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/httpx/releases/download/v1.12.0/httpx_1.12.0_windows_amd64.zip",
+            "sha256": "14d8ccaa2d95ce9365162682f1a2ba3f14d2000bb4bfb0924af65ec5163ae021",
+            "size": 18633379,
+            "format": "zip",
+            "member": "httpx.exe"
+          }
+        }
+      ]
+    },
+    {
+      "name": "katana",
+      "purpose": "Web 爬虫与端点发现（projectdiscovery）",
+      "version": "",
+      "platform": "linux/amd64",
+      "sha256": "2dd9024907d656235409dea7aac18d3cdd88f8a8da332494113a69bff4c295d6",
+      "path": "tools/katana",
+      "env": "",
+      "category": "arsenal",
+      "execution": "host",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/katana",
+          "version": "1.8.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/katana/releases/download/v1.8.0/katana_1.8.0_macOS_arm64.zip",
+            "sha256": "52e9802e9f83012a089fe57fb1ac476b936f181ac033c71bfa55f913c07cede6",
+            "size": 31574229,
+            "format": "zip",
+            "member": "katana"
+          }
+        },
+        {
+          "platform": "darwin/amd64",
+          "path": "tools/katana",
+          "version": "1.8.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/katana/releases/download/v1.8.0/katana_1.8.0_macOS_amd64.zip",
+            "sha256": "806256316dd45e0fe0e3985fd7283ddffc376c95cbaa3dcfd14cde6e1de61aaf",
+            "size": 32433462,
+            "format": "zip",
+            "member": "katana"
+          }
+        },
+        {
+          "platform": "linux/amd64",
+          "path": "tools/katana",
+          "version": "1.8.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/katana/releases/download/v1.8.0/katana_1.8.0_linux_amd64.zip",
+            "sha256": "cb027ae99d0757061b70c07a15c7a80f62c5a535ab52c4a329f80c4b0a7309d2",
+            "size": 31910234,
+            "format": "zip",
+            "member": "katana"
+          }
+        },
+        {
+          "platform": "linux/arm64",
+          "path": "tools/katana",
+          "version": "1.8.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/katana/releases/download/v1.8.0/katana_1.8.0_linux_arm64.zip",
+            "sha256": "80e269210727a855511ffac8dfb01297b2344742acec71a35e8ba4a67a90f0f2",
+            "size": 30527878,
+            "format": "zip",
+            "member": "katana"
+          }
+        },
+        {
+          "platform": "windows/amd64",
+          "path": "tools/katana.exe",
+          "version": "1.8.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/katana/releases/download/v1.8.0/katana_1.8.0_windows_amd64.zip",
+            "sha256": "8013253e3092e08524527a5c3f7ebd70747acc4bb51414858f8e6dffeb17f907",
+            "size": 17224143,
+            "format": "zip",
+            "member": "katana.exe"
+          }
+        }
+      ]
+    },
+    {
+      "name": "fscan",
+      "purpose": "内网综合扫描：端口/服务/弱口令一把梭",
+      "version": "",
+      "platform": "linux/amd64",
+      "sha256": "b811e80f18b900458a264df5eab5b8515e48a50ca06810722fbb823aa109e76b",
+      "path": "tools/fscan",
+      "env": "",
+      "category": "arsenal",
+      "execution": "host",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/fscan",
+          "version": "2.2.2",
+          "sha256": "eca58aa1c1fe7fc43e48478a907be40f1b8627c39674a0365c2aa67b83377418",
+          "download": {
+            "url": "https://github.com/shadow1ng/fscan/releases/download/v2.2.2/fscan_2.2.2_mac_arm64",
+            "sha256": "eca58aa1c1fe7fc43e48478a907be40f1b8627c39674a0365c2aa67b83377418",
+            "size": 26855026,
+            "format": "raw"
+          }
+        },
+        {
+          "platform": "linux/arm64",
+          "path": "tools/fscan",
+          "version": "2.2.2",
+          "sha256": "cfa5a78adc0b310811af11c0b9bdaaeda0d8443d271ad2c0b28b8b52064eb9fe",
+          "download": {
+            "url": "https://github.com/shadow1ng/fscan/releases/download/v2.2.2/fscan_2.2.2_linux_arm64",
+            "sha256": "cfa5a78adc0b310811af11c0b9bdaaeda0d8443d271ad2c0b28b8b52064eb9fe",
+            "size": 7522200,
+            "format": "raw"
+          }
+        },
+        {
+          "platform": "windows/amd64",
+          "path": "tools/fscan.exe",
+          "version": "2.2.2",
+          "sha256": "34973a25a3d67077fccd687a46bf6ad737ecac7ea6133a5993915901f193114a",
+          "download": {
+            "url": "https://github.com/shadow1ng/fscan/releases/download/v2.2.2/fscan_2.2.2_windows_x64.exe",
+            "sha256": "34973a25a3d67077fccd687a46bf6ad737ecac7ea6133a5993915901f193114a",
+            "size": 8785920,
+            "format": "raw"
+          }
+        }
+      ]
+    },
+    {
+      "name": "impacket",
+      "purpose": "Windows 协议工具集（psexec/wmiexec/secretsdump 等，Python venv；目录条目只查存在性）",
+      "version": "",
+      "platform": "any",
+      "sha256": "",
+      "path": "tools/impacket",
+      "env": "",
+      "category": "arsenal",
+      "execution": "host"
+    },
+    {
+      "name": "mimikatz",
+      "purpose": "Windows 凭据提取（目标侧投递执行）",
+      "version": "2.2.0-20220919",
+      "platform": "windows/amd64",
+      "sha256": "",
+      "path": "tools/targets/windows-amd64/mimikatz.exe",
+      "env": "",
+      "category": "arsenal",
+      "execution": "target",
+      "download": {
+        "url": "https://github.com/gentilkiwi/mimikatz/releases/download/2.2.0-20220919/mimikatz_trunk.zip",
+        "sha256": "7accd179e8a6b2fc907e7e8d087c52a7f48084852724b03d25bebcada1acbca5",
+        "size": 1206166,
+        "format": "zip",
+        "member": "x64/mimikatz.exe"
+      }
+    },
+    {
+      "name": "pypykatz",
+      "purpose": "Python 版 Windows 凭据提取（离线解析 LSASS dump；venv 入口符号链接）",
+      "version": "",
+      "platform": "linux/amd64",
+      "sha256": "0731985baf74e712365dccefc3b164f69df655db1a8ef7a02464ca776a2c8eef",
+      "path": "tools/pypykatz",
+      "env": "",
+      "category": "arsenal",
+      "execution": "host"
+    },
+    {
+      "name": "laZagne",
+      "purpose": "本机保存密码批量提取（浏览器/邮件/WiFi 等，目标侧投递执行）",
+      "version": "2.4.7",
+      "platform": "windows/amd64",
+      "sha256": "dc06d62ee95062e714f2566c95b8edaabfd387023b1bf98a09078b84007d5268",
+      "path": "tools/targets/windows-amd64/LaZagne.exe",
+      "env": "",
+      "category": "arsenal",
+      "execution": "target",
+      "download": {
+        "url": "https://github.com/AlessandroZ/LaZagne/releases/download/v2.4.7/LaZagne.exe",
+        "sha256": "dc06d62ee95062e714f2566c95b8edaabfd387023b1bf98a09078b84007d5268",
+        "size": 10136093,
+        "format": "raw"
+      }
+    },
+    {
+      "name": "ligolo-agent",
+      "purpose": "ligolo-ng 反向隧道 agent（目标侧运行，TUN 组网）",
+      "version": "",
+      "platform": "linux/amd64",
+      "sha256": "6cd8afcfe41d4ea405b51f73bbd9e9088f0e8c3ae1bd2a2faf377aeca1de52d6",
+      "path": "tools/ligolo-agent",
+      "env": "",
+      "category": "arsenal",
+      "execution": "target",
+      "variants": [
+        {
+          "platform": "linux/amd64",
+          "path": "tools/targets/linux-amd64/ligolo-agent",
+          "version": "0.9.2",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/nicocha30/ligolo-ng/releases/download/v0.9.2/ligolo-ng_agent_0.9.2_linux_amd64.tar.gz",
+            "sha256": "714534917a4a58812669619667cc57dfad03d34d0de5b0d7c468d76819f84111",
+            "size": 3001516,
+            "format": "tar.gz",
+            "member": "agent"
+          }
+        },
+        {
+          "platform": "linux/arm64",
+          "path": "tools/targets/linux-arm64/ligolo-agent",
+          "version": "0.9.2",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/nicocha30/ligolo-ng/releases/download/v0.9.2/ligolo-ng_agent_0.9.2_linux_arm64.tar.gz",
+            "sha256": "94c5d3b1eca9f352a770599c0e4487299d832e6de2dad891dbd2041d56a0fd7d",
+            "size": 2730101,
+            "format": "tar.gz",
+            "member": "agent"
+          }
+        },
+        {
+          "platform": "windows/amd64",
+          "path": "tools/targets/windows-amd64/ligolo-agent.exe",
+          "version": "0.9.2",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/nicocha30/ligolo-ng/releases/download/v0.9.2/ligolo-ng_agent_0.9.2_windows_amd64.zip",
+            "sha256": "bf1e02df68f5bbae9fb8da65f423f0da1537381298730d943cc7dc2fa95cdd39",
+            "size": 3063723,
+            "format": "zip",
+            "member": "agent.exe"
+          }
+        },
+        {
+          "platform": "windows/arm64",
+          "path": "tools/targets/windows-arm64/ligolo-agent.exe",
+          "version": "0.9.2",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/nicocha30/ligolo-ng/releases/download/v0.9.2/ligolo-ng_agent_0.9.2_windows_arm64.zip",
+            "sha256": "bdafeea11473633de4e8aef8ac8a1a5c648b31012946be870bff9f613c693eb1",
+            "size": 2750347,
+            "format": "zip",
+            "member": "agent.exe"
+          }
+        },
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/targets/darwin-arm64/ligolo-agent",
+          "version": "0.9.2",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/nicocha30/ligolo-ng/releases/download/v0.9.2/ligolo-ng_agent_0.9.2_darwin_arm64.tar.gz",
+            "sha256": "9a1c156ba21207d3847b607443e012537d9ec9ea2d353c33a6ade646a323ad10",
+            "size": 2819417,
+            "format": "tar.gz",
+            "member": "agent"
+          }
+        },
+        {
+          "platform": "darwin/amd64",
+          "path": "tools/targets/darwin-amd64/ligolo-agent",
+          "version": "0.9.2",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/nicocha30/ligolo-ng/releases/download/v0.9.2/ligolo-ng_agent_0.9.2_darwin_amd64.tar.gz",
+            "sha256": "74ac8677b2a4e93bea19d22239d609f542f0892c502e4613921fdd179b94524c",
+            "size": 3030326,
+            "format": "tar.gz",
+            "member": "agent"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ligolo-proxy",
+      "purpose": "ligolo-ng 反向隧道 proxy（攻击机侧运行，TUN 组网）",
+      "version": "",
+      "platform": "linux/amd64",
+      "sha256": "df5e9be9a9156f11401928f2b5cb64b6abea2958dd61b8c249846a965849250c",
+      "path": "tools/ligolo-proxy",
+      "env": "",
+      "category": "arsenal",
+      "execution": "host",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/ligolo-proxy",
+          "version": "0.9.2",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/nicocha30/ligolo-ng/releases/download/v0.9.2/ligolo-ng_proxy_0.9.2_darwin_arm64.tar.gz",
+            "sha256": "00f2a60e6c9ddfaa5c921e86f270ce33a1447ae52d24b35a352143fb529d3e94",
+            "size": 7454602,
+            "format": "tar.gz",
+            "member": "proxy"
+          }
+        },
+        {
+          "platform": "darwin/amd64",
+          "path": "tools/ligolo-proxy",
+          "version": "0.9.2",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/nicocha30/ligolo-ng/releases/download/v0.9.2/ligolo-ng_proxy_0.9.2_darwin_amd64.tar.gz",
+            "sha256": "94f395296b824d2f9e6aa9791f6afab5ae59d0fda62f874f3a22e0cb572ba9d0",
+            "size": 7966819,
+            "format": "tar.gz",
+            "member": "proxy"
+          }
+        },
+        {
+          "platform": "linux/amd64",
+          "path": "tools/ligolo-proxy",
+          "version": "0.9.2",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/nicocha30/ligolo-ng/releases/download/v0.9.2/ligolo-ng_proxy_0.9.2_linux_amd64.tar.gz",
+            "sha256": "6c683c403502d366276595197749e620c975908dae7314c21079ec8ebee4e5d0",
+            "size": 8003730,
+            "format": "tar.gz",
+            "member": "proxy"
+          }
+        },
+        {
+          "platform": "linux/arm64",
+          "path": "tools/ligolo-proxy",
+          "version": "0.9.2",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/nicocha30/ligolo-ng/releases/download/v0.9.2/ligolo-ng_proxy_0.9.2_linux_arm64.tar.gz",
+            "sha256": "6430178776bb9efc451a62f6c468fa482c2aded84d10f64f637bfabd0fd8e7ac",
+            "size": 7316466,
+            "format": "tar.gz",
+            "member": "proxy"
+          }
+        },
+        {
+          "platform": "windows/amd64",
+          "path": "tools/ligolo-proxy.exe",
+          "version": "0.9.2",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/nicocha30/ligolo-ng/releases/download/v0.9.2/ligolo-ng_proxy_0.9.2_windows_amd64.zip",
+            "sha256": "992d7186f7eed691cfd59332ff18b263bf390f4f6e631660c77bce0d2b94bb0b",
+            "size": 8034115,
+            "format": "zip",
+            "member": "proxy.exe"
+          }
+        }
+      ]
+    },
+    {
+      "name": "peass",
+      "purpose": "权限提升枚举脚本集（linpeas/winpeas，目录条目）",
+      "version": "",
+      "platform": "any",
+      "sha256": "",
+      "path": "tools/peass",
+      "env": "",
+      "category": "arsenal",
+      "execution": "target",
+      "resources": [
+        {
+          "name": "peass-linpeas.sh",
+          "platform": "any",
+          "path": "tools/peass/linpeas.sh",
+          "version": "20261026-7db7cb7e",
+          "sha256": "d09482ffc38350f50f286aba5ad71d710c1b66cf4522d605f4a90963118eceb1",
+          "download": {
+            "url": "https://github.com/peass-ng/PEASS-ng/releases/download/20261026-7db7cb7e/linpeas.sh",
+            "sha256": "d09482ffc38350f50f286aba5ad71d710c1b66cf4522d605f4a90963118eceb1",
+            "size": 1811044,
+            "format": "raw"
+          }
+        },
+        {
+          "name": "peass-linpeas_darwin_arm64",
+          "platform": "darwin/arm64",
+          "path": "tools/peass/linpeas_darwin_arm64",
+          "version": "20261026-7db7cb7e",
+          "sha256": "0f6d404539c3abfe30fddb75f3a1718c253b884925d8bdcc4c97bc6771d31970",
+          "download": {
+            "url": "https://github.com/peass-ng/PEASS-ng/releases/download/20261026-7db7cb7e/linpeas_darwin_arm64",
+            "sha256": "0f6d404539c3abfe30fddb75f3a1718c253b884925d8bdcc4c97bc6771d31970",
+            "size": 4934274,
+            "format": "raw"
+          }
+        },
+        {
+          "name": "peass-linpeas_linux_amd64",
+          "platform": "linux/amd64",
+          "path": "tools/peass/linpeas_linux_amd64",
+          "version": "20261026-7db7cb7e",
+          "sha256": "ab2cf17b44b8069a4688d7090ca7a68cd2471b3cda509ba64d976d89535891b1",
+          "download": {
+            "url": "https://github.com/peass-ng/PEASS-ng/releases/download/20261026-7db7cb7e/linpeas_linux_amd64",
+            "sha256": "ab2cf17b44b8069a4688d7090ca7a68cd2471b3cda509ba64d976d89535891b1",
+            "size": 4984408,
+            "format": "raw"
+          }
+        },
+        {
+          "name": "peass-linpeas_linux_arm64",
+          "platform": "linux/arm64",
+          "path": "tools/peass/linpeas_linux_arm64",
+          "version": "20261026-7db7cb7e",
+          "sha256": "225749e631a86a24f1e7498d02b66c4ca28e374e9676565c881a834d327300a4",
+          "download": {
+            "url": "https://github.com/peass-ng/PEASS-ng/releases/download/20261026-7db7cb7e/linpeas_linux_arm64",
+            "sha256": "225749e631a86a24f1e7498d02b66c4ca28e374e9676565c881a834d327300a4",
+            "size": 5037825,
+            "format": "raw"
+          }
+        },
+        {
+          "name": "peass-winPEASx64.exe",
+          "platform": "windows/amd64",
+          "path": "tools/peass/winPEASx64.exe",
+          "version": "20261026-7db7cb7e",
+          "sha256": "6410e66a8039a513c60156bf18c5b3ebcc6df803b09d50bddb191ec5cf9153b5",
+          "download": {
+            "url": "https://github.com/peass-ng/PEASS-ng/releases/download/20261026-7db7cb7e/winPEASx64.exe",
+            "sha256": "6410e66a8039a513c60156bf18c5b3ebcc6df803b09d50bddb191ec5cf9153b5",
+            "size": 11716096,
+            "format": "raw"
+          }
+        }
+      ]
+    },
+    {
+      "name": "nxc",
+      "purpose": "NetExec：SMB/WinRM 等协议执行与口令喷洒（原 CrackMapExec；venv 入口符号链接）",
+      "version": "1.5.1",
+      "platform": "linux/amd64",
+      "sha256": "5515619008bc95b129380694c5a23caf724e61bb111e403823d6a254327c454e",
+      "path": "tools/nxc",
+      "env": "",
+      "category": "arsenal",
+      "execution": "host"
+    },
+    {
+      "name": "penelope",
+      "purpose": "反弹 shell handler（期 5 reverse_listen 受管进程，Python）",
+      "version": "",
+      "platform": "any",
+      "sha256": "b677f7e9ab8f3aad096f894956ff4571ab0d2eaca0c5ea4fc874997500d261e1",
+      "path": "tools/penelope.py",
+      "env": "",
+      "category": "arsenal",
+      "execution": "host"
+    },
+    {
+      "name": "nuclei",
+      "purpose": "基于模板的漏洞与配置检测（模板需单独固定版本）",
+      "platform": "any",
+      "version": "3.11.1",
+      "sha256": "",
+      "path": "tools/nuclei",
+      "env": "",
+      "category": "arsenal",
+      "execution": "host",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/nuclei",
+          "version": "3.11.1",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_macOS_arm64.zip",
+            "sha256": "7d7e291addd1fc29a9bf8d089afe878a9799b20229cbea2fb1693fc40fd4c5f0",
+            "size": 43571292,
+            "format": "zip",
+            "member": "nuclei"
+          }
+        },
+        {
+          "platform": "darwin/amd64",
+          "path": "tools/nuclei",
+          "version": "3.11.1",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_macOS_amd64.zip",
+            "sha256": "75c47ce11e9dbd4288a1c895ed85e3c4df9f4acb8237d6d178da6dccd1628f2a",
+            "size": 47219687,
+            "format": "zip",
+            "member": "nuclei"
+          }
+        },
+        {
+          "platform": "linux/amd64",
+          "path": "tools/nuclei",
+          "version": "3.11.1",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip",
+            "sha256": "ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6",
+            "size": 46148343,
+            "format": "zip",
+            "member": "nuclei"
+          }
+        },
+        {
+          "platform": "linux/arm64",
+          "path": "tools/nuclei",
+          "version": "3.11.1",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_arm64.zip",
+            "sha256": "8044e3d9768ba0a744b2872c1a87e813006f013da97ca9f50f7661a4203bec07",
+            "size": 41431918,
+            "format": "zip",
+            "member": "nuclei"
+          }
+        },
+        {
+          "platform": "windows/amd64",
+          "path": "tools/nuclei.exe",
+          "version": "3.11.1",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_windows_amd64.zip",
+            "sha256": "bb6cb9ff8939b753f6fcab06fd30a15f5bc61d8382a597871334c007a85ff9d2",
+            "size": 46067128,
+            "format": "zip",
+            "member": "nuclei.exe"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ffuf",
+      "purpose": "HTTP 路径、参数与 API 模糊测试",
+      "platform": "any",
+      "version": "2.3.0",
+      "sha256": "",
+      "path": "tools/ffuf",
+      "env": "",
+      "category": "arsenal",
+      "execution": "host",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/ffuf",
+          "version": "2.3.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/ffuf/ffuf/releases/download/v2.3.0/ffuf_2.3.0_macOS_arm64.tar.gz",
+            "sha256": "891e6358f7c72c951ce6fcef82a3736e91b34034e95edbd305505c9d31cfff13",
+            "size": 4103832,
+            "format": "tar.gz",
+            "member": "ffuf"
+          }
+        },
+        {
+          "platform": "darwin/amd64",
+          "path": "tools/ffuf",
+          "version": "2.3.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/ffuf/ffuf/releases/download/v2.3.0/ffuf_2.3.0_macOS_amd64.tar.gz",
+            "sha256": "c1d1a0320b299d2c7f3a62163b336fe861954ea865bab13b9e80f128eb985997",
+            "size": 4432897,
+            "format": "tar.gz",
+            "member": "ffuf"
+          }
+        },
+        {
+          "platform": "linux/amd64",
+          "path": "tools/ffuf",
+          "version": "2.3.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/ffuf/ffuf/releases/download/v2.3.0/ffuf_2.3.0_linux_amd64.tar.gz",
+            "sha256": "b2a3c725fcb9da175159682f54d6e9149f2905b00d84d155e7efc5d599975ceb",
+            "size": 4367536,
+            "format": "tar.gz",
+            "member": "ffuf"
+          }
+        },
+        {
+          "platform": "linux/arm64",
+          "path": "tools/ffuf",
+          "version": "2.3.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/ffuf/ffuf/releases/download/v2.3.0/ffuf_2.3.0_linux_arm64.tar.gz",
+            "sha256": "e2d712615d53da797ee929006e41f2df5a7960a5353133db9c150ddaa22ae4e8",
+            "size": 3950470,
+            "format": "tar.gz",
+            "member": "ffuf"
+          }
+        },
+        {
+          "platform": "windows/amd64",
+          "path": "tools/ffuf.exe",
+          "version": "2.3.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/ffuf/ffuf/releases/download/v2.3.0/ffuf_2.3.0_windows_amd64.zip",
+            "sha256": "091c8a22d0c7fbe07d343b3ae2c213dbd37b38a8a2ed40631fcd3128ea1764fb",
+            "size": 4497208,
+            "format": "zip",
+            "member": "ffuf.exe"
+          }
+        }
+      ]
+    },
+    {
+      "name": "chisel-target",
+      "purpose": "目标侧 Chisel 客户端；按目标 OS/架构选取，不复用主机文件",
+      "platform": "any",
+      "version": "1.12.0",
+      "sha256": "",
+      "path": "tools/targets",
+      "env": "",
+      "category": "tunnel",
+      "execution": "target",
+      "variants": [
+        {
+          "platform": "linux/amd64",
+          "path": "tools/targets/linux-amd64/chisel",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_linux_amd64.gz",
+            "sha256": "f3f180f1d93aa72cce4e6386f98cc06569a0146fbd65eb4423cf83e6434bcfe6",
+            "size": 4724737,
+            "format": "gz"
+          }
+        },
+        {
+          "platform": "linux/arm64",
+          "path": "tools/targets/linux-arm64/chisel",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_linux_arm64.gz",
+            "sha256": "2ec6152cd2c74fe0146d4d79e4e7aa174521368c56e433d55e023a92ea404ec3",
+            "size": 4265191,
+            "format": "gz"
+          }
+        },
+        {
+          "platform": "windows/amd64",
+          "path": "tools/targets/windows-amd64/chisel.exe",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_windows_amd64.zip",
+            "sha256": "600a8ad6f03bc7f6d285fd01ab6a3f8a657204adaafa5666ade9451d18df1ebc",
+            "size": 4873570,
+            "format": "zip",
+            "member": "chisel.exe"
+          }
+        },
+        {
+          "platform": "windows/arm64",
+          "path": "tools/targets/windows-arm64/chisel.exe",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_windows_arm64.zip",
+            "sha256": "907e1538ab86522fa4b11d7e45192b5f54e74beb88745093f6b2ca5b6e4efbc8",
+            "size": 4358897,
+            "format": "zip",
+            "member": "chisel.exe"
+          }
+        },
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/targets/darwin-arm64/chisel",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_darwin_arm64.gz",
+            "sha256": "707a4b932eea214765146504a0df246cefc415b4297af65a80dd67cf69ba85a9",
+            "size": 4433894,
+            "format": "gz"
+          }
+        },
+        {
+          "platform": "darwin/amd64",
+          "path": "tools/targets/darwin-amd64/chisel",
+          "version": "1.12.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_darwin_amd64.gz",
+            "sha256": "4aeae36c867f11c8e8c3f2b913a0e063ea3c6d29e1c14a52ed2e6eef8cfc4395",
+            "size": 4810408,
+            "format": "gz"
+          }
+        }
+      ]
+    },
+    {
+      "name": "nmap",
+      "purpose": "端口、服务与操作系统识别（使用 Homebrew 预编译 bottle，依赖单独保留）",
+      "platform": "darwin/arm64",
+      "version": "7.992",
+      "sha256": "",
+      "path": "tools/nmap",
+      "env": "",
+      "category": "arsenal",
+      "execution": "host",
+      "installer": {
+        "type": "homebrew-bottle",
+        "formula": "nmap",
+        "version": "7.992"
+      }
+    },
+    {
+      "name": "nuclei-templates",
+      "path": "tools/nuclei-templates",
+      "platform": "any",
+      "version": "10.5.1",
+      "sha256": "",
+      "download": {
+        "url": "https://codeload.github.com/projectdiscovery/nuclei-templates/zip/refs/tags/v10.5.1",
+        "sha256": "00184ad496302cd1dd3cf4b0b1c3aa45d6b35057f7bdf17e932318185ba0ac50",
+        "size": 19412000,
+        "format": "zip-tree",
+        "strip_prefix": "nuclei-templates-10.5.1"
+      },
+      "purpose": "Nuclei 官方模板固定版本资源；调用时显式 -t 使用本目录",
+      "execution": "resource",
+      "category": "arsenal",
+      "env": ""
+    },
+    {
+      "name": "lazagne-macos-source",
+      "path": "tools/targets/darwin-any/lazagne",
+      "platform": "any",
+      "version": "2.4.7",
+      "sha256": "",
+      "download": {
+        "url": "https://codeload.github.com/AlessandroZ/LaZagne/zip/refs/tags/v2.4.7",
+        "sha256": "c32d86508b59c7b0fa88cfd8dfa49963545be0b1703677b210da81c3326c06b7",
+        "size": 706657,
+        "format": "zip-tree",
+        "strip_prefix": "LaZagne-2.4.7/Mac"
+      },
+      "purpose": "LaZagne Mac OS 目标端 Python 源码资源；需在目标端准备其依赖",
+      "execution": "target",
+      "category": "arsenal",
+      "env": ""
+    }
+  ]
+}

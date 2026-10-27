@@ -8,6 +8,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
@@ -18,18 +19,24 @@ import (
 
 // wireAgentAugment connects the PG agent_visibility table into the agent runtime:
 // an agent's visible skills are loaded from the filesystem and packed into one
-// Skill meta-tool; its visible stdio MCP servers are spawned and expanded to
+// Skill meta-tool; cached stdio MCP tools are exposed without spawning servers.
+// The first actual call starts the run's private connection. Tools expand to
 // mcp__server__tool. skillDir is the root directory of all skill subdirectories.
 // hostTools, if set, returns runtime host tools (currently the traffic tools when
 // capture is on) to add to EVERY agent's base list — the DB tools table then
 // filters them per-agent binding. Empty/nil → no host tools this run (capture off).
-func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string)) {
+func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string), taskDialers ...taskMCPDialer) {
 	agent.ToolAugment = func(ctx context.Context, agentKey string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
 		a, err := pg.GetAgentByKey(agentKey)
 		if err != nil || a == nil {
 			return nil, agent.DeferredInfo{}, nil
 		}
 		var extra []actool.CoreTool
+		var taskDial taskMCPDialer
+		if len(taskDialers) > 0 {
+			taskDial = taskDialers[0]
+		}
+		taskID := agent.RunInfoFrom(ctx).TaskID
 
 		// --- skills: load visible skills into reg (used for the Skill meta-tool
 		// and to know which MCP servers are skill-gated). ---
@@ -63,7 +70,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 			}
 		}
 
-		// --- mcp: connect enabled servers that are directly visible to this agent
+		// --- mcp: expose enabled servers that are directly visible to this agent
 		// OR skill-gated (named in a visible skill's mcps field). Directly-visible
 		// and NOT gated → global (unlocked from session start). Skill-gated →
 		// deferred until that skill is invoked (regardless of direct visibility).
@@ -84,18 +91,38 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				if !directVisible && !skillGated {
 					continue // neither directly visible nor referenced by a visible skill
 				}
-				cl, err := connectMCP(ctx, m)
-				if err != nil {
-					log.Printf("[mcp] %s 连接失败: %v", m.Name, err)
-					continue
-				}
-				closers = append(closers, cl)
-				ts, err := cl.Tools(ctx)
-				if err != nil {
-					log.Printf("[mcp] %s tools/list 失败: %v", m.Name, err)
-					continue
+				var ts []actool.CoreTool
+				scopedBrowser := taskID > 0 && taskDial != nil && m.Name == browserMCPName
+				if m.Transport == "stdio" || scopedBrowser {
+					// Upgrade name-only legacy caches once, then assemble from schemas.
+					metadataCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+					metadata, err := cacheMCPMetadata(metadataCtx, pg, m, false)
+					cancel()
+					if err != nil {
+						log.Printf("[mcp] %s 工具元数据暂不可用，保留已缓存工具供后续重试: %v", m.Name, err)
+					}
+					session := newLazyMCPSession(ctx, m)
+					attachTaskMCPDialer(session, taskID, taskDial)
+					closers = append(closers, session)
+					for _, t := range metadata {
+						ts = append(ts, session.tool(t))
+					}
+				} else {
+					// Remote SSE/HTTP connections retain their existing lifecycle.
+					cl, err := connectMCP(ctx, m)
+					if err != nil {
+						log.Printf("[mcp] %s 连接失败: %v", m.Name, err)
+						continue
+					}
+					closers = append(closers, cl)
+					ts, err = cl.Tools(ctx)
+					if err != nil {
+						log.Printf("[mcp] %s tools/list 失败: %v", m.Name, err)
+						continue
+					}
 				}
 				for _, t := range ts {
+					t = meterTool(t, pg, t.Name(), a.Key, agent.RunInfoFrom(ctx))
 					extra = append(extra, t)
 					allNames = append(allNames, t.Name())
 					serverTools[m.Name] = append(serverTools[m.Name], t.Name())
@@ -332,9 +359,23 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 				}
 			}
 		}
+		// 批 5 B4:只有 worker 的 BashEnv 注入了 ARTEX_UA(见 worker.go uaEnv),
+		// UA 纪律说明也只绑 worker 的 Bash 描述,其他 agent 无此变量、不 dangling。
+		if agentKey == "worker" {
+			for i, t := range out {
+				if t.Name() == "Bash" {
+					out[i] = agent.DecorateTool(t, t.Description()+bashUANote, t.InputSchema())
+					break
+				}
+			}
+		}
 		return out
 	}
 }
+
+// bashUANote 是批 5 B4 追加进 worker Bash 描述的 UA 使用纪律(与
+// bashInteractiveShellNote 同一套代码固定追加法,DB 描述覆盖不掉)。
+const bashUANote = "\n\nHTTP 客户端(curl/httpx 等)统一使用 $ARTEX_UA 作为 User-Agent(本任务稳定分配,任务内不要更换);禁止裸 Chrome UA+库 TLS 之外的组合伪装(UA/TLS 指纹失配正是反 AI 蜜罐的触发器);疑似反 AI 陷阱的目标改用 browser MCP 访问。"
 
 func contains(ss []string, v string) bool {
 	for _, s := range ss {

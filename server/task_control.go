@@ -119,6 +119,9 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 				if _, err := s.m.pg.Exec(`UPDATE tasks SET schedule_paused=false WHERE id=$1`, t.ID); err != nil {
 					return out, err
 				}
+				if err := s.cancelTaskFindingChecks(t.ID, agent.AbortChatPausedWithTask); err != nil {
+					log.Printf("[task] #%s 已保持暂停，验证运行已取消但审计封存失败: %v", t.ID, err)
+				}
 				out.Paused = true
 				out.Status = "paused"
 				return out, nil
@@ -141,6 +144,9 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 		// after the persistent pause commits, so a failed control request is fully
 		// compensated and does not lose an otherwise valid conversation turn.
 		s.cancelTaskChat(t.ID, agent.AbortChatPausedWithTask)
+		if err := s.cancelTaskFindingChecks(t.ID, pauseCause); err != nil {
+			log.Printf("[task] #%s 已暂停，验证运行已取消但审计封存失败: %v", t.ID, err)
+		}
 		out.Paused, out.Status = true, "paused"
 		go s.reconcileConcurrency()
 	case "resume":

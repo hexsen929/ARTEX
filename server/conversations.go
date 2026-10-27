@@ -496,6 +496,7 @@ func (s *Server) conversationRunContext(id int64, busyKey string) (context.Conte
 func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) {
 	defer func() {
 		cancel(agent.AbortChatTurnFinished)
+		s.findingCheckTasks.Delete(c.ID)
 		s.chatMu.Lock()
 		delete(s.chatBusy, busyKey)
 		delete(s.chatCancel, busyKey)
@@ -564,6 +565,59 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 			}
 		}
 	}
+	// Same first-turn sealing for verifier checks (finding_checks pipeline).
+	if c.AgentKey == db.FindingVerifierAgentKey {
+		finishStatus, finishReason = "failed", "验证未能启动"
+		chk, err := s.m.pg.FindingCheckForConversation(context.Background(), c.ID)
+		if err != nil {
+			log.Printf("[conv %d] load check: %v", c.ID, err)
+			if err := s.m.pg.FailPendingCheckForConversation(c.ID, "验证状态读取失败，请重新发起"); err != nil {
+				log.Printf("[conv %d] seal check: %v", c.ID, err)
+			}
+			return
+		}
+		if chk == nil {
+			if _, wasCheck := s.findingCheckTasks.Load(c.ID); wasCheck {
+				_, _ = s.m.pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true,
+					Summary: "验证记录已删除，未执行本轮操作", Detail: "验证记录已删除，未执行本轮操作"})
+				return
+			}
+		}
+		activeCheck := chk != nil && (chk.Status == "pending" || chk.Status == "running")
+		if activeCheck {
+			defer func() {
+				if ctx.Err() != nil {
+					finishStatus, finishReason = "stopped", "验证已停止或服务已关闭"
+				}
+				s.finishCheck(chk.ID, finishStatus, finishReason)
+			}()
+			if ctx.Err() != nil {
+				return
+			}
+			if chk.Status == "pending" {
+				started, err := s.m.pg.StartFindingCheck(ctx, chk.ID)
+				if err != nil {
+					finishReason = err.Error()
+					return
+				}
+				if !started {
+					return
+				}
+			}
+		}
+		ctx, err = s.findingCheckTaskContext(ctx, chk)
+		if err != nil {
+			finishReason = err.Error()
+			_, _ = s.m.pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true,
+				Summary: "验证会话未启动：" + finishReason, Detail: finishReason})
+			return
+		}
+		if activeCheck {
+			if ri := agent.RunInfoFrom(ctx); ri.TaskID > 0 {
+				s.findingCheckTasks.Store(c.ID, strconv.FormatInt(ri.TaskID, 10))
+			}
+		}
+	}
 	if ctx.Err() != nil {
 		return
 	}
@@ -598,6 +652,65 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 		finishStatus, finishReason = "completed", ""
 	}
 	_ = pg.TouchConversation(c.ID)
+}
+
+// findingCheckTaskContext trusts only the check's stored finding/task relation.
+// It must run before Chat assembles tools or performs model requests. Historical
+// sealed explanations retain the same task route when it still exists, but do
+// not regain permission to overwrite the original verification result.
+func (s *Server) findingCheckTaskContext(ctx context.Context, check *db.FindingCheck) (context.Context, error) {
+	if check == nil {
+		return ctx, nil // an ordinary, explicitly opened verifier conversation
+	}
+	active := check.Status == "pending" || check.Status == "running"
+	finding, err := s.m.pg.GetFinding(check.FindingID)
+	if err != nil {
+		return ctx, fmt.Errorf("读取验证关联漏洞失败，未执行本轮操作: %w", err)
+	}
+	if finding == nil || finding.TaskID == nil || *finding.TaskID <= 0 {
+		if active {
+			return ctx, errors.New("活动验证未关联真实父任务，未执行本轮操作")
+		}
+		return ctx, nil // explicit explanation of an orphaned historical result
+	}
+	parent, err := s.m.pg.GetTask(*finding.TaskID)
+	if err != nil {
+		return ctx, fmt.Errorf("读取验证父任务失败，未执行本轮操作: %w", err)
+	}
+	if parent == nil {
+		if active {
+			return ctx, errors.New("验证父任务已删除或归档，未执行本轮操作")
+		}
+		return ctx, nil
+	}
+	taskID := strconv.FormatInt(parent.ID, 10)
+	if active {
+		if _, ok := s.m.Task(taskID); !ok {
+			return ctx, errors.New("验证父任务运行时未加载，未执行本轮操作")
+		}
+		if s.engine != nil && s.engine.IsDeleting(taskID) {
+			return ctx, errors.New("验证父任务正在删除或归档，未执行本轮操作")
+		}
+	}
+	addr, ca, err := s.m.TaskProxyForTaskChecked(ctx, parent.ID)
+	if err != nil {
+		return ctx, fmt.Errorf("验证任务代理未就绪，未执行本轮操作: %w", err)
+	}
+	if s.m.taskProxy == nil {
+		// A deliberately disabled task-proxy feature keeps the explicitly
+		// configured global route, not a stale shared ChatAgent's old route.
+		if s.m.TrafficEnabled() {
+			addr, ca = s.m.ProxyAddr(), s.m.ProxyCACert()
+			if addr == "" {
+				return ctx, errors.New("验证流量录制代理未就绪，未执行本轮操作")
+			}
+		} else {
+			addr, ca = s.m.GlobalProxy(), ""
+		}
+	}
+	ctx = agent.WithRunInfo(ctx, agent.RunInfo{TaskID: parent.ID, ExplorationID: parent.ExplorationID})
+	ctx = intercept.WithTaskContext(ctx, taskID, db.FindingVerifierAgentKey, nil)
+	return agent.WithChatProxyOverride(ctx, addr, ca), nil
 }
 
 // triggerBehavior is an agent's cached P3 trigger post-processing策略 (see the

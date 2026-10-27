@@ -1057,7 +1057,20 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   // ── auth：让 demo 直接进主界面 ──
   if (path === "/auth/status") return { initialized: true };
   if (path === "/auth/login" || path === "/auth/init") return { token: "mock-demo" };
+  if (path === "/auth/logout") return { ok: true };
+  if (path === "/sse-ticket" && m === "POST") return { ticket: "mock-stream-ticket" };
   if (path === "/auth/change-password") return { ok: true };
+
+  // Newly ported resources have honest empty-state previews; demo controls
+  // never execute session operations or change the global approval policy.
+  if (path === "/intranet/topology" && m === "GET") return { nodes: [], edges: [], segments: [] };
+  if (seg[0] === "findings" && seg[2] === "inline-history" && m === "GET") return { events: [] };
+  if (["/sessions", "/tunnels", "/intranet/credentials"].includes(path) && m === "GET") return { items: [] };
+  if (seg[0] === "tasks" && seg[2] === "pending-scope" && m === "GET") return { items: [] };
+  if (path === "/guard/auto-allow") {
+    if (m === "GET") return { enabled: false, expires_at: 0, remaining_seconds: 0 };
+    throw new Error("演示模式不修改全局审批策略");
+  }
 
   // ── task cold archives ──
   if (path === "/task-archives" && m === "GET") {
@@ -2467,7 +2480,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const from = q.get("from") || "";
     const to = q.get("to") || "";
     if (status && !["pending", "allowed", "denied", "timeout"].includes(status)) throw new Error("无效审批状态");
-    if (decisionSource && !["model", "rule", "manual", "unknown"].includes(decisionSource)) throw new Error("无效判定来源");
+    if (decisionSource && !["model", "rule", "manual", "auto_allow", "unknown"].includes(decisionSource)) throw new Error("无效判定来源");
     if ([...search].length > 200) throw new Error("搜索关键词不能超过 200 个字符");
     if (search.startsWith("#") && !/^#[1-9]\d*$/.test(search)) throw new Error("审批编号必须为 # 后接正整数");
     for (const value of [from, to]) {

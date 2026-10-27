@@ -898,15 +898,16 @@ func (d *DB) MCPToolNames(serverID int64) ([]string, error) {
 	return out, rows.Err()
 }
 
-// MCPTool is one cached tool of an MCP server (name + description).
+// MCPTool includes the input schema so agent assembly need not spawn a server.
 type MCPTool struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Schema      json.RawMessage `json:"schema,omitempty"`
 }
 
 // MCPToolsDetailed returns the cached tools (name + description) for a server.
 func (d *DB) MCPToolsDetailed(serverID int64) ([]MCPTool, error) {
-	rows, err := d.Query(`SELECT tool_name, COALESCE(description,'') FROM mcp_tools_cache WHERE server_id=$1 ORDER BY tool_name`, serverID)
+	rows, err := d.Query(`SELECT tool_name, COALESCE(description,''), schema FROM mcp_tools_cache WHERE server_id=$1 ORDER BY tool_name`, serverID)
 	if err != nil {
 		return nil, err
 	}
@@ -914,9 +915,11 @@ func (d *DB) MCPToolsDetailed(serverID int64) ([]MCPTool, error) {
 	var out []MCPTool
 	for rows.Next() {
 		var t MCPTool
-		if err := rows.Scan(&t.Name, &t.Description); err != nil {
+		var schema []byte
+		if err := rows.Scan(&t.Name, &t.Description, &schema); err != nil {
 			return nil, err
 		}
+		t.Schema = json.RawMessage(schema)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -929,16 +932,62 @@ func (d *DB) SaveMCPTools(serverID int64, tools []MCPTool) error {
 		return err
 	}
 	defer tx.Rollback()
+	var id int64
+	if err := tx.QueryRow(`SELECT id FROM mcp_servers WHERE id=$1 FOR UPDATE`, serverID).Scan(&id); err != nil {
+		return err
+	}
+	if err := saveMCPTools(tx, serverID, tools); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// SaveMCPToolsForConfig rejects a late discovery from a replaced endpoint. The
+// parent-row lock serializes cache replacement with SaveMCP's invalidation.
+func (d *DB) SaveMCPToolsForConfig(m *MCPServer, tools []MCPTool) error {
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	args, env := m.Args, m.Env
+	if len(args) == 0 {
+		args = json.RawMessage(`[]`)
+	}
+	if len(env) == 0 {
+		env = json.RawMessage(`{}`)
+	}
+	var same bool
+	if err := tx.QueryRow(`SELECT
+ROW(name,transport,COALESCE(command,''),args,env,COALESCE(url,''),insecure)
+IS NOT DISTINCT FROM ROW($1::text,$2::text,$3::text,$4::jsonb,$5::jsonb,$6::text,$7::boolean)
+FROM mcp_servers WHERE id=$8 FOR UPDATE`, m.Name, m.Transport, m.Command, string(args), string(env), m.URL, m.Insecure, m.ID).Scan(&same); err != nil {
+		return err
+	}
+	if !same {
+		return errors.New("MCP 配置在工具发现期间已变化，请重新刷新工具")
+	}
+	if err := saveMCPTools(tx, m.ID, tools); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func saveMCPTools(tx *sql.Tx, serverID int64, tools []MCPTool) error {
 	if _, err := tx.Exec(`DELETE FROM mcp_tools_cache WHERE server_id=$1`, serverID); err != nil {
 		return err
 	}
 	for _, t := range tools {
-		if _, err := tx.Exec(`INSERT INTO mcp_tools_cache(server_id, tool_name, description) VALUES ($1,$2,$3)
-ON CONFLICT (server_id, tool_name) DO UPDATE SET description=EXCLUDED.description`, serverID, t.Name, t.Description); err != nil {
+		var schema any
+		if len(t.Schema) > 0 {
+			schema = string(t.Schema)
+		}
+		if _, err := tx.Exec(`INSERT INTO mcp_tools_cache(server_id, tool_name, description, schema) VALUES ($1,$2,$3,$4)
+ON CONFLICT (server_id, tool_name) DO UPDATE SET description=EXCLUDED.description, schema=EXCLUDED.schema`, serverID, t.Name, t.Description, schema); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (d *DB) SaveMCP(m *MCPServer) (int64, error) {
@@ -955,9 +1004,29 @@ func (d *DB) SaveMCP(m *MCPServer) (int64, error) {
 			m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled, m.Insecure).Scan(&id)
 		return id, err
 	}
-	_, err := d.Exec(`UPDATE mcp_servers SET name=$1,transport=$2,command=NULLIF($3,''),args=$4,env=$5,url=NULLIF($6,''),enabled=$7,insecure=$8 WHERE id=$9`,
-		m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled, m.Insecure, m.ID)
-	return m.ID, err
+	tx, err := d.Begin()
+	if err != nil {
+		return m.ID, err
+	}
+	defer tx.Rollback()
+	params := []any{m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled, m.Insecure, m.ID}
+	var lockedID int64
+	if err := tx.QueryRow(`SELECT id FROM mcp_servers WHERE id=$1 FOR UPDATE`, m.ID).Scan(&lockedID); err != nil {
+		return m.ID, err
+	}
+	// A changed endpoint/credential/profile can expose different schemas. An
+	// enable toggle alone must not erase a valid cache or launch a subprocess.
+	if _, err = tx.Exec(`DELETE FROM mcp_tools_cache WHERE server_id=$8 AND EXISTS (
+SELECT 1 FROM mcp_servers WHERE id=$8 AND
+ROW(name,transport,COALESCE(command,''),args,env,COALESCE(url,''),insecure)
+IS DISTINCT FROM ROW($1::text,$2::text,$3::text,$4::jsonb,$5::jsonb,$6::text,$7::boolean))`,
+		m.Name, m.Transport, m.Command, args, env, m.URL, m.Insecure, m.ID); err != nil {
+		return m.ID, err
+	}
+	if _, err = tx.Exec(`UPDATE mcp_servers SET name=$1,transport=$2,command=NULLIF($3,''),args=$4,env=$5,url=NULLIF($6,''),enabled=$7,insecure=$8 WHERE id=$9`, params...); err != nil {
+		return m.ID, err
+	}
+	return m.ID, tx.Commit()
 }
 
 func (d *DB) DeleteMCP(id int64) error {

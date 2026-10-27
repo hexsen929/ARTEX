@@ -27,6 +27,8 @@ export default function SystemSettingsPage() {
   const [savingIntelligence, setSavingIntelligence] = React.useState(false);
   const [trafficCapture, setTrafficCapture] = React.useState(false);
   const [agentTrafficBinding, setAgentTrafficBinding] = React.useState(false);
+  const [inlineFindingMerge, setInlineFindingMerge] = React.useState(false);
+  const [savingInlineMerge, setSavingInlineMerge] = React.useState(false);
   const [webSearch, setWebSearch] = React.useState(false);
   const [backend, setBackend] = React.useState("ddgs");
   const [braveKeySet, setBraveKeySet] = React.useState(false);
@@ -59,6 +61,7 @@ export default function SystemSettingsPage() {
     setIntelligenceEnabled(!!s.task_intelligence_enabled);
     setTrafficCapture(!!s.traffic_capture);
     setAgentTrafficBinding(!!s.agent_traffic_binding);
+    setInlineFindingMerge(!!s.finding_inline_merge_enabled);
     setWebSearch(!!s.web_search_enabled);
     setBackend(s.web_search_backend || "ddgs");
     setBraveKeySet(!!s.brave_key_set);
@@ -87,6 +90,19 @@ export default function SystemSettingsPage() {
       })
       .catch((e) => toast.error("保存失败：" + (e as Error).message))
       .finally(() => setSavingWorkers(false));
+  };
+
+  const toggleInlineFindingMerge = async (enabled: boolean) => {
+    setSavingInlineMerge(true);
+    try {
+      const settings = await api.setSettings({ finding_inline_merge_enabled: enabled });
+      apply(settings);
+      toast.success(enabled ? "已开启同入口候选聚合" : "已关闭同入口候选聚合");
+    } catch (error) {
+      toast.error("保存失败：" + (error as Error).message);
+    } finally {
+      setSavingInlineMerge(false);
+    }
   };
 
   const savePython = () => {
@@ -292,6 +308,28 @@ export default function SystemSettingsPage() {
       <div className="columns-1 gap-4 md:gap-6 lg:columns-2">
         <UpdateCard />
         <BasicAuthCard />
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle>同入口候选聚合</CardTitle>
+            <CardDescription id="finding-inline-merge-description">
+              默认关闭，不改变现有漏洞文件夹（cases）的归并方式。开启后，仅对同任务、同主资产、同漏洞类目且验证状态与说明一致的候选上报尝试原地聚合。
+              原始上报与聚合审计保留，不覆盖人工验证结论；历史记录不会批量改写。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex items-center justify-between gap-4">
+            <Label htmlFor="finding-inline-merge" className="text-sm font-normal text-muted-foreground">
+              {inlineFindingMerge ? "已开启 · 仅聚合相同入口候选" : "已关闭 · 保持独立上报与现有归并"}
+            </Label>
+            <Switch
+              id="finding-inline-merge"
+              aria-describedby="finding-inline-merge-description"
+              checked={inlineFindingMerge}
+              disabled={!loaded || savingInlineMerge}
+              onCheckedChange={(enabled) => void toggleInlineFindingMerge(enabled)}
+            />
+          </CardContent>
+        </Card>
 
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>

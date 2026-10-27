@@ -51,6 +51,26 @@ ON CONFLICT (key) DO NOTHING`, key, value)
 	return n > 0, nil
 }
 
+// DeleteSetting removes a setting row; a missing key is not an error.
+// (F6: refresh token 旋转/登出时删除哈希记录。)
+func (d *DB) DeleteSetting(key string) error {
+	_, err := d.Exec(`DELETE FROM settings WHERE key=$1`, key)
+	return err
+}
+
+// ConsumeSetting atomically reads and removes a one-use setting. Concurrent
+// refresh-token consumers cannot both observe the same stored token.
+func (d *DB) ConsumeSetting(key string) (value string, ok bool, err error) {
+	err = d.QueryRow(`DELETE FROM settings WHERE key=$1 RETURNING value`, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return value, true, nil
+}
+
 // GetBool returns the boolean setting, or def when unset/unparseable.
 func (d *DB) GetBool(key string, def bool) bool {
 	v, ok, err := d.GetSetting(key)

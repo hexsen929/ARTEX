@@ -7,6 +7,42 @@ on:
 permissions:
   contents: read
 jobs:
+  tool-packaging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Tool deployment integrity and isolation regressions
+        run: python3 -m unittest discover -s packaging -p 'test_*.py'
+
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Compile every test package without running TestMain
+        run: |
+          set -euo pipefail
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          failed=0
+          packages="$(go list ./...)"
+          for package in $packages; do
+            echo "Compile $package"
+            if ! go test -c -o "$scratch/package.test" "$package" > "$scratch/compiler.log" 2>&1; then
+              cat "$scratch/compiler.log"
+              CI_LOG="$scratch/compiler.log" CI_PACKAGE="$package" python3 -c 'import os,pathlib; s=pathlib.Path(os.environ["CI_LOG"]).read_text(errors="replace")[-18000:]; s=s.replace("%","%25").replace("\r","%0D").replace("\n","%0A"); print("::error title=Go compile "+os.environ["CI_PACKAGE"]+"::"+s)'
+              failed=1
+            fi
+            rm -f "$scratch/package.test"
+          done
+          exit "$failed"
   regression:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -37,7 +73,9 @@ jobs:
         run: |
           set -euo pipefail
           index=0
-          for package in $(go list ./...); do
+          failed=0
+          packages="$(go list ./...)"
+          for package in $packages; do
             database="artex_ci_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}_${index}"
             docker exec "$PG_CONTAINER" createdb -U artex_test "$database"
             if [[ "$package" == */server ]]; then
@@ -47,12 +85,34 @@ jobs:
             else
               unset ARTEX_INSTRUCTIONS_TEST_DSN
             fi
+            test_log="$(mktemp)"
+            result=0
             ARTEX_PG_DSN="postgres://artex_test:artex_test@127.0.0.1:5432/${database}?sslmode=disable" \
-              go test "$package" -count=1 -timeout=5m
+              go test "$package" -count=1 -timeout=5m > "$test_log" 2>&1 || result=$?
+            cat "$test_log"
+            if [[ "$result" -ne 0 ]]; then
+              CI_LOG="$test_log" CI_PACKAGE="$package" python3 -c 'import os,pathlib,re; raw=pathlib.Path(os.environ["CI_LOG"]).read_text(errors="replace"); lines=raw.splitlines(); bad=[i for i,line in enumerate(lines) if line.startswith(("--- FAIL:","panic:","fatal error:")) or re.search(r"\S+_test\.go:\d+:",line)]; selected=sorted({j for i in bad for j in range(max(0,i-1),min(len(lines),i+9))}); s=("\n".join(lines[j] for j in selected) if selected else raw[-18000:])[:18000]; s=s.replace("%","%25").replace("\r","%0D").replace("\n","%0A"); print("::error title=Go test "+os.environ["CI_PACKAGE"]+"::"+s)'
+              failed=1
+            fi
+            rm -f "$test_log"
             index=$((index + 1))
           done
+          exit "$failed"
       - name: Go static checks
         run: go vet ./...
+      - name: MCP lifecycle concurrency regressions
+        run: |
+          go test -race ./server -run 'Test(LazyMCP|MCPSlotQueue|LeasedMCP|ManagerClose)' -count=1 -timeout=3m
+          go test -race ./traffic -run 'TestSharedProxy' -count=1 -timeout=3m
+          go test -race ./agent -run 'Test(ChatProxyOverride|ChatPreservesParent|ConcurrentTaskChats)' -count=1 -timeout=3m
+
+  # Run frontend checks independently: backend compilation failures must not
+  # hide TypeScript or UI regressions during a cross-cutting source port.
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

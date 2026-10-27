@@ -127,7 +127,7 @@ func (s *Server) requireBasicAuth(next http.Handler) http.Handler {
 		cfg := s.basicAuth.snapshot()
 		// Health probes stay public; CORS preflight contains no credentials and
 		// the API CORS handler returns 204 without invoking any business handler.
-		if !cfg.Enabled || (r.URL.Path == "/api/health" && (r.Method == "GET" || r.Method == "HEAD")) ||
+		if !cfg.Enabled || isManagedStageDownload(r) || (r.URL.Path == "/api/health" && (r.Method == "GET" || r.Method == "HEAD")) ||
 			(r.Method == "OPTIONS" && strings.HasPrefix(r.URL.Path, "/api/")) {
 			next.ServeHTTP(w, r)
 			return
@@ -152,6 +152,17 @@ func (s *Server) requireBasicAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// Managed stage URLs have their own unguessable token, TTL and download
+// authorization. Only their GET/HEAD surface is exempt: ordinary API routes,
+// stage management, and every mutating method still require Basic Auth.
+func isManagedStageDownload(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	return len(parts) == 3 && parts[0] == "s" && parts[1] != "" && parts[2] != ""
 }
 
 func basicAuthPublicSettings(cfg basicAuthConfig) map[string]any {

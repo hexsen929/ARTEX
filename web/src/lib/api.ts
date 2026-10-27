@@ -3,6 +3,9 @@
 // a few fields the backend serializes differently (e.g. created_at as a unix int)
 // are passed through and formatted at the call site.
 
+import { auth } from "@/lib/auth";
+import { refreshAccessToken } from "@/lib/auth-refresh";
+import { sseBaseURL, sseTicketURL, sseWithCredentials } from "@/lib/sse-target";
 import type { ChatMention } from "@/lib/chat-mentions";
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
@@ -17,6 +20,7 @@ import type {
   AssetInterceptRule,
   AssetInterceptRuleInput,
   Audit,
+  AutoAllowState,
   BatchCategoryItem,
   BatchControlItem,
   ChatAttachment,
@@ -30,6 +34,7 @@ import type {
   CoverageAssetRefs,
   CoverageGraphData,
   CredentialTrafficDetail,
+  IntranetCredential,
   DailyTokenBucket,
   DeleteTaskOptions,
   DeleteTaskResult,
@@ -38,6 +43,7 @@ import type {
   ExplorationNodePage,
   ExplorationNodeQuery,
   Finding,
+  FindingInlineMergeEvent,
   FindingAssetTree,
   FindingCaseDetail,
   FindingCasePage,
@@ -59,6 +65,7 @@ import type {
   InterceptDetail,
   InterceptPending,
   InterceptRule,
+  IntranetTopology,
   JudgeConfig,
   JudgeUsage,
   LLMInstructionFileInfo,
@@ -77,11 +84,16 @@ import type {
   NotificationDelivery,
   NotificationFilter,
   NotificationMeta,
+  PendingScopeRow,
   PromptVar,
   PromptVersion,
+  SessionExecResult,
+  SessionFsEntry,
+  SessionReadResult,
   SessionTokenUsage,
   Settings,
   Severity,
+  ShellSession,
   SkillCall,
   SkillItem,
   SSProject,
@@ -110,6 +122,7 @@ import type {
   TrafficEvidenceRole,
   TrafficHost,
   TrafficResp,
+  TunnelInfo,
   UpdateCheck,
   UpdateSettings,
   UsageStats,
@@ -123,6 +136,10 @@ function getToken(): string | null {
 }
 
 export async function http<T>(path: string, init?: RequestInit): Promise<T> {
+  return httpInner<T>(path, init, false);
+}
+
+async function httpInner<T>(path: string, init: RequestInit | undefined, retried: boolean): Promise<T> {
   if (MOCK) return mockHandle<T>(init?.method ?? "GET", path, init?.body ?? null);
   const token = getToken();
   const r = await fetch(`/api${path}`, {
@@ -134,9 +151,13 @@ export async function http<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (r.status === 401) {
+    // access token(2h)过期:先凭 HttpOnly refresh cookie 换新 token 重试一次;
+    // /auth/* 自身(含 refresh)的 401 不再递归,直接算登出(F6)。
+    if (!retried && !path.startsWith("/auth/") && (await refreshAccessToken())) {
+      return httpInner<T>(path, init, true);
+    }
     if (typeof window !== "undefined") {
-      localStorage.removeItem("artex_token");
-      document.cookie = "artex_token=; path=/; max-age=0";
+      auth.clearToken();
       window.location.href = "/login";
     }
     throw new Error("未授权");
@@ -173,7 +194,8 @@ export async function http<T>(path: string, init?: RequestInit): Promise<T> {
 // to the Go backend on :8787, whose CORS is open.
 //
 // Override either default with NEXT_PUBLIC_SSE_BASE (set it to "" to force same-origin).
-// Token is appended as ?token= because SSE can't carry cookies cross-origin.
+// Use a short-lived, one-use ticket instead of putting access tokens in URLs.
+// Reconnecting streams must obtain a fresh ticket.
 // mockReport returns a canned Markdown report for the demo.
 function mockReport(_task?: string): string {
   return `# ARTEX 渗透测试报告 — Acme Corp
@@ -197,24 +219,22 @@ function mockReport(_task?: string): string {
 > （demo）本报告由 mock 数据生成，仅用于界面演示。`;
 }
 
-export function sseUrl(path: string): string {
-  const base =
-    process.env.NEXT_PUBLIC_SSE_BASE ??
-    (process.env.NODE_ENV !== "production" && typeof window !== "undefined"
-      ? `${window.location.protocol}//${window.location.hostname}:8787`
-      : "");
-  const token = getToken();
-  const sep = path.includes("?") ? "&" : "?";
-  return token ? `${base}${path}${sep}token=${encodeURIComponent(token)}` : `${base}${path}`;
+export async function sseUrl(path: string): Promise<string> {
+  const base = sseBaseURL(
+    process.env.NEXT_PUBLIC_SSE_BASE,
+    process.env.NODE_ENV === "production",
+    typeof window !== "undefined" ? window.location : undefined,
+  );
+  const { ticket } = await post<{ ticket: string }>("/sse-ticket");
+  return sseTicketURL(base, path, ticket);
 }
 
-export function openSSE(path: string): EventSource {
-  const url = sseUrl(path);
-  const target = new URL(url, window.location.href);
-  // Same-origin streams already send cookies. Only opt into cross-port cookies
-  // for the local Next/Go dev pair; keep custom remote SSE endpoints unchanged.
-  const local = ["localhost", "127.0.0.1", "[::1]"].includes(target.hostname);
-  return new EventSource(url, { withCredentials: local && target.hostname === window.location.hostname });
+export function createSSE(url: string): EventSource {
+  return new EventSource(url, { withCredentials: sseWithCredentials(url, window.location.href) });
+}
+
+export async function openSSE(path: string): Promise<EventSource> {
+  return createSSE(await sseUrl(path));
 }
 
 const get = <T>(p: string) => http<T>(p);
@@ -230,6 +250,8 @@ const del = <T>(p: string, body?: unknown) =>
 // Go serializes nil slices as JSON null — coerce to [].
 const arr = <T>(x: T[] | null | undefined): T[] => x ?? [];
 const tq = (task?: string, sep: "?" | "&" = "?") => (task ? `${sep}task=${encodeURIComponent(task)}` : "");
+// 内网作战页四个列表的 ?task_id= 过滤参数(空 = 全局视图)。
+const taskQuery = (taskId?: string) => (taskId ? `?task_id=${encodeURIComponent(taskId)}` : "");
 
 // findingFilterParams 把发现页的筛选条件序列化成 query string。列表 / 分组 /
 // 资产树 / 导出共用同一份,新增筛选项只改这里(后端也只解析这一份)。
@@ -296,6 +318,9 @@ export const api = {
   initPassword: (password: string) => post<{ token: string }>("/auth/init", { password }),
   changePassword: (oldPassword: string, newPassword: string) =>
     post<{ ok: boolean }>("/auth/change-password", { old_password: oldPassword, new_password: newPassword }),
+  // 登出:吊销服务端 refresh token 并清 HttpOnly cookie;失败(如已过期)也照常
+  // 清本地登录态,由调用方兜底。
+  logout: () => post<{ ok: boolean }>("/auth/logout"),
 
   // ---- tasks ----
   tasks: () =>
@@ -702,6 +727,9 @@ export const api = {
     get<Finding>(
       `/exploration/findings/${id}${contextTaskId ? `?context_task=${encodeURIComponent(contextTaskId)}` : ""}`,
     ),
+  findingInlineHistory: (findingId: string, signal?: AbortSignal) =>
+    http<{ events: FindingInlineMergeEvent[] }>(`/findings/${encodeURIComponent(findingId)}/inline-history`, { signal })
+      .then((r) => arr(r.events)),
   findingTraffic: (id: string, contextTask?: string) =>
     get<FindingTraffic>(
       `/exploration/findings/${id}/traffic${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
@@ -1442,6 +1470,22 @@ export const api = {
   interceptSetJudgeConfig: (cfg: JudgeConfig) => put<{ ok: boolean }>("/intercept/judge", cfg),
   interceptJudgeUsage: (days = 30) => get<JudgeUsage>(`/intercept/judge/usage?days=${days}`),
 
+  // ---- guard auto-allow (一键放行,带时限的 ask 自动批准) ----
+  getAutoAllow: () => get<AutoAllowState>("/guard/auto-allow"),
+  setAutoAllow: (enabled: boolean, hours: number) =>
+    put<AutoAllowState>("/guard/auto-allow", { enabled, hours }),
+
+  // ---- 待授权网段(引擎在授权边界外探测到的网段,待人工扩权) ----
+  // 默认只返回 pending;all=true 含已决(approved/dismissed)。
+  pendingScope: (taskId: string, all = false) =>
+    get<{ items: PendingScopeRow[] }>(
+      `/tasks/${encodeURIComponent(taskId)}/pending-scope${all ? "?all=1" : ""}`,
+    ).then((r) => arr(r.items)),
+  // approve 把网段写入任务 scope,guard 后续放行;dismiss 忽略。
+  // 409 = 已被(并发)决定,调用方刷新列表即可。
+  decidePendingScope: (id: number, action: "approve" | "dismiss") =>
+    post<PendingScopeRow>(`/pending-scope/${id}/decide`, { action }),
+
   // ---- commands (tool execution history, any tool) ----
   commands: (params?: { task?: string; q?: string; page?: number; size?: number }) => {
     const sp = new URLSearchParams();
@@ -1489,4 +1533,50 @@ export const api = {
   // 202 即返回，实际下载在后台跑，进度走 /api/update/stream。
   applyUpdate: () => post<{ ok: boolean; target: string }>(`/update/apply`),
   rollbackUpdate: () => post<{ ok: boolean }>(`/update/rollback`),
+
+  // ---- 内网作战（拓扑 / 会话 / 隧道 / 凭据）----
+  // 四个列表都支持可选 taskId(拼 ?task_id=);不传保持全局视图。
+  intranetTopology: (taskId?: string) =>
+    get<IntranetTopology>(`/intranet/topology${taskQuery(taskId)}`).then((r) => ({
+      nodes: arr(r.nodes),
+      edges: arr(r.edges),
+      segments: arr(r.segments),
+    })),
+  shellSessions: (taskId?: string) =>
+    get<{ items: ShellSession[] }>(`/sessions${taskQuery(taskId)}`).then((r) => arr(r.items)),
+  // timeout 单位为秒，省略则由后端用默认值。
+  sessionExec: (id: string, command: string, timeout?: number) =>
+    post<SessionExecResult>(`/sessions/${encodeURIComponent(id)}/exec`, {
+      command,
+      ...(timeout ? { timeout } : {}),
+    }),
+  sessionList: (id: string, path: string) =>
+    post<{ entries: SessionFsEntry[] }>(`/sessions/${encodeURIComponent(id)}/list`, { path }).then((r) =>
+      arr(r.entries),
+    ),
+  sessionRead: (id: string, path: string) =>
+    post<SessionReadResult>(`/sessions/${encodeURIComponent(id)}/read`, { path }),
+  sessionWrite: (id: string, path: string, contentBase64: string) =>
+    post<{ ok: boolean; bytes: number }>(`/sessions/${encodeURIComponent(id)}/write`, {
+      path,
+      content_base64: contentBase64,
+    }),
+  // 人工探活:成功 alive=true;失败 alive=false 且 error 带原因(后端已诚实标 dead)。
+  probeSession: (id: string) =>
+    post<{ alive: boolean; ms?: number; error?: string }>(`/sessions/${encodeURIComponent(id)}/probe`),
+  // 移交内网:以该会话的立足点主机为初始 scope 创建新内网任务,返回新任务 id(字符串)。
+  // 400 = 无法确定立足点 IP;404 = 会话不存在。
+  handoffSession: (id: string) => post<{ task_id: string }>(`/sessions/${encodeURIComponent(id)}/handoff`),
+  deleteSession: (id: string) => del<{ ok: boolean }>(`/sessions/${encodeURIComponent(id)}`),
+  // Remove only this task's explicit usage grant; never stop/delete the session.
+  // The owning task cannot relinquish ownership through this endpoint (409).
+  taskUnbindSession: (taskId: string, sessionId: string) =>
+    del<{ task_id: string; session_id: string; unbound: boolean }>(
+      `/tasks/${encodeURIComponent(taskId)}/sessions/${encodeURIComponent(sessionId)}/binding`,
+    ),
+  tunnels: (taskId?: string) =>
+    get<{ items: TunnelInfo[] }>(`/tunnels${taskQuery(taskId)}`).then((r) => arr(r.items)),
+  teardownTunnel: (id: string) => post<{ ok: boolean }>(`/tunnels/${encodeURIComponent(id)}/teardown`),
+  intranetCredentials: (taskId?: string) =>
+    get<{ items: IntranetCredential[] }>(`/intranet/credentials${taskQuery(taskId)}`).then((r) => arr(r.items)),
 };

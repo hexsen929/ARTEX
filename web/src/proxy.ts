@@ -53,7 +53,9 @@ export async function proxy(request: NextRequest) {
   };
 
   const { pathname } = request.nextUrl;
-  const token = request.cookies.get("artex_token")?.value;
+  // artex_session 是“已登录”标记 cookie(非敏感,不含 token;F6 后 token 只存
+  // localStorage + HttpOnly refresh cookie,middleware 读不到也不应读到)。
+  const token = request.cookies.get("artex_session")?.value;
   const isAuthPage = AUTH_PAGES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 
   // 未登录 → 跳转登录页

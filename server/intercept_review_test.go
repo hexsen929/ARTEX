@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/llm"
@@ -51,12 +52,19 @@ func TestReviewCompletionSendsCurrentCallWithoutHistory(t *testing.T) {
 		t.Fatal("review request cannot return a complete explanation")
 	}
 	body := p.request.Messages[0].Content[0].Text
+	payload, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != agent.WrapUntrustedData("tool-input", string(payload)) {
+		t.Fatal("review payload must preserve the complete JSON in an untrusted-data boundary")
+	}
 	var got intercept.ReviewInput
-	if err := json.Unmarshal([]byte(body), &got); err != nil {
+	if err := json.Unmarshal(payload, &got); err != nil {
 		t.Fatal(err)
 	}
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(body), &fields); err != nil {
+	if err := json.Unmarshal(payload, &fields); err != nil {
 		t.Fatal(err)
 	}
 	if len(fields) != 6 {

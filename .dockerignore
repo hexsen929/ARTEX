@@ -3,6 +3,7 @@
 .env.*
 config.json
 jwt.key
+keys
 **/node_modules
 web/.next
 web/out
@@ -22,6 +23,7 @@ bench/seed_v2.sh
 # Local-only artifacts and documentation.
 /doc
 /docs
+/.codegraph
 *.bak
 *.tmp
 *.log

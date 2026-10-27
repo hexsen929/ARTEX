@@ -3324,6 +3324,7 @@ export const tools: Tool[] = [
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 export const settings: Settings = {
+  finding_inline_merge_enabled: false,
   task_intelligence_enabled: false,
   credential_agent_enabled: false,
   credential_traffic_binding: false,
