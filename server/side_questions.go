@@ -92,14 +92,17 @@ func (s *Server) initSideQuestions() {
 			case <-tick.C:
 				s.flushSideSnapshots()
 			case <-s.ctx.Done():
-				s.flushSideSnapshots()
+				// One final best-effort write for transient failures, even when
+				// their retry deadline has not arrived. Invalid/deleted parents
+				// remain quarantined and are not retried during shutdown.
+				s.flushSideSnapshots(true)
 				return
 			}
 		}
 	}()
 }
 
-func (s *Server) flushSideSnapshots() {
+func (s *Server) flushSideSnapshots(forceTransient ...bool) {
 	if s.side == nil || s.m.pg == nil {
 		return
 	}
@@ -109,7 +112,7 @@ func (s *Server) flushSideSnapshots() {
 			return
 		}
 		log.Printf("[btw] checkpoint persistence: %s; retry after %s", sideCheckpointErrorLabel(failure.Err), failure.RetryAfter)
-	})
+	}, forceTransient...)
 }
 
 func (s *Server) sideSnapshot(ctx context.Context, p sidequestion.Parent) (*sidequestion.Snapshot, error) {

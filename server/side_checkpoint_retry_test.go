@@ -93,6 +93,48 @@ func TestSideCheckpointTransientBackoffCoalescesNewVersionsAndRecovers(t *testin
 	}
 }
 
+func TestSideCheckpointShutdownAttemptsDeferredTransientButNotPermanentOrGone(t *testing.T) {
+	state := &sideQuestionState{}
+	now := time.Unix(100, 0)
+	attempts := map[int64]int{}
+	for _, id := range []int64{41, 42, 43} {
+		snap := checkpointRetryFixture(1, 1)
+		snap.Parent.ConversationID = id
+		state.publishCheckpoint(snap)
+	}
+	save := func(_ context.Context, snap sidequestion.Snapshot) error {
+		attempts[snap.Parent.ConversationID]++
+		switch snap.Parent.ConversationID {
+		case 41:
+			return context.DeadlineExceeded
+		case 42:
+			return &pgconn.PgError{Code: "23514"}
+		case 43:
+			return db.ErrSideParentGone
+		}
+		t.Fatal("unexpected checkpoint fixture")
+		return nil
+	}
+	state.flushCheckpoints(func() time.Time { return now }, save, nil)
+	now = now.Add(250 * time.Millisecond)
+	latest := checkpointRetryFixture(1, 2)
+	state.publishCheckpoint(latest)
+	state.flushCheckpoints(func() time.Time { return now }, save, nil)
+	if attempts[41] != 1 || attempts[42] != 1 || attempts[43] != 1 {
+		t.Fatal("normal flush ignored transient backoff or retried a permanent failure")
+	}
+	state.flushCheckpoints(func() time.Time { return now }, func(_ context.Context, snap sidequestion.Snapshot) error {
+		if snap.Parent.ConversationID != 41 || snap.Version != 2 {
+			t.Fatalf("shutdown attempted a blocked parent or stale checkpoint: %+v", snap.Parent)
+		}
+		attempts[41]++
+		return nil
+	}, nil, true)
+	if attempts[41] != 2 || len(state.pending) != 1 || len(state.latest) != 1 || !state.checkpoints[(sidequestion.Parent{ConversationID: 42}).Key()].Permanent {
+		t.Fatal("shutdown did not preserve blocked state while persisting the latest transient checkpoint")
+	}
+}
+
 func TestSideCheckpointOldRunFailureCannotOverwriteNewRun(t *testing.T) {
 	for _, failure := range []error{&pgconn.PgError{Code: "23514"}, context.DeadlineExceeded, db.ErrSideParentGone} {
 		t.Run(fmt.Sprintf("%T/%v", failure, failure), func(t *testing.T) {

@@ -68,16 +68,17 @@ func (s *sideQuestionState) publishCheckpoint(snap sidequestion.Snapshot) {
 // flushCheckpoints keeps blocked/temporarily deferred entries in pending. The
 // archive barrier therefore still sees unsaved checkpoints and never mistakes a
 // stopped retry for a successful persistence operation.
-func (s *sideQuestionState) flushCheckpoints(now func() time.Time, save func(context.Context, sidequestion.Snapshot) error, report func(sideCheckpointFailure)) {
+func (s *sideQuestionState) flushCheckpoints(now func() time.Time, save func(context.Context, sidequestion.Snapshot) error, report func(sideCheckpointFailure), forceTransient ...bool) {
 	s.commands.Lock()
 	defer s.commands.Unlock()
 	s.mu.Lock()
 	s.ensureCheckpointMaps()
 	due := map[string]sidequestion.Snapshot{}
 	currentTime := now()
+	finalAttempt := len(forceTransient) > 0 && forceTransient[0]
 	for key, snap := range s.pending {
 		retry, exists := s.checkpoints[key]
-		if exists && retry.RunID == snap.RunID && retry.Parent == snap.Parent && (retry.Permanent || retry.Gone || currentTime.Before(retry.Next)) {
+		if exists && retry.RunID == snap.RunID && retry.Parent == snap.Parent && (retry.Permanent || retry.Gone || !finalAttempt && currentTime.Before(retry.Next)) {
 			continue
 		}
 		due[key] = snap
