@@ -36,6 +36,7 @@ type sideQuestionState struct {
 	pending      map[string]sidequestion.Snapshot
 	latest       map[string]sidequestion.Snapshot
 	seen         map[string][2]int64
+	checkpoints  map[string]sideCheckpointRetry
 	runs         map[string]sideRun
 	done         chan struct{}
 	outputTokens int
@@ -81,18 +82,7 @@ func (s *Server) initSideQuestions() {
 	if err := s.m.pg.InterruptSideRequests(s.ctx); err != nil {
 		log.Printf("[btw] recover: %v", err)
 	}
-	s.ctx = sidequestion.WithPublisher(s.ctx, func(snap sidequestion.Snapshot) {
-		s.side.mu.Lock()
-		defer s.side.mu.Unlock()
-		key := snap.Parent.Key()
-		old, ok := s.side.seen[key]
-		if ok && (old[0] > snap.RunID || old[0] == snap.RunID && old[1] >= snap.Version) {
-			return
-		}
-		s.side.latest[key] = snap
-		s.side.seen[key] = [2]int64{snap.RunID, snap.Version}
-		s.side.pending[key] = snap
-	})
+	s.ctx = sidequestion.WithPublisher(s.ctx, s.side.publishCheckpoint)
 	go func() {
 		defer close(s.side.done)
 		tick := time.NewTicker(250 * time.Millisecond)
@@ -113,29 +103,13 @@ func (s *Server) flushSideSnapshots() {
 	if s.side == nil || s.m.pg == nil {
 		return
 	}
-	s.side.commands.Lock()
-	defer s.side.commands.Unlock()
-	s.side.mu.Lock()
-	pending := s.side.pending
-	s.side.pending = map[string]sidequestion.Snapshot{}
-	s.side.mu.Unlock()
-	for key, snap := range pending {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		err := s.m.pg.SaveSideSnapshot(ctx, snap)
-		cancel()
-		s.side.mu.Lock()
-		if err == nil || errors.Is(err, db.ErrSideParentGone) {
-			if cur, ok := s.side.latest[key]; ok && cur.RunID == snap.RunID && cur.Version == snap.Version {
-				delete(s.side.latest, key)
-			}
-		} else if newer, ok := s.side.pending[key]; !ok || newer.RunID < snap.RunID || newer.RunID == snap.RunID && newer.Version < snap.Version {
-			s.side.pending[key] = snap
+	s.side.flushCheckpoints(time.Now, s.m.pg.SaveSideSnapshot, func(failure sideCheckpointFailure) {
+		if failure.Permanent {
+			log.Printf("[btw] checkpoint persistence: %s; retries stopped for this run; checkpoint remains unsaved", sideCheckpointErrorLabel(failure.Err))
+			return
 		}
-		s.side.mu.Unlock()
-		if err != nil && !errors.Is(err, db.ErrSideParentGone) {
-			log.Printf("[btw] checkpoint persistence: %v", err)
-		}
-	}
+		log.Printf("[btw] checkpoint persistence: %s; retry after %s", sideCheckpointErrorLabel(failure.Err), failure.RetryAfter)
+	})
 }
 
 func (s *Server) sideSnapshot(ctx context.Context, p sidequestion.Parent) (*sidequestion.Snapshot, error) {

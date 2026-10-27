@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 type sideAgentProvider struct {
 	calls int
 	path  string
+	infos []RunInfo
 }
 
 func (p *sideAgentProvider) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
@@ -46,13 +48,110 @@ func (p *sideAgentProvider) Stream(ctx context.Context, req llm.CompletionReques
 		y(llm.StreamEvent{Type: llm.SEMessageStop}, nil)
 	}
 }
-func (p *sideAgentProvider) Complete(_ context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+func (p *sideAgentProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 	p.calls++
+	p.infos = append(p.infos, RunInfoFrom(ctx))
 	if p.calls == 1 {
 		input, _ := json.Marshal(map[string]string{"file_path": p.path})
 		return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Type: llm.BlockToolUse, ID: "fixture-read", Name: "Read", Input: input}}}, "tool_use", llm.Usage{}, nil
 	}
 	return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("main finished")}}, "end_turn", llm.Usage{}, nil
+}
+
+func TestSideCaptureParentChoosesConversationWithoutChangingTaskContext(t *testing.T) {
+	info := RunInfo{TaskID: 11, ExplorationID: 13, IntentID: 17, SessionID: "conv-19"}
+	parent, ok := sideCaptureParent(info)
+	if !ok || parent != (sidequestion.Parent{ConversationID: 19}) || info.TaskID != 11 || info.ExplorationID != 13 || info.IntentID != 17 {
+		t.Fatalf("mixed conversation identity: %+v %+v %v", info, parent, ok)
+	}
+	for _, sessionID := range []string{"conv-", "conv-invalid", "conv-0", "conv--1", "conv-+1", "conv-01", "conv-1-tail", "conv-9223372036854775808"} {
+		info.SessionID = sessionID
+		if got, ok := sideCaptureParent(info); ok {
+			t.Fatalf("malformed conversation fell back to task: %q %+v", sessionID, got)
+		}
+	}
+	info.SessionID = "task-run"
+	if got, ok := sideCaptureParent(info); !ok || got != (sidequestion.Parent{TaskID: 11, ExplorationID: 13, IntentID: 17}) {
+		t.Fatalf("task identity changed: %+v %v", got, ok)
+	}
+	if got, ok := sideCaptureParent(RunInfo{}); ok {
+		t.Fatalf("empty identity accepted: %+v", got)
+	}
+}
+
+func TestTaskAssociatedVerifierSideCapturePersistsConversationOnly(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(map[bool]string{true: "stream", false: "atomic"}[streaming], func(t *testing.T) {
+			dsn, _, err := db.DSN()
+			if err != nil {
+				t.Fatal(err)
+			}
+			pg, err := db.Open(dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = pg.Close() })
+			task, err := pg.CreateTask("side capture verifier fixture", "fixture", nil, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = pg.DeleteTask(task.ID) })
+			intentID, err := pg.Exploration(task.ExplorationID).AddNode("intent", map[string]any{"summary": "fixture"}, 0, "running", "planner", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			conversation, err := pg.CreateConversation("verifier", "side capture verifier fixture", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = pg.DeleteConversation(conversation.ID) })
+			dir := t.TempDir()
+			file := filepath.Join(dir, "asset.txt")
+			if err := os.WriteFile(file, []byte("verifier-local-fixture"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			provider := &sideAgentProvider{path: file}
+			bound := sidequestion.Bind(provider, sidequestion.Model{Model: "fixture", Streaming: streaming})
+			chat := NewChatAgent(bound, "fixture", dir, nil, 100000)
+			chat.SetNonStreaming(func() bool { return !streaming })
+			original := RunInfo{TaskID: task.ID, ExplorationID: task.ExplorationID, IntentID: intentID, SessionID: "parent-run"}
+			parentCtx := WithRunInfo(t.Context(), original)
+			var snapshots []sidequestion.Snapshot
+			ctx := sidequestion.WithPublisher(parentCtx, func(snapshot sidequestion.Snapshot) {
+				if snapshot.Parent != (sidequestion.Parent{ConversationID: conversation.ID}) {
+					t.Errorf("checkpoint inherited mixed task identity: %+v", snapshot.Parent)
+				}
+				if err := pg.SaveSideSnapshot(t.Context(), snapshot); err != nil {
+					t.Errorf("persist captured checkpoint: %v", err)
+				}
+				snapshots = append(snapshots, snapshot)
+			})
+			sessionID := fmt.Sprintf("conv-%d", conversation.ID)
+			if _, err := chat.Chat(ctx, "verifier", sessionID, "Read the local fixture", 5, time.Minute, false, nil); err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshots) < 3 || RunInfoFrom(parentCtx) != original {
+				t.Fatalf("checkpoint capture/parent context changed: snapshots=%d info=%+v", len(snapshots), RunInfoFrom(parentCtx))
+			}
+			if len(provider.infos) == 0 {
+				t.Fatal("fixture provider was not called")
+			}
+			for _, info := range provider.infos {
+				if info.TaskID != original.TaskID || info.ExplorationID != original.ExplorationID || info.IntentID != original.IntentID || info.SessionID != sessionID {
+					t.Fatalf("audit/tool model context lost task attribution: %+v", info)
+				}
+			}
+			stored, err := pg.SideSnapshot(t.Context(), sessionID)
+			if err != nil || stored == nil || stored.Parent != (sidequestion.Parent{ConversationID: conversation.ID}) {
+				t.Fatalf("stored conversation checkpoint: %+v %v", stored, err)
+			}
+			var exclusive bool
+			if err := pg.QueryRow(`SELECT conversation_id=$2 AND task_id IS NULL AND exploration_id IS NULL AND intent_id IS NULL
+FROM side_question_sessions WHERE session_key=$1`, sessionID, conversation.ID).Scan(&exclusive); err != nil || !exclusive {
+				t.Fatalf("stored parent columns violate exclusive identity: %v %v", exclusive, err)
+			}
+		})
+	}
 }
 
 func TestSideActualChatCheckpointToolResultAndTranscriptIsolation(t *testing.T) {
