@@ -16,6 +16,7 @@ import (
 // UnlockSkill unlocks a named skill's MCPs — hosts call it to rebuild the unlock set
 // from history on a resumed session (design doc C2).
 type DeferredInfo struct {
+	AssemblyError        error // explicit per-run authorization metadata failures; caller must stop before model execution
 	IntelligenceGuidance string
 	CaseGuidance         string // independent of optional traffic binding
 
@@ -51,6 +52,9 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 		extra, def, cl = ToolAugment(ctx, agentKey)
 		if cl != nil {
 			cleanup = cl
+		}
+		if def.AssemblyError != nil {
+			return base, def, cleanup
 		}
 		if len(extra) > 0 {
 			out = append(append([]actool.CoreTool{}, base...), extra...)

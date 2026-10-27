@@ -362,7 +362,7 @@ ON CONFLICT DO NOTHING`, r.kind, r.pattern, r.note); err != nil {
 // builtinSkillVisibility maps a shipped skill's directory name → the built-in
 // agent keys that should see it by default. The skill FILES themselves live on the
 // filesystem (SkillDir, loaded by norma at runtime); DB only carries this visibility
-// binding. Skills omitted here (e.g. playwright-cli, scopesentry) ship invisible by
+// binding. Skills omitted here (e.g. scopesentry) ship invisible by
 // default — the user turns them on per-agent when needed. scopesentry additionally
 // declares `mcps: ScopeSentry`, which only takes effect once it's made visible and
 // that MCP is enabled/configured.
@@ -385,21 +385,11 @@ var builtinSkillVisibility = map[string][]string{
 	"ctf-ai-ml":                {"pentest"},
 }
 
-// seedBuiltinSkillVisibility binds the shipped built-in skills to their default
-// agents. Insert-if-absent (ON CONFLICT DO NOTHING) so a user's later toggle-off is
-// never resurrected on restart — matches the browser-MCP / intercept-rule seed policy.
+// seedBuiltinSkillVisibility is the DB-open half of default initialization.
+// Server startup repeats it after creating auxiliary agents; the per-agent
+// initialization marker preserves explicit choices, including an empty list.
 func (d *DB) seedBuiltinSkillVisibility() error {
-	for skillName, agentKeys := range builtinSkillVisibility {
-		for _, key := range agentKeys {
-			if _, err := d.Exec(`
-INSERT INTO agent_skill_visibility(agent_id, skill_name, enabled)
-SELECT id, $2, true FROM agents WHERE key=$1
-ON CONFLICT (agent_id, skill_name) DO NOTHING`, key, skillName); err != nil {
-				return fmt.Errorf("skill %s → agent %s: %w", skillName, key, err)
-			}
-		}
-	}
-	return nil
+	return d.SeedBuiltinSkillVisibility()
 }
 
 // seedDefaultInterceptRules inserts built-in safety intercept rules once on

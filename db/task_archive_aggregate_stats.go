@@ -1,8 +1,10 @@
 package db
 
 import (
+	"database/sql"
 	"encoding/json"
 	"sort"
+	"time"
 )
 
 // taskArchiveAggregate is the compact, non-sensitive statistics section of a
@@ -14,8 +16,88 @@ type taskArchiveAggregate struct {
 	Skills            map[string]int    `json:"skills"`
 	SkillStats        []SkillStat       `json:"skill_stats"`
 	MissingSkillStats []SkillStat       `json:"missing_skill_stats"`
-	Tools             map[string]int    `json:"tools"`
-	FindingStats      FindingStats      `json:"finding_stats"`
+	// New archives retain non-sensitive event dimensions so a notice cleared
+	// between two calls to the same skill can be excluded precisely. Old archives
+	// remain readable through their aggregate last_used timestamps.
+	MissingSkillEvents []archivedMissingSkillEvent `json:"missing_skill_events"`
+	Tools              map[string]int              `json:"tools"`
+	FindingStats       FindingStats                `json:"finding_stats"`
+}
+
+type archivedMissingSkillEvent struct {
+	Skill    string    `json:"skill"`
+	AgentKey string    `json:"agent_key"`
+	TS       time.Time `json:"ts"`
+}
+
+func archivedMissingSkillAggregates(q interface {
+	Query(string, ...any) (*sql.Rows, error)
+}) ([]taskArchiveAggregate, error) {
+	rows, err := q.Query(`SELECT archive.aggregate_stats
+FROM task_archives archive
+JOIN tasks task ON task.id=archive.task_id
+WHERE task.archived_at IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []taskArchiveAggregate{}
+	for rows.Next() {
+		var raw json.RawMessage
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var aggregate taskArchiveAggregate
+		if err := json.Unmarshal(raw, &aggregate); err != nil {
+			return nil, err
+		}
+		out = append(out, aggregate)
+	}
+	return out, rows.Err()
+}
+
+func mergeUnacknowledgedArchivedSkillStats(live []SkillStat, archived []taskArchiveAggregate, cutoff *time.Time) []SkillStat {
+	if cutoff == nil {
+		return mergeArchivedSkillStats(live, archived, true)
+	}
+	filtered := make([]taskArchiveAggregate, 0, len(archived))
+	for _, archive := range archived {
+		if archive.MissingSkillEvents != nil {
+			byName := map[string]SkillStat{}
+			for _, event := range archive.MissingSkillEvents {
+				if !event.TS.After(*cutoff) {
+					continue
+				}
+				current := byName[event.Skill]
+				current.Skill = event.Skill
+				current.Calls++
+				current.Agents = mergeAgentKeys(current.Agents, []string{event.AgentKey})
+				if current.LastUsed == nil || event.TS.After(*current.LastUsed) {
+					timestamp := event.TS
+					current.LastUsed = &timestamp
+				}
+				byName[event.Skill] = current
+			}
+			archive.MissingSkillStats = nil
+			for _, current := range byName {
+				archive.MissingSkillStats = append(archive.MissingSkillStats, current)
+			}
+		} else {
+			// Legacy cold summaries predate acknowledgement support. Normal old
+			// archives are wholly before the first clear. A newly imported legacy
+			// summary with later activity remains visible as a historical aggregate;
+			// the old format does not contain per-event times to split it further.
+			var retained []SkillStat
+			for _, stat := range archive.MissingSkillStats {
+				if stat.LastUsed != nil && stat.LastUsed.After(*cutoff) {
+					retained = append(retained, stat)
+				}
+			}
+			archive.MissingSkillStats = retained
+		}
+		filtered = append(filtered, archive)
+	}
+	return mergeArchivedSkillStats(live, filtered, true)
 }
 
 func (d *DB) archivedTaskAggregates() ([]taskArchiveAggregate, error) {

@@ -1069,13 +1069,43 @@ func (s *Server) fsMissingSkills(w http.ResponseWriter, r *http.Request) {
 	}
 	view := make([]map[string]any, 0, len(missing))
 	for _, item := range missing {
-		_, statErr := os.Stat(filepath.Join(s.skillDir, item.Skill, "SKILL.md"))
 		view = append(view, map[string]any{
 			"skill": item.Skill, "calls": item.Calls, "agents": item.Agents,
-			"last_used": item.LastUsed, "library_present": statErr == nil,
+			"last_used": item.LastUsed, "library_present": skillLibraryPresent(s.skillDir, item.Skill),
 		})
 	}
 	writeJSON(w, 200, map[string]any{"missing": view})
+}
+
+// A name in the miss ledger is model-supplied. Do not inspect arbitrary paths or
+// follow an out-of-library symlink when reporting whether its SKILL.md exists.
+// File presence deliberately says nothing about an Agent's authorization.
+func skillLibraryPresent(root, name string) bool {
+	if !validSkillName(name) {
+		return false
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	canonicalRoot, err = filepath.Abs(canonicalRoot)
+	if err != nil {
+		return false
+	}
+	path, err := filepath.EvalSymlinks(filepath.Join(root, name, "SKILL.md"))
+	if err != nil {
+		return false
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(canonicalRoot, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func (s *Server) fsClearMissingSkills(w http.ResponseWriter, r *http.Request) {

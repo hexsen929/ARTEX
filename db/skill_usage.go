@@ -1,7 +1,10 @@
 package db
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -36,10 +39,38 @@ VALUES ($1, NULLIF($2,''), $3, $4, $5, NULLIF($6,''), $7, $8)`,
 	return err
 }
 
-// ClearMissingSkillUsage removes historical unresolved Skill() calls only.
+const skillMissingNoticesClearedThrough = "skill_missing_notices_cleared_through_v1"
+
+// ClearMissingSkillUsage acknowledges notices through the database's current
+// clock. The underlying live and archived invocation records remain intact.
+// A later unresolved invocation appears again. GREATEST prevents two concurrent
+// acknowledgements from moving the high-water mark backwards.
 func (d *DB) ClearMissingSkillUsage() error {
-	_, err := d.Exec(`DELETE FROM skill_usage WHERE NOT found`)
+	_, err := d.Exec(`INSERT INTO settings(key,value)
+VALUES ($1, floor(extract(epoch FROM clock_timestamp()) * 1000000)::bigint::text)
+ON CONFLICT (key) DO UPDATE
+SET value=GREATEST(settings.value::bigint, EXCLUDED.value::bigint)::text,
+    updated_at=now()`, skillMissingNoticesClearedThrough)
 	return err
+}
+
+func missingSkillNoticeCutoff(q interface {
+	QueryRow(string, ...any) *sql.Row
+}) (*time.Time, error) {
+	var raw string
+	err := q.QueryRow(`SELECT value FROM settings WHERE key=$1`, skillMissingNoticesClearedThrough).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	micros, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || micros < 0 {
+		return nil, fmt.Errorf("invalid skill notice acknowledgement timestamp")
+	}
+	cutoff := time.UnixMicro(micros).UTC()
+	return &cutoff, nil
 }
 
 func nullIfZero(v int64) any {
@@ -113,14 +144,25 @@ func (d *DB) MissingSkillStats(limit int) ([]SkillStat, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20
 	}
-	rows, err := d.Query(`
+	// Keep live rows, acknowledgement and cold aggregates in one snapshot, so a
+	// concurrent archive operation cannot count the same event in both stores.
+	tx, err := d.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	cutoff, err := missingSkillNoticeCutoff(tx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(`
 SELECT skill, COUNT(*) AS calls,
        COALESCE(STRING_AGG(DISTINCT agent_key, ','), '') AS agents,
        MAX(ts) AS last_used
 FROM skill_usage
-WHERE NOT found
+WHERE NOT found AND ($1::timestamptz IS NULL OR ts > $1)
 GROUP BY skill
-ORDER BY COUNT(*) DESC, skill`)
+ORDER BY COUNT(*) DESC, skill`, cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -146,11 +188,14 @@ ORDER BY COUNT(*) DESC, skill`)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	archived, err := d.archivedTaskAggregates()
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	archived, err := archivedMissingSkillAggregates(tx)
 	if err != nil {
 		return nil, err
 	}
-	out = mergeArchivedSkillStats(out, archived, true)
+	out = mergeUnacknowledgedArchivedSkillStats(out, archived, cutoff)
 	if len(out) > limit {
 		out = out[:limit]
 	}

@@ -769,6 +769,9 @@ SELECT skill,count(*) calls,0 tasks,
        COALESCE(array_agg(DISTINCT agent_key) FILTER (WHERE agent_key IS NOT NULL),ARRAY[]::text[]) agents,
        max(ts) last_used
 FROM skill_usage WHERE (task_id=$1 OR exploration_id=$2) AND NOT found GROUP BY skill) x`, []any{taskID, expID}},
+		{"missing_skill_events", `SELECT COALESCE(jsonb_agg(to_jsonb(x)),'[]'::jsonb) FROM (
+SELECT skill,COALESCE(agent_key,'') agent_key,ts
+FROM skill_usage WHERE (task_id=$1 OR exploration_id=$2) AND NOT found ORDER BY ts,id) x`, []any{taskID, expID}},
 		{"tools", `SELECT COALESCE(jsonb_object_agg(name,n),'{}'::jsonb) FROM (SELECT tool_key name,count(*) n FROM tool_usage WHERE task_id=$1 OR exploration_id=$2 GROUP BY tool_key) x`, []any{taskID, expID}},
 		{"findings", `SELECT COALESCE(jsonb_object_agg(name,n),'{}'::jsonb) FROM (SELECT COALESCE(NULLIF(severity,''),'unknown') name,count(*) n FROM findings WHERE task_id=$1 GROUP BY severity) x`, []any{taskID}},
 		{"finding_stats", `SELECT jsonb_build_object(
