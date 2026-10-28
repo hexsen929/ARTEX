@@ -120,6 +120,7 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 	if ts != nil {
 		ctx = transcript.WithSessionID(ctx, fmt.Sprintf("exp%d-goals", ts.ID()))
 	}
+	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
 	// worker="goals" tags the goal nodes' provenance; ts/taskID let set_goals link
 	// each goal under the task root. This is the catalog's real set_goals tool, so a
 	// web-edited description/schema on it applies here too.
@@ -128,6 +129,7 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 	// {{.EngagementDescription}} template var — else a prompt that references the var
 	// would inject the description twice. System prompt stays pure static instructions.
 	sys := renderSystem("goals", goalsDefaultTmpl, GoalsVars{DataDir: dataDir, Now: nowStr()})
+	sys = withAgentWorkGuidance(sys, "goals")
 	// set_constraints 始终可用(不依赖 asset store):正文已含「先抽操作约束再拆目标」这步
 	// (可在 agent 编辑页改措辞),这里只需接上工具。
 	tools := []actool.CoreTool{tsx.setGoals(), tsx.setConstraints()}
@@ -150,9 +152,17 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 			emit(r)
 		}
 	}
+	tools, def, cleanup := AugmentTools(ctx, "goals", tools)
+	defer cleanup()
+	if def.AssemblyError != nil {
+		captureEmit(db.Activity{Kind: "result", IsError: true, Summary: "目标拆解工具装配未完成，本轮未请求模型"})
+		return nil
+	}
+	system, boundary := deferredSystem(sys, def)
 	captureRun(ctx, agentcore.Options{
 		Provider:               prov,
-		SystemPrompt:           []string{sys},
+		SystemPrompt:           system,
+		DynamicBoundary:        boundary,
 		Tools:                  tools,
 		PermissionMode:         acperm.ModeBypass,
 		DisableBackgroundTasks: true,

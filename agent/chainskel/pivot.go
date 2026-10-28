@@ -2,6 +2,9 @@ package chainskel
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -78,16 +81,34 @@ func PivotHintsForIntent(payload json.RawMessage, max int) string {
 // RefsGuideForIntent 在意图命中类别时返回 L4 原文指引行(追加在 L3 骨架注入块
 // 之后):告诉 worker 完整反问决策链原文的可 Read 路径。类别解析与 ForIntent
 // 完全一致(同一 intentCats),匹配不中返回 ""(与骨架一样静默不注入)。
-// 文本静态、只随 chain_tags 变化,不破坏 prompt 缓存粒度。
-func RefsGuideForIntent(payload json.RawMessage) string {
+// skillDirs is the current run's authorized, successfully loaded Skill directory
+// map, not a working-directory-relative default. Omitting it is supported for
+// older callers, but never emits a path guessed from the task's current directory.
+func RefsGuideForIntent(payload json.RawMessage, skillDirs ...map[string]string) string {
 	cats := intentCats(payload)
 	if len(cats) == 0 {
 		return ""
 	}
-	paths := make([]string, len(cats))
-	for i, c := range cats {
-		paths[i] = "skills/chains-" + c + "/refs/"
+	if len(skillDirs) == 0 || len(skillDirs[0]) == 0 {
+		return ""
+	}
+	var paths []string
+	for _, c := range cats {
+		dir := skillDirs[0]["chains-"+c]
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		refs := filepath.Join(dir, "refs")
+		if info, err := os.Stat(refs); err != nil || !info.IsDir() {
+			continue
+		}
+		// A quoted path stays unambiguous for spaces, Unicode, and Windows
+		// separators. It is data for the Read tool, never a shell command.
+		paths = append(paths, strconv.Quote(refs))
+	}
+	if len(paths) == 0 {
+		return ""
 	}
 	return "\n【L4 原文指引】该领域的反问决策链原文在 " + strings.Join(paths, "、") +
-		"(精确篇目见对应 SKILL.md),卡住或需要完整判据时 Read 对应文件。"
+		"(由本次已授权 Skill 的实际目录解析；精确篇目见对应 SKILL.md),卡住或需要完整判据时 Read 对应文件，不要相对任务工作目录猜测路径。"
 }

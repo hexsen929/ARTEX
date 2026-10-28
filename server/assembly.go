@@ -27,14 +27,17 @@ import (
 // filters them per-agent binding. Empty/nil → no host tools this run (capture off).
 func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string), taskDialers ...taskMCPDialer) {
 	agent.ToolAugment = func(ctx context.Context, agentKey string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
+		if agentKey == "worker.intranet" {
+			return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("内网提示词变体不支持独立执行，请使用 worker 任务运行")}, nil
+		}
 		skillAgentKey := agent.SkillVisibilityAgent(ctx, agentKey)
 		separateSkillRole := skillAgentKey != agentKey
 		a, err := pg.GetAgentByKey(agentKey)
-		if err != nil || a == nil {
-			if separateSkillRole {
-				return nil, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取执行角色 %s 失败", agentKey)}, nil
-			}
-			return nil, agent.DeferredInfo{}, nil
+		if err != nil || a == nil || !a.Enabled {
+			return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("执行角色 %s 不可用，未装配工具", agentKey)}, nil
+		}
+		if agentKey == db.CredentialAgentKey {
+			return []actool.CoreTool{}, agent.DeferredInfo{}, nil
 		}
 		var extra []actool.CoreTool
 		var taskDial taskMCPDialer
@@ -48,13 +51,13 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 		skillAgent := a
 		if separateSkillRole {
 			skillAgent, err = pg.GetAgentByKey(skillAgentKey)
-			if err != nil || skillAgent == nil {
-				return nil, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 Skill 角色 %s 失败", skillAgentKey)}, nil
+			if err != nil || skillAgent == nil || !skillAgent.Enabled {
+				return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 Skill 角色 %s 失败", skillAgentKey)}, nil
 			}
 		}
 		names, skillErr := pg.AgentSkillNames(skillAgent.ID)
-		if skillErr != nil && separateSkillRole {
-			return nil, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 Skill 角色 %s 的授权失败: %w", skillAgentKey, skillErr)}, nil
+		if skillErr != nil {
+			return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 Skill 角色 %s 的授权失败，未装配工具", skillAgentKey)}, nil
 		}
 		// A prompt variant may choose a different Skill set, but cannot obtain a
 		// new MCP grant merely by referencing a server from that Skill. Preserve
@@ -64,10 +67,11 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 		if separateSkillRole {
 			baseSkillNames, err = pg.AgentSkillNames(a.ID)
 			if err != nil {
-				return nil, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取执行角色 %s 的 Skill 授权失败: %w", agentKey, err)}, nil
+				return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取执行角色 %s 的 Skill 授权失败，未装配工具", agentKey)}, nil
 			}
 		}
 		var reg *skill.Registry
+		skillDirs := map[string]string{}
 		if len(names) > 0 || len(baseSkillNames) > 0 {
 			nameSet := make(map[string]bool, len(names))
 			for _, n := range names {
@@ -77,16 +81,44 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 			for _, n := range baseSkillNames {
 				baseNameSet[n] = true
 			}
-			allReg, loadErr := skill.LoadDir(skillDir)
-			if loadErr != nil && separateSkillRole {
-				return nil, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 Skill 库失败: %w", loadErr)}, nil
+			root, rootErr := filepath.Abs(skillDir)
+			if rootErr != nil {
+				return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("Skill 目录不可用，未装配工具")}, nil
+			}
+			catalog, catalogErr := inspectSkillCatalog(root)
+			if catalogErr != nil {
+				return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 Skill 库失败，未装配工具")}, nil
+			}
+			expected := map[string]bool{}
+			for _, name := range append(append([]string{}, names...), baseSkillNames...) {
+				expected[name] = true
+				entry, exists := catalog[name]
+				if !exists || !entry.Loadable {
+					return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("已授权 Skill %s 不可加载，请检查技能目录", name)}, nil
+				}
+			}
+			allReg, loadErr := skill.LoadDir(root)
+			if loadErr != nil || allReg == nil {
+				return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 Skill 库失败，未装配工具")}, nil
+			}
+			loaded := map[string]bool{}
+			for _, entry := range allReg.List() {
+				if entry.Dir != "" {
+					loaded[filepath.Base(entry.Dir)] = true
+				}
+			}
+			for name := range expected {
+				if !loaded[name] {
+					return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("已授权 Skill %s 未进入注册表，请检查技能名称冲突", name)}, nil
+				}
 			}
 			if loadErr == nil && allReg != nil {
 				reg = skill.NewRegistry()
 				for _, s := range allReg.List() {
 					// match by directory name (Base of Dir), not by skill display Name
 					if s.Dir != "" && nameSet[filepath.Base(s.Dir)] {
-						reg.Add(s)
+						reg.Add(normalizeLegacyChainReferences(s))
+						skillDirs[filepath.Base(s.Dir)] = s.Dir
 					}
 					if s.Dir != "" && baseNameSet[filepath.Base(s.Dir)] {
 						for _, srv := range s.MCPs {
@@ -99,6 +131,23 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				}
 			}
 		}
+		if agentKey == "goals" {
+			// This runner uses a deliberately limited bypass mode for its own
+			// graph writes. Guidance loading must not introduce execution tools,
+			// network/MCP connections, or dependency-unlock callbacks.
+			if reg != nil {
+				extra = append(extra, meterSkillTool(reg.Tool(), pg, reg, a.Key, agent.RunInfoFrom(ctx)))
+			}
+			reference, closeReferences, err := newGoalsSkillReferenceTool(skillDirs)
+			if err != nil {
+				return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("目标拆解 Skill 参考目录不可用，未装配工具")}, closeReferences
+			}
+			if reference != nil {
+				extra = append(extra, reference)
+			}
+			return extra, agent.DeferredInfo{SkillDirs: skillDirs}, closeReferences
+		}
+
 		// A server named by any visible skill's `mcps:` is skill-gated: its tools
 		// are deferred + locked (not in the global block) until that skill loads.
 		gated := map[string]bool{}
@@ -115,13 +164,32 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 		// and NOT gated → global (unlocked from session start). Skill-gated →
 		// deferred until that skill is invoked (regardless of direct visibility).
 		var closers []io.Closer
+		var warnings []string
+		warnUnavailable := func(name, category string) {
+			// Category is code-owned, not an error string that might include a
+			// private endpoint, authorization header or server-side response.
+			warning := fmt.Sprintf("MCP %q 当前不可用（%s），本轮未装配该服务工具。", name, category)
+			warnings = append(warnings, warning)
+			log.Printf("[assembly] %s", warning)
+		}
+		cleanup := func() {
+			for _, closer := range closers {
+				_ = closer.Close()
+			}
+		}
 		serverTools := map[string][]string{} // server name → its tool names
 		var allNames, globalNames []string
 		globalSet := map[string]bool{}
 		{
-			mcpIDs, _ := pg.AgentVisible(a.ID, "mcp")
+			mcpIDs, err := pg.AgentVisible(a.ID, "mcp")
+			if err != nil {
+				return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 MCP 授权失败，未装配工具")}, cleanup
+			}
 			want := idSet(mcpIDs)
-			all, _ := pg.ListMCP()
+			all, err := pg.ListMCP()
+			if err != nil {
+				return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 MCP 目录失败，未装配工具")}, cleanup
+			}
 			for _, m := range all {
 				if !m.Enabled {
 					continue
@@ -138,8 +206,14 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 					metadataCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 					metadata, err := cacheMCPMetadata(metadataCtx, pg, m, false)
 					cancel()
+					if !mcpSchemasReady(metadata) {
+						warnUnavailable(m.Name, "工具元数据未就绪")
+						continue
+					}
 					if err != nil {
-						log.Printf("[mcp] %s 工具元数据暂不可用，保留已缓存工具供后续重试: %v", m.Name, err)
+						warning := fmt.Sprintf("MCP %q 发现暂不可用，本轮使用已缓存的有效工具元数据。", m.Name)
+						warnings = append(warnings, warning)
+						log.Printf("[assembly] %s", warning)
 					}
 					session := newLazyMCPSession(ctx, m)
 					attachTaskMCPDialer(session, taskID, taskDial)
@@ -151,15 +225,16 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 					// Remote SSE/HTTP connections retain their existing lifecycle.
 					cl, err := connectMCP(ctx, m)
 					if err != nil {
-						log.Printf("[mcp] %s 连接失败: %v", m.Name, err)
+						warnUnavailable(m.Name, "连接未就绪")
+						continue
+					}
+					ts, err = cl.Tools(ctx)
+					if err != nil {
+						_ = cl.Close()
+						warnUnavailable(m.Name, "工具发现未就绪")
 						continue
 					}
 					closers = append(closers, cl)
-					ts, err = cl.Tools(ctx)
-					if err != nil {
-						log.Printf("[mcp] %s tools/list 失败: %v", m.Name, err)
-						continue
-					}
 				}
 				for _, t := range ts {
 					t = meterTool(t, pg, t.Name(), a.Key, agent.RunInfoFrom(ctx))
@@ -232,16 +307,13 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 			}
 		}
 
-		cleanup := func() {
-			for _, c := range closers {
-				_ = c.Close()
-			}
-		}
 		def := agent.DeferredInfo{
-			Deferred:    allNames,
-			GlobalNames: globalNames,
-			Unlock:      unlock,
-			UnlockSkill: unlockSkill,
+			SkillDirs:        skillDirs,
+			AssemblyWarnings: warnings,
+			Deferred:         allNames,
+			GlobalNames:      globalNames,
+			Unlock:           unlock,
+			UnlockSkill:      unlockSkill,
 		}
 		return extra, def, cleanup
 	}
@@ -316,10 +388,16 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 	// without ever referencing a tool that isn't injected (§14.1/§14.2).
 	const bashInteractiveShellNote = "\n\n需要【交互输入】的程序（msfconsole / ssh 交互登录 / mysql、psql、python 等 REPL / 密码或 yes/no 提示 / nc 反弹 shell）不要用 Bash（它没有 stdin、会卡住），改用 shell_open 开交互会话（用完 shell_close）。一次性、非交互命令仍用 Bash。"
 	agent.ToolResolve = func(ctx context.Context, agentKey string, tools []actool.CoreTool) []actool.CoreTool {
+		if agentKey == "worker.intranet" {
+			return agent.ToolAssemblyFailure(fmt.Errorf("内网提示词变体不支持独立执行"))
+		}
+		if agentKey == db.CredentialAgentKey {
+			return []actool.CoreTool{}
+		}
 		rows, err := pg.ListTools()
 		if err != nil {
-			log.Printf("[tools] 读取工具表失败，按代码默认放行: %v", err)
-			return tools
+			log.Printf("[tools] 读取工具表失败，本轮工具装配已停止")
+			return agent.ToolAssemblyFailure(fmt.Errorf("读取工具授权目录失败，未装配工具"))
 		}
 		byKey := make(map[string]*db.Tool, len(rows))
 		for _, t := range rows {
@@ -335,6 +413,9 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		}
 		out := tools[:0:0]
 		for _, t := range tools {
+			if agentKey == "goals" && !agent.IsGoalsToolAllowed(t.Name()) {
+				continue
+			}
 			row, known := byKey[t.Name()]
 			if !known { // MCP/skill/host tool: no row → untouched
 				out = append(out, t)
@@ -350,7 +431,7 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		// and therefore never includes ToolSet-backed domain tools. Per-task instances
 		// in the base always win: inList is built from the original incoming list so a
 		// worker's own upsert_asset is never shadowed by the server-level registry copy.
-		if len(domainReg) > 0 {
+		if agentKey != "goals" && len(domainReg) > 0 {
 			inList := make(map[string]bool, len(tools))
 			for _, t := range tools {
 				inList[t.Name()] = true
@@ -388,8 +469,12 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		// web_search), NOT by tools-table binding. When on, inject the 5 shell_* tools
 		// and COUPLE the Bash description addendum so it points at shell_open — and never
 		// dangles when off. See docs/交互式shell设计.md §14.2.
-		if !actool.InteractiveShellDisabled() {
-			if a, err := pg.GetAgentByKey(agentKey); err == nil && a != nil && a.InteractiveShell {
+		if agentKey != "goals" && !actool.InteractiveShellDisabled() {
+			a, err := pg.GetAgentByKey(agentKey)
+			if err != nil || a == nil || !a.Enabled {
+				return agent.ToolAssemblyFailure(fmt.Errorf("读取执行角色配置失败，未装配工具"))
+			}
+			if a.InteractiveShell {
 				out = append(out, actool.ShellSessionTools()...)
 				for i, t := range out {
 					if t.Name() == "Bash" {

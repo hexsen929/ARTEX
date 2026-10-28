@@ -1207,6 +1207,17 @@ export interface LLMPoolStatus {
 }
 
 // ---- Agents ----
+export interface AgentRuntimeCapabilities {
+  execution_agent_key: string;
+  tool_binding_mode: "direct" | "inherited" | "limited" | "unsupported";
+  mcp_binding_mode: "direct" | "inherited" | "unsupported";
+  skill_binding_mode: "direct" | "readonly" | "unsupported";
+  allowed_tool_keys?: string[];
+  runtime_config_mode?: "direct" | "inherited" | "llm_only";
+  runtime_config_agent_key?: string;
+  note?: string;
+}
+
 export interface Agent {
   id: string;
   key: string; // 内置为 goals/planner/mainagent/worker；自定义为用户自定 key
@@ -1228,6 +1239,18 @@ export interface Agent {
   mcp_count?: number;
   skill_count?: number;
   tool_count?: number;
+  /** Explicit enabled bindings, not a runtime health or effective-tool count. */
+  binding_counts_available?: boolean;
+  binding_counts_error?: string;
+  capabilities?: AgentRuntimeCapabilities;
+  automation?: {
+    kind: "finding_verification" | "credential_processing";
+    available: boolean;
+    enabled: boolean;
+    configured: boolean;
+    state: string;
+    reason: string;
+  };
 }
 
 export interface PromptVar {
@@ -1244,12 +1267,23 @@ export interface PromptVersion {
   template_text: string;
 }
 
+export interface AgentPromptPreview {
+  rendered: string;
+  error?: string;
+  /** Versioned runtime guidance is separate from the editable prompt body. */
+  work_guidance_version?: string;
+  work_guidance?: string;
+}
+
 export interface AgentDetail {
   agent: Agent;
   prompt: string;
   variables: PromptVar[];
   versions: PromptVersion[];
   visibility: { mcp: number[]; skill: string[] };
+  /** Added by the program at runtime; never saved into the user's prompt text. */
+  work_guidance_version?: string;
+  work_guidance?: string;
   // 可绑定的 LLM 配置候选(供「默认模型」下拉)；当前绑定见 agent.llm_profile_id
   llm_profiles?: { id: number; name: string; model: string; is_default: boolean }[];
   wrapup_prompt?: string; // 已保存的收尾提示词(空=用内置默认)
@@ -1293,9 +1327,14 @@ export interface SkillItem {
   compatibility?: string; // optional: environment requirements
   mcps?: string[]; // MCP server names this skill unlocks on load
   files: string[]; // files in the skill directory
-  // 调用统计（skill_usage 账本）。从未被调用过的 skill：calls=0、last_used 缺省。
-  calls: number;
-  tasks: number; // 加载过它的任务数（chat 会话不计入）
+  // 显式 Skill 加载记录；不包含代码自动注入，统计不可用为 null。
+  calls: number | null;
+  usage_available?: boolean;
+  usage_error?: string;
+  loadable?: boolean;
+  load_error?: string;
+  declared_name?: string;
+  tasks: number | null; // 加载过它的任务数；统计不可用为 null
   usage_agents: string[]; // 加载过它的 agent key
   last_used?: string;
 }
@@ -1334,7 +1373,10 @@ export interface Tool {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   exec?: Record<string, any>; // 自定义工具执行规格(kind!=builtin)
   deferred?: boolean; // schema 延迟(SearchExtraTools/ExecuteExtraTool)
-  calls?: number; // persistent runtime invocation count (older APIs may omit it)
+  calls?: number | null; // catalog invocation attempts, not successful executions
+  usage_kind?: "callable" | "shell_declaration";
+  usage_available?: boolean;
+  usage_error?: string;
 }
 
 // ---- Stats ----
@@ -1840,18 +1882,54 @@ export interface TunnelInfo {
   error?: string;
 }
 
-/** GET /api/intranet/credentials 的凭据记录（密钥已脱敏）。 */
+export type CredentialVerificationStatus = "unverified" | "verified" | "failed";
+
+/** 凭据台账的脱敏投影。完整 secret 仅由独立、按需请求返回。 */
 export interface IntranetCredential {
-  id: string;
+  id: number;
+  task_id: number;
+  task_name: string;
+  task_available: boolean;
+  host_asset_id?: number;
   cred_type: string;
   username: string;
+  /** 所属目标/站点，与 AD/Realm 认证域分开。 */
+  target: string;
+  target_label: string;
+  target_url?: string;
   domain: string;
   secret_masked: string;
   source: string;
+  source_url: string;
+  source_intent_id?: number;
+  source_exploration_id?: number;
+  /** 兼容旧调用；false 只表示未标记成功，不代表验证失败。 */
   verified: boolean;
+  verification_status: CredentialVerificationStatus;
+  verification_at?: string | null;
+  verification_method: string;
+  verification_evidence: string;
+  verification_by: string;
+  verification_history?: Array<{
+    status: CredentialVerificationStatus;
+    at: string;
+    method: string;
+    evidence: string;
+    by: string;
+  }>;
   created_at: string;
-  /** 归属任务 id（后端 JSON number；0 = 未关联）。 */
-  task_id?: number;
+}
+
+export interface CredentialVerificationInput {
+  status: CredentialVerificationStatus;
+  method: string;
+  evidence: string;
+}
+
+export interface CredentialMetadataInput {
+  target: string;
+  domain: string;
+  source_url: string;
 }
 
 // Original execution selected from an approval, never submitted to the reviewer.

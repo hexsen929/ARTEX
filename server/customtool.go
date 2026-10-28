@@ -69,6 +69,14 @@ func (s *Server) pgCreateCustomTool(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "该 key 已存在(内置或自定义工具)")
 		return
 	}
+	if req.Kind == "shell" && req.Deferred {
+		writeErr(w, 400, "shell 环境声明不是独立工具，不支持延迟调用")
+		return
+	}
+	if err := validateNewToolBindings(pg, req.Key, nil, req.Agents); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	if err := pg.CreateCustomTool(&db.Tool{
 		Key: req.Key, Description: req.Description, Schema: req.Schema, Agents: req.Agents,
 		Enabled: req.Enabled, Kind: req.Kind, Exec: req.Exec, Deferred: req.Deferred,
@@ -105,6 +113,14 @@ func (s *Server) pgUpdateCustomTool(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Kind == "http" && !hasSchemaProps(req.Schema) {
 		writeErr(w, 400, "http 工具必须提供参数 JSON Schema(不能留空)")
+		return
+	}
+	if req.Kind == "shell" && req.Deferred && (!existing.Deferred || existing.Kind != "shell") {
+		writeErr(w, 400, "shell 环境声明不是独立工具，不支持延迟调用")
+		return
+	}
+	if err := validateNewToolBindings(pg, key, existing.Agents, req.Agents); err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
 	if err := pg.UpdateCustomTool(&db.Tool{

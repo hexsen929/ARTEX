@@ -52,16 +52,19 @@ func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 	custom, err := s.customTools()
 	if err != nil {
 		log.Printf("[custom-tool] 加载失败: %v", err)
-		return tools, nil
+		return append(tools, agent.ToolAssemblyFailure(fmt.Errorf("自定义工具目录读取失败"))...), nil
 	}
 	tools = append(tools, custom...)
 	// deferred custom tools → name -> its bound agent keys. ToolAugment turns a
 	// name into a deferred entry only for agents it's actually bound to (so we don't
 	// advertise a tool the per-agent binding will drop from the callable set).
 	deferred := map[string][]string{}
-	rows, _ := s.m.pg.ListCustomTools()
+	rows, err := s.m.pg.ListCustomTools()
+	if err != nil {
+		return append(tools, agent.ToolAssemblyFailure(fmt.Errorf("自定义工具延迟元数据读取失败"))...), nil
+	}
 	for _, t := range rows {
-		if t.Deferred && t.Enabled {
+		if t.Kind != "shell" && t.Deferred && t.Enabled {
 			deferred[t.Key] = t.Agents
 		}
 	}

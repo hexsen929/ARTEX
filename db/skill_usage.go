@@ -9,8 +9,9 @@ import (
 	"time"
 )
 
-// SkillUsage is one Skill() invocation — the always-on skill call ledger. Written
-// from the Skill meta-tool's OnInvoke hook (server/assembly.go), one row per load.
+// SkillUsage is one explicit Skill() invocation attempt. Written by the meta-tool
+// wrapper before delegation, one row per well-formed named invocation. Found
+// records registry resolution, not successful processing or tool execution.
 // Carries only dimensions (which skill, which agent, which task/session), never the
 // caller's args text — args_len is kept so an "empty vs substantial context" split
 // is still possible without storing prompt content, mirroring llm_usage.
@@ -25,7 +26,7 @@ type SkillUsage struct {
 	IntentID      int64  `json:"intent_id"`      // worker's intent node; 0 for planner/mainagent/chat
 	SessionID     string `json:"session_id"`     // chat conversation id; empty for task runs
 	ArgsLen       int    `json:"args_len"`
-	Found         bool   `json:"found"` // false = current Agent registry could not resolve it (unassigned or absent)
+	Found         bool   `json:"found"` // registry match only; false = unassigned or absent, not an execution verdict
 }
 
 // InsertSkillUsage appends one ledger row. Best-effort: callers log and continue on
@@ -91,12 +92,19 @@ type SkillStat struct {
 
 // SkillStats aggregates the whole ledger grouped by skill, most-used first. Skills
 // that were never invoked are absent — callers merge against the skill list on disk.
-// Only resolved calls count; misses are reported separately by MissingSkillStats.
+// Only registry-matched explicit attempts count; misses are reported separately.
+// Automatic in-code rule injection and direct reference reads are not this ledger.
 func (d *DB) SkillStats() ([]SkillStat, error) {
+	// Keep hot rows and cold aggregates in the same view across archive/restore.
+	tx, err := d.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
 	// agent keys come back as one comma-joined string rather than text[]: the pgx
 	// stdlib driver has no database/sql Scan target for arrays, and agent keys are
 	// [a-z0-9_-] so a comma join is unambiguous.
-	rows, err := d.Query(`
+	rows, err := tx.Query(`
 SELECT skill, COUNT(*) AS calls,
        COUNT(DISTINCT task_id) AS tasks,
        COALESCE(STRING_AGG(DISTINCT agent_key, ','), '') AS agents,
@@ -130,7 +138,10 @@ ORDER BY COUNT(*) DESC, skill`)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	archived, err := d.archivedTaskAggregates()
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	archived, err := archivedTaskAggregatesFrom(tx)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +222,9 @@ type SkillCall struct {
 	ArgsLen   int       `json:"args_len"`
 }
 
-// RecentSkillCalls returns the most recent invocations of one skill, newest first.
+// RecentSkillCalls returns registry-matched explicit attempts still in hot storage,
+// newest first. Cold archives retain summary counts, not this detail page; an
+// empty result therefore does not establish that the skill was never invoked.
 func (d *DB) RecentSkillCalls(skill string, limit int) ([]SkillCall, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50

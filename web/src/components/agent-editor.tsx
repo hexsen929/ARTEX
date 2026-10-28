@@ -1,8 +1,9 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { toast } from "sonner";
-import { EyeIcon, GitCompareIcon, InfoIcon, PencilIcon, RotateCcwIcon, SaveIcon, Trash2Icon, XIcon } from "lucide-react";
+import { AlertCircleIcon, EyeIcon, GitCompareIcon, InfoIcon, PencilIcon, RotateCcwIcon, SaveIcon, Trash2Icon, XIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -25,6 +26,8 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Markdown } from "@/components/markdown";
 import { api } from "@/lib/api";
+import { readAgentWorkGuidance, type AgentWorkGuidance } from "@/lib/agent-work-guidance";
+import { agentBindingSupport, agentRuntimeCapabilities } from "@/lib/tool-bindings";
 import { cn } from "@/lib/utils";
 import type { Agent, AgentDetail, AgentTrigger, MCPServer, PromptVar, PromptVersion, Settings, SkillItem, Tool } from "@/lib/types";
 
@@ -32,10 +35,37 @@ import type { Agent, AgentDetail, AgentTrigger, MCPServer, PromptVar, PromptVers
 // only usable when capture is on. Keep this list in sync with traffic.SeedToolMetas.
 const TRAFFIC_TOOL_KEYS = new Set(["traffic_search", "traffic_get"]);
 
+function AgentWorkGuidancePanel({ guidance }: { guidance: AgentWorkGuidance | undefined }) {
+  if (!guidance) return null;
+  return (
+    <details className="rounded-md border bg-muted/20 p-3" data-testid="agent-work-guidance">
+      <summary className="cursor-pointer text-sm font-medium">
+        运行时工作规范
+        <Badge variant="secondary" className="ml-2 align-middle font-mono text-[10px]">
+          {guidance.version || "版本未标记"}
+        </Badge>
+        <span className="ml-2 text-xs font-normal text-muted-foreground">只读 · 点击展开</span>
+      </summary>
+      <p className="mt-3 text-xs text-muted-foreground">
+        平台在运行时独立追加，升级时随程序更新；保留自定义提示词正文与历史版本。下一次运行生效，不改变当前运行，也不变更工具权限、范围与审批。
+      </p>
+      <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-background p-3 font-mono text-xs">
+        {guidance.text}
+      </pre>
+    </details>
+  );
+}
+
 // AgentEditor is the tabbed editor for one agent, used inside the agents-page
 // drawer (and reused full-page for deep links). Tabs: 配置与提示词 / MCP / Skill /
 // Tools. Config + prompt save as before; visibility + tool bindings toggle live.
 export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?: () => void }) {
+  // A role change owns a fresh state/request lifetime. Late loads or save
+  // callbacks from the previous role may never replace the new role's editor.
+  return <AgentEditorInner key={agentKey} agentKey={agentKey} onSaved={onSaved} />;
+}
+
+function AgentEditorInner({ agentKey, onSaved }: { agentKey: string; onSaved?: () => void }) {
   const [detail, setDetail] = React.useState<AgentDetail | null>(null);
   const [versions, setVersions] = React.useState<PromptVersion[]>([]);
   const [variables, setVariables] = React.useState<PromptVar[]>([]);
@@ -43,6 +73,12 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   const [skills, setSkills] = React.useState<SkillItem[]>([]);
   const [tools, setTools] = React.useState<Tool[]>([]);
   const [loaded, setLoaded] = React.useState(false);
+  const [detailError, setDetailError] = React.useState("");
+  const [resourceErrors, setResourceErrors] = React.useState<string[]>([]);
+  const [resourcesLoading, setResourcesLoading] = React.useState(true);
+  const [bindingBusy, setBindingBusy] = React.useState(false);
+  const bindingOperation = React.useRef(false);
+  const requests = React.useRef({ detail: 0, resources: 0 });
   const [viewVer, setViewVer] = React.useState<PromptVersion | null>(null);
   const [diffVer, setDiffVer] = React.useState<PromptVersion | null>(null);
 
@@ -50,6 +86,8 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   const [mcpVisible, setMcpVisible] = React.useState<number[]>([]);
   const [skillVisible, setSkillVisible] = React.useState<string[]>([]);
   const [preview, setPreview] = React.useState("");
+  const [previewGuidance, setPreviewGuidance] = React.useState<AgentWorkGuidance | undefined>();
+  const previewGeneration = React.useRef(0);
   const [maxTurns, setMaxTurns] = React.useState("0");
   const [runSecs, setRunSecs] = React.useState("600");
   // "" = 跟随(未绑定)；否则为 profile id 字符串
@@ -69,20 +107,35 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   const [ttTurnsDefault, setTtTurnsDefault] = React.useState(5);
   const [settings, setSettings] = React.useState<Settings | null>(null);
 
-  React.useEffect(() => {
-    api.mcpServers().then(setMcp).catch(() => {});
-    api.skills().then(setSkills).catch(() => {});
-    api.tools().then(setTools).catch(() => {});
-    api.settings().then(setSettings).catch(() => {});
+  const loadResources = React.useCallback(() => {
+    const request = ++requests.current.resources;
+    setResourcesLoading(true);
+    Promise.allSettled([api.mcpServers(), api.skills(), api.tools(), api.settings()] as const).then(([mcpResult, skillResult, toolResult, settingsResult]) => {
+      if (request !== requests.current.resources) return;
+      const failures: string[] = [];
+      const message = (name: string, error: unknown) => `${name}：${error instanceof Error ? error.message : "读取失败"}`;
+      if (mcpResult.status === "fulfilled") setMcp(mcpResult.value); else failures.push(message("MCP 目录", mcpResult.reason));
+      if (skillResult.status === "fulfilled") setSkills(skillResult.value); else failures.push(message("Skill 目录", skillResult.reason));
+      if (toolResult.status === "fulfilled") setTools(toolResult.value); else failures.push(message("工具目录", toolResult.reason));
+      if (settingsResult.status === "fulfilled") setSettings(settingsResult.value); else failures.push(message("系统开关", settingsResult.reason));
+      setResourceErrors(failures); setResourcesLoading(false);
+    });
   }, []);
+  React.useEffect(() => {
+    loadResources();
+    return () => { requests.current.resources++; };
+  }, [loadResources]);
   // global gates: traffic tools need 流量捕获, web search needs the master switch.
   const captureOn = !!settings?.traffic_capture;
   const webSearchGlobalOn = !!settings?.web_search_enabled;
 
   const reload = React.useCallback(() => {
+    const request = ++requests.current.detail;
     api
       .getAgent(agentKey)
       .then((d) => {
+        if (request !== requests.current.detail) return;
+        setDetailError("");
         setDetail(d);
         setPrompt(d.prompt ?? "");
         setVariables(d.variables ?? []);
@@ -105,18 +158,34 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
         setTtTurns(String(d.task_timeout_wrapup_max_turns ?? 0));
         setTtTurnsDefault(d.task_timeout_wrapup_max_turns_default ?? 5);
       })
-      .catch(() => setDetail(null))
-      .finally(() => setLoaded(true));
+      .catch((error: unknown) => {
+        if (request === requests.current.detail) setDetailError(error instanceof Error ? error.message : "Agent 配置读取失败");
+      })
+      .finally(() => { if (request === requests.current.detail) setLoaded(true); });
   }, [agentKey]);
   React.useEffect(() => {
     reload();
+    return () => { requests.current.detail++; };
   }, [reload]);
 
+  React.useEffect(() => {
+    previewGeneration.current++;
+    setPreview("");
+    setPreviewGuidance(undefined);
+    return () => { previewGeneration.current++; };
+  }, [agentKey]);
+
   async function doPreview() {
+    const generation = ++previewGeneration.current;
+    setPreview("正在渲染…");
+    setPreviewGuidance(undefined);
     try {
       const r = await api.previewAgentPrompt(agentKey, prompt);
+      if (generation !== previewGeneration.current) return;
       setPreview(r.error ? "渲染错误：" + r.error : r.rendered);
+      setPreviewGuidance(readAgentWorkGuidance(r));
     } catch (e) {
+      if (generation !== previewGeneration.current) return;
       setPreview("预览失败：" + (e as Error).message);
     }
   }
@@ -178,6 +247,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
     }
   }
   async function saveConfig() {
+    if (agentRuntimeCapabilities(detail?.agent || { key: agentKey }).runtime_config_mode === "inherited" || detailError || !detail) return;
     try {
       // 只提交本 agent 实际展示的字段，避免把未显示项(如 goals 的 max_turns)覆盖成默认。
       const patch: Parameters<typeof api.saveAgentConfig>[1] = {
@@ -198,39 +268,45 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   }
   // applyVis optimistically updates, persists, and toasts success/failure. On
   // failure it reverts to the prior selection so the UI never lies about state.
-  async function applyVis(nextMcp: number[], nextSkill: string[], okMsg: string) {
+  async function applyVis(patch: { mcp?: number[]; skill?: string[] }, okMsg: string) {
+    if (bindingOperation.current || resourcesLoading || resourceErrors.length || detailError || !detail) return;
+    bindingOperation.current = true; setBindingBusy(true);
     const prevMcp = mcpVisible;
     const prevSkill = skillVisible;
-    setMcpVisible(nextMcp);
-    setSkillVisible(nextSkill);
+    if (patch.mcp !== undefined) setMcpVisible(patch.mcp);
+    if (patch.skill !== undefined) setSkillVisible(patch.skill);
     try {
-      await api.setAgentVisibility(agentKey, nextMcp, nextSkill);
+      await api.patchAgentVisibility(agentKey, patch);
       toast.success(okMsg);
       onSaved?.(); // refresh the list so the card's MCP/Skill counts stay in sync
     } catch (e) {
-      setMcpVisible(prevMcp);
-      setSkillVisible(prevSkill);
+      if (patch.mcp !== undefined) setMcpVisible(prevMcp);
+      if (patch.skill !== undefined) setSkillVisible(prevSkill);
       toast.error("保存失败：" + (e as Error).message);
+    } finally {
+      bindingOperation.current = false; setBindingBusy(false);
     }
   }
   function toggleMcp(id: number) {
+    if (!agentBindingSupport(detail?.agent || { key: agentKey }, "mcp").allowed) return;
     const on = mcpVisible.includes(id);
     const name = mcp.find((m) => m.id === id)?.name ?? String(id);
     applyVis(
-      on ? mcpVisible.filter((x) => x !== id) : [...mcpVisible, id],
-      skillVisible,
+      { mcp: on ? mcpVisible.filter((x) => x !== id) : [...mcpVisible, id] },
       `${on ? "已取消" : "已开启"} MCP「${name}」可见`,
     );
   }
   function toggleSkill(name: string) {
+    if (!agentBindingSupport(detail?.agent || { key: agentKey }, "skill").allowed) return;
     const on = skillVisible.includes(name);
     applyVis(
-      mcpVisible,
-      on ? skillVisible.filter((x) => x !== name) : [...skillVisible, name],
+      { skill: on ? skillVisible.filter((x) => x !== name) : [...skillVisible, name] },
       `${on ? "已取消" : "已开启"} Skill「${name}」可见`,
     );
   }
   async function toggleTool(t: Tool) {
+    if (bindingOperation.current || resourcesLoading || resourceErrors.length || detailError || !detail || !agentBindingSupport(detail.agent, "tool", t.key).allowed) return;
+    bindingOperation.current = true; setBindingBusy(true);
     const on = t.agents.includes(agentKey);
     const nextAgents = on ? t.agents.filter((k) => k !== agentKey) : [...t.agents, agentKey];
     // optimistic update
@@ -247,40 +323,51 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
     } catch (e) {
       toast.error("保存工具绑定失败：" + (e as Error).message);
       reload();
-      api.tools().then(setTools).catch(() => {});
+      loadResources();
+    } finally {
+      bindingOperation.current = false; setBindingBusy(false);
     }
   }
 
   if (loaded && !detail) {
-    return <div className="text-muted-foreground p-6 text-center text-sm">未找到 Agent：{agentKey}</div>;
+    return <div role="alert" className="space-y-3 p-6 text-sm"><p>Agent 配置读取失败：{detailError || "未取得配置"}</p><Button variant="outline" size="sm" onClick={reload}>重试</Button></div>;
   }
+  const currentAgent = detail?.agent || { key: agentKey };
+  const capabilities = agentRuntimeCapabilities(currentAgent);
+  const bindingUnavailable = resourcesLoading || resourceErrors.length > 0 || !!detailError || !detail || bindingBusy;
   // config is meaningless for the conversational main agent and the fixed-budget
   // goals decomposer; every other agent (workers, custom assistants) honors it.
-  const showConfig = agentKey !== "mainagent" && agentKey !== "goals";
+  const showConfig = capabilities.runtime_config_mode === "direct" && agentKey !== "mainagent" && agentKey !== "goals";
   // web search applies to every conversational/executing agent except the one-shot
   // goals decomposer; it's gated by the global master switch.
-  const showWebSearch = agentKey !== "goals";
+  const showWebSearch = capabilities.runtime_config_mode === "direct" && agentKey !== "goals";
   // interactive shell (持久 PTY 会话工具族) 同样对除 goals 外的 agent 开放;无全局门控。
-  const showInteractiveShell = agentKey !== "goals";
+  const showInteractiveShell = capabilities.runtime_config_mode === "direct" && agentKey !== "goals";
   // 每个 agent(含 goals/mainagent)都跑在某个 LLM 上,故「默认模型」绑定对所有 agent 开放。
-  const showLLM = true;
+  const showLLM = capabilities.runtime_config_mode !== "inherited";
   // triggers (P3) only attach to custom agents.
   const isCustom = !!detail && !detail.agent?.builtin;
+  const showTriggers = isCustom && capabilities.runtime_config_mode === "direct";
 
   return (
     <Tabs defaultValue="prompt" className="flex min-h-0 flex-1 flex-col">
+      {(detailError || resourceErrors.length > 0) && <div role="alert" data-testid="agent-binding-errors" className="mx-4 mt-3 space-y-1 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950/30 dark:text-amber-200"><p className="flex items-center gap-2"><AlertCircleIcon className="size-4" />部分绑定数据读取失败，已有选择保留；读取失败不等于未授权。</p>{detailError && <p className="text-xs">Agent 配置：{detailError}</p>}{resourceErrors.map((message) => <p key={message} className="text-xs">{message}</p>)}<Button size="sm" variant="outline" onClick={() => { reload(); loadResources(); }}>重新加载</Button></div>}
+      {capabilities.note && <p data-testid="agent-binding-capabilities" className="mx-4 mt-3 rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">{capabilities.note}{capabilities.execution_agent_key !== agentKey && <Link href={`/system/agents/detail?key=${encodeURIComponent(capabilities.execution_agent_key)}`} prefetch={false} className="ml-2 text-primary hover:underline">打开执行角色设置</Link>}</p>}
+      {detail?.agent.automation && <p data-testid="agent-automation-state" className="mx-4 mt-3 rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">{detail.agent.automation.available ? detail.agent.automation.reason : `自动流程状态未知：${detail.agent.automation.reason || "读取失败"}`}这里只展示状态，不会自动开启流程或补发历史任务。</p>}
+      {agentKey === "credential_processor" && <p data-testid="agent-dedicated-pipeline" className="mx-4 mt-3 rounded-md border p-3 text-xs text-muted-foreground">凭据整理使用专用情报处理流程，受系统总开关控制，不通过通用触发器调度。原有触发配置保留，不在此新增或启用。</p>}
       <TabsList className="mx-4 mt-2 w-fit">
         <TabsTrigger value="prompt">配置与提示词</TabsTrigger>
         <TabsTrigger value="wrapup">收尾提示词</TabsTrigger>
         <TabsTrigger value="mcp">MCP</TabsTrigger>
         <TabsTrigger value="skill">Skill</TabsTrigger>
         <TabsTrigger value="tools">Tools</TabsTrigger>
-        {isCustom && <TabsTrigger value="triggers">触发</TabsTrigger>}
+        {showTriggers && <TabsTrigger value="triggers">触发</TabsTrigger>}
       </TabsList>
 
       {/* 配置 + 提示词 */}
       <TabsContent value="prompt" className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
         <div className="grid gap-4">
+          {capabilities.runtime_config_mode === "inherited" && <p className="rounded-md border p-3 text-xs text-muted-foreground">运行配置沿用 {capabilities.runtime_config_agent_key || capabilities.execution_agent_key}，本角色仅编辑提示词正文与独立 Skill 授权，不改写原有配置。<Link href={`/system/agents/detail?key=${encodeURIComponent(capabilities.runtime_config_agent_key || capabilities.execution_agent_key)}`} prefetch={false} className="ml-2 text-primary hover:underline">打开运行配置</Link></p>}
           {(showLLM || showConfig || showWebSearch || showInteractiveShell) && (
             <div className="grid gap-3 rounded-md border p-3">
               {showLLM && (
@@ -321,7 +408,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
                     </div>
                   </>
                 )}
-                <Button size="sm" variant="outline" onClick={saveConfig}>
+                <Button size="sm" variant="outline" onClick={saveConfig} disabled={!detail || !!detailError}>
                   <SaveIcon /> 保存配置
                 </Button>
               </div>
@@ -383,8 +470,16 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
             </div>
           </div>
 
-          <Textarea className="font-mono text-xs" rows={16} value={prompt}
-            placeholder="留空则使用内置默认提示词" onChange={(e) => setPrompt(e.target.value)} />
+          <div className="grid gap-2">
+            <Label htmlFor={`agent-prompt-${agentKey}`}>提示词正文</Label>
+            <Textarea id={`agent-prompt-${agentKey}`} className="font-mono text-xs" rows={16} value={prompt}
+              placeholder="留空则使用内置默认提示词" onChange={(e) => setPrompt(e.target.value)} />
+            <p className="text-muted-foreground text-xs">
+              “保存为新版本”仅保存此正文，不会把下方运行时工作规范写入正文或覆盖历史版本。
+            </p>
+          </div>
+
+          <AgentWorkGuidancePanel guidance={readAgentWorkGuidance(detail?.agent.key === agentKey ? detail : undefined)} />
 
           <div className="flex flex-wrap gap-2">
             <Dialog>
@@ -396,10 +491,16 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
               <DialogContent className="sm:max-w-2xl">
                 <DialogHeader>
                   <DialogTitle>渲染预览</DialogTitle>
-                  <DialogDescription>所有 {`{{.Var}}`} 已由后端用示例值替换。</DialogDescription>
+                  <DialogDescription>
+                    正文中的 {`{{.Var}}`} 已由后端用示例值替换，运行时工作规范独立展示；完整运行时还会加入工具和任务等上下文。
+                  </DialogDescription>
                 </DialogHeader>
                 <div className="max-h-[60vh] overflow-auto rounded-md border bg-muted/30 p-3">
+                  <h3 className="mb-2 text-sm font-medium">正文预览</h3>
                   <Markdown text={preview} />
+                  <div className="mt-4">
+                    <AgentWorkGuidancePanel guidance={previewGuidance} />
+                  </div>
                 </div>
               </DialogContent>
             </Dialog>
@@ -501,6 +602,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
 
       {/* 收尾提示词 */}
       <TabsContent value="wrapup" className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
+        {capabilities.runtime_config_mode !== "direct" ? <p className="rounded-md border p-3 text-xs text-muted-foreground">{capabilities.runtime_config_mode === "inherited" ? `收尾配置沿用 ${capabilities.runtime_config_agent_key || capabilities.execution_agent_key}，请到执行角色编辑。` : "该角色为固定受控调用，不使用通用收尾配置；原有保存值保留，不在此修改。"}</p> : (
         <div className="grid gap-3">
           <p className="text-muted-foreground text-xs leading-relaxed">
             当此 Agent 因<b>超时</b>或<b>步数耗尽</b>被终止时，系统会注入这段「收尾提示词」跑一轮收尾：
@@ -588,45 +690,49 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
             </>
           )}
         </div>
+        )}
       </TabsContent>
 
       {/* MCP 可见性 */}
       <TabsContent value="mcp" className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
-        <p className="text-muted-foreground mb-3 text-xs">勾选此 Agent 可见的 MCP 服务器。</p>
+        <p className="text-muted-foreground mb-3 text-xs">{agentBindingSupport(currentAgent, "mcp").reason || "勾选此 Agent 可见的 MCP 服务器；授权不等于服务已连接或健康。"}</p>
         <div className="grid gap-2">
           {mcp.map((m) => (
             <label key={m.id} className="flex items-center gap-2 rounded-md border p-2 text-sm">
-              <Checkbox checked={mcpVisible.includes(m.id)} onCheckedChange={() => toggleMcp(m.id)} />
+              <Checkbox aria-label={`MCP ${m.name}`} checked={mcpVisible.includes(m.id)} disabled={bindingUnavailable || !agentBindingSupport(currentAgent, "mcp").allowed || (!m.enabled && !mcpVisible.includes(m.id))} onCheckedChange={() => toggleMcp(m.id)} />
               {m.name}
+              {!m.enabled && <Badge variant="outline" className="text-xs">服务已停用</Badge>}
               <span className="text-muted-foreground ml-auto text-xs">{m.transport}</span>
             </label>
           ))}
-          {mcp.length === 0 && <span className="text-muted-foreground text-xs">（暂无 MCP）</span>}
+          {mcp.length === 0 && <span className="text-muted-foreground text-xs">{resourcesLoading ? "正在读取 MCP 目录…" : resourceErrors.length ? "目录尚未完整载入，请重试。" : "（暂无 MCP）"}</span>}
         </div>
       </TabsContent>
 
       {/* Skill 可见性 */}
       <TabsContent value="skill" className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
-        <p className="text-muted-foreground mb-3 text-xs">勾选此 Agent 可见的 Skill。</p>
+        <p className="text-muted-foreground mb-3 text-xs">{agentBindingSupport(currentAgent, "skill").reason || "勾选此 Agent 可显式加载的 Skill；配置授权不代表已调用。"}</p>
         <div className="grid gap-2">
           {skills.map((s) => (
             <label key={s.name} className="flex items-center gap-2 rounded-md border p-2 text-sm">
-              <Checkbox checked={skillVisible.includes(s.name)} onCheckedChange={() => toggleSkill(s.name)} />
+              <Checkbox aria-label={`Skill ${s.name}`} checked={skillVisible.includes(s.name)} disabled={bindingUnavailable || !agentBindingSupport(currentAgent, "skill").allowed || (s.loadable === false && !skillVisible.includes(s.name))} onCheckedChange={() => toggleSkill(s.name)} />
               <span className="font-mono text-xs">{s.name}</span>
+              {s.loadable === false && <span className="text-destructive text-xs">不可加载：{s.load_error || "Skill 文件无效"}</span>}
               {s.description && <span className="text-muted-foreground ml-auto truncate text-xs">{s.description}</span>}
             </label>
           ))}
-          {skills.length === 0 && <span className="text-muted-foreground text-xs">（暂无 Skill）</span>}
+          {skills.length === 0 && <span className="text-muted-foreground text-xs">{resourcesLoading ? "正在读取 Skill 目录…" : resourceErrors.length ? "目录尚未完整载入，请重试。" : "（暂无 Skill）"}</span>}
         </div>
       </TabsContent>
 
       {/* Tools 绑定 */}
       <TabsContent value="tools" className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
-        <p className="text-muted-foreground mb-3 text-xs">勾选绑定给此 Agent 的内置工具。</p>
+        <p className="text-muted-foreground mb-3 text-xs">{capabilities.tool_binding_mode === "inherited" ? `执行工具沿用 ${capabilities.execution_agent_key}；这里已有的直接配置仅保留展示，不合并授权。` : capabilities.tool_binding_mode === "unsupported" ? capabilities.note : "勾选直接绑定给此 Agent 的目录工具；SDK 默认工具与运行时开关不计入这份绑定数。"}</p>
         <div className="grid gap-2">
           {tools.map((t) => {
             const isTraffic = TRAFFIC_TOOL_KEYS.has(t.key);
             const gated = isTraffic && !captureOn; // traffic tools need 流量捕获 on
+            const support = agentBindingSupport(currentAgent, "tool", t.key);
             return (
               <label
                 key={t.key}
@@ -636,18 +742,21 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
                 )}
               >
                 <Checkbox
+                  aria-label={`工具 ${t.key}`}
                   checked={t.agents.includes(agentKey)}
-                  disabled={gated}
+                  disabled={gated || bindingUnavailable || !support.allowed}
                   onCheckedChange={() => toggleTool(t)}
                 />
                 <span className="font-mono text-xs">{t.key}</span>
+                {t.kind === "shell" && <Badge variant="outline" className="text-[9px]">环境声明 · 经 Bash 使用</Badge>}
+                {capabilities.tool_binding_mode === "inherited" && t.agents.includes(capabilities.execution_agent_key) && <Badge variant="secondary" className="text-[9px]">执行角色已绑定</Badge>}
                 {isTraffic && (
                   <Badge variant="secondary" className="px-1 py-0 text-[9px]">流量</Badge>
                 )}
                 {!t.enabled && (
                   <Badge variant="outline" className="text-destructive px-1 py-0 text-[9px]">已停用</Badge>
                 )}
-                {gated ? (
+                {!support.allowed ? <span className="text-muted-foreground ml-auto max-w-[55%] text-xs">{support.reason}{t.agents.includes(agentKey) ? " 已有配置仅保留。" : ""}</span> : gated ? (
                   <span className="text-muted-foreground ml-auto text-xs">需开启流量捕获</span>
                 ) : (
                   t.description && (
@@ -659,12 +768,12 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
               </label>
             );
           })}
-          {tools.length === 0 && <span className="text-muted-foreground text-xs">（暂无工具）</span>}
+          {tools.length === 0 && <span className="text-muted-foreground text-xs">{resourcesLoading ? "正在读取工具目录…" : resourceErrors.length ? "目录尚未完整载入，请重试。" : "（暂无工具）"}</span>}
         </div>
       </TabsContent>
 
       {/* 触发(P3, 仅自定义 agent) */}
-      {isCustom && (
+      {showTriggers && (
         <TabsContent value="triggers" className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
           <AgentTriggersTab agentKey={agentKey} agent={detail?.agent} />
         </TabsContent>

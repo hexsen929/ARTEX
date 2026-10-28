@@ -1,8 +1,9 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { toast } from "sonner";
-import { PlayIcon, PlusIcon, RotateCcwIcon, SaveIcon, SearchIcon, Trash2Icon } from "lucide-react";
+import { AlertCircleIcon, PlayIcon, PlusIcon, RefreshCwIcon, RotateCcwIcon, SaveIcon, SearchIcon, Trash2Icon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,6 +36,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { api } from "@/lib/api";
+import { agentBindingSupport, toolUsageDisplay } from "@/lib/tool-bindings";
 import type { Agent, Tool } from "@/lib/types";
 
 // Traffic tools are host tools gated by the global 流量捕获 switch: bindable, but
@@ -145,12 +147,14 @@ function ToolEditor({
   tool,
   agents,
   captureOn,
+  bindingsReady,
   onSaved,
   onClose,
 }: {
   tool: Tool;
   agents: Agent[];
   captureOn: boolean;
+  bindingsReady: boolean;
   onSaved: () => void;
   onClose: () => void;
 }) {
@@ -168,6 +172,7 @@ function ToolEditor({
     setBound((b) => (b.includes(k) ? b.filter((x) => x !== k) : [...b, k]));
 
   async function save() {
+    if (!bindingsReady) return;
     setSaving(true);
     try {
       await api.saveTool(tool.key, {
@@ -209,18 +214,22 @@ function ToolEditor({
           <div className="grid gap-1.5">
             <Label className="text-muted-foreground text-xs">绑定 Agent（决定该工具给哪些 Agent）</Label>
             <div className="flex flex-wrap gap-3">
-              {agents.map((ag) => (
-                <label key={ag.key} className="flex items-center gap-2 text-sm">
+              {agents.map((ag) => {
+                const support = agentBindingSupport(ag, "tool", tool.key);
+                return <label key={ag.key} className="flex items-center gap-2 text-sm" title={support.reason}>
                   <Checkbox
+                    aria-label={`${ag.key} 工具绑定`}
                     checked={bound.includes(ag.key)}
-                    disabled={trafficGated}
+                    disabled={trafficGated || !bindingsReady || !support.allowed}
                     onCheckedChange={() => toggleAgent(ag.key)}
                   />
                   {ag.name}
                   <span className="text-muted-foreground font-mono text-xs">{ag.key}</span>
-                </label>
-              ))}
-              {agents.length === 0 && <span className="text-muted-foreground text-xs">（无 Agent）</span>}
+                  {!support.allowed && <span className="text-muted-foreground text-xs">{support.reason}{bound.includes(ag.key) ? " 已有配置仅保留。" : ""}</span>}
+                </label>;
+              })}
+              {!bindingsReady && <span className="text-destructive text-xs">绑定配置尚未完整载入，暂不接受修改。</span>}
+              {bindingsReady && agents.length === 0 && <span className="text-muted-foreground text-xs">（无 Agent）</span>}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -298,10 +307,10 @@ function ToolEditor({
 
       <Separator className="mt-4" />
       <div className="flex flex-wrap gap-2 p-4">
-        <Button size="sm" onClick={save} disabled={saving}>
+        <Button size="sm" onClick={save} disabled={saving || !bindingsReady}>
           <SaveIcon /> 保存
         </Button>
-        <Button size="sm" variant="outline" onClick={reset}>
+        <Button size="sm" variant="outline" onClick={reset} disabled={saving || !bindingsReady}>
           <RotateCcwIcon /> 恢复默认
         </Button>
       </div>
@@ -311,9 +320,11 @@ function ToolEditor({
 
 // ToolGridCard is one clickable tile in the catalog grid.
 function ToolGridCard({ tool, onClick }: { tool: Tool; onClick: () => void }) {
+  const usage = toolUsageDisplay(tool);
   return (
     <button
       type="button"
+      data-testid={`tool-card-${tool.key}`}
       onClick={onClick}
       className="hover:border-primary/50 hover:bg-muted/40 focus-visible:ring-ring flex flex-col gap-2 rounded-lg border p-4 text-left transition-colors focus-visible:ring-2 focus-visible:outline-none"
     >
@@ -328,7 +339,7 @@ function ToolGridCard({ tool, onClick }: { tool: Tool; onClick: () => void }) {
             自定义·{tool.kind}
           </Badge>
         )}
-        {tool.deferred && (
+        {tool.deferred && usage.applicable && (
           <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
             deferred
           </Badge>
@@ -339,16 +350,18 @@ function ToolGridCard({ tool, onClick }: { tool: Tool; onClick: () => void }) {
           </Badge>
         )}
         <Badge
+          data-testid={`tool-usage-${tool.key}`}
           variant="secondary"
           className="ml-auto px-1.5 py-0 text-[10px] tabular-nums"
-          title={`累计调用 ${tool.calls ?? 0} 次`}
+          title={usage.detail}
         >
-          调用 {tool.calls ?? 0}
+          {usage.label}
         </Badge>
       </div>
       <p className="text-muted-foreground line-clamp-1 h-4 text-xs">
         {tool.description || "（无描述）"}
       </p>
+      {!usage.applicable && <p className="text-muted-foreground text-xs">经 Bash 使用；独立调用次数不适用。</p>}
       <div className="mt-auto flex flex-wrap gap-1 pt-1">
         {tool.agents.length === 0 && (
           <span className="text-muted-foreground text-[10px]">（未绑定 Agent）</span>
@@ -369,15 +382,41 @@ export default function ToolsPage() {
   const [captureOn, setCaptureOn] = React.useState(false);
   const [selectedKey, setSelectedKey] = React.useState<string | null>(null);
   const [customEdit, setCustomEdit] = React.useState<Tool | "new" | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState("");
+  const [agentsError, setAgentsError] = React.useState("");
+  const [settingsError, setSettingsError] = React.useState("");
+  const [resourcesReady, setResourcesReady] = React.useState(false);
+  const requests = React.useRef({ tools: 0, resources: 0 });
 
   const reload = React.useCallback(() => {
-    api.tools().then(setTools).catch(() => setTools([]));
+    const request = ++requests.current.tools;
+    setLoading(true);
+    api.tools().then((items) => {
+      if (request !== requests.current.tools) return;
+      setTools(items); setLoadError("");
+    }).catch((error: unknown) => {
+      if (request === requests.current.tools) setLoadError(error instanceof Error ? error.message : "工具列表读取失败");
+    }).finally(() => { if (request === requests.current.tools) setLoading(false); });
+  }, []);
+  const loadResources = React.useCallback(() => {
+    const request = ++requests.current.resources;
+    setResourcesReady(false);
+    Promise.allSettled([api.agents(), api.settings()]).then(([agentResult, settingsResult]) => {
+      if (request !== requests.current.resources) return;
+      if (agentResult.status === "fulfilled") { setAgents(agentResult.value); setAgentsError(""); }
+      else setAgentsError(agentResult.reason instanceof Error ? agentResult.reason.message : "Agent 绑定目录读取失败");
+      if (settingsResult.status === "fulfilled") { setCaptureOn(!!settingsResult.value.traffic_capture); setSettingsError(""); }
+      else setSettingsError(settingsResult.reason instanceof Error ? settingsResult.reason.message : "系统开关读取失败");
+      setResourcesReady(agentResult.status === "fulfilled" && settingsResult.status === "fulfilled");
+    });
   }, []);
   React.useEffect(() => {
     reload();
-    api.agents().then(setAgents).catch(() => {});
-    api.settings().then((s) => setCaptureOn(!!s.traffic_capture)).catch(() => {});
-  }, [reload]);
+    loadResources();
+    return () => { requests.current.tools++; requests.current.resources++; };
+  }, [reload, loadResources]);
+  const refreshAll = () => { reload(); loadResources(); };
 
   const [query, setQuery] = React.useState("");
 
@@ -403,7 +442,7 @@ export default function ToolsPage() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">工具</h1>
-          <p className="text-muted-foreground text-sm">系统工具的描述/绑定，以及自定义工具(command/script/http)</p>
+          <p className="text-muted-foreground text-sm">系统工具绑定、自定义可调用工具及 shell 环境声明；绑定与调用记录不代表运行健康检查。</p>
         </div>
         <div className="relative w-64">
           <SearchIcon className="text-muted-foreground absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2" />
@@ -414,7 +453,11 @@ export default function ToolsPage() {
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
+        <Button size="sm" variant="outline" onClick={refreshAll}><RefreshCwIcon className={loading ? "animate-spin" : ""} />刷新</Button>
       </div>
+
+      {(loadError || agentsError || settingsError) && <div role="alert" data-testid="tools-load-error" className="space-y-1 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950/30 dark:text-amber-200"><p className="flex items-center gap-2"><AlertCircleIcon className="size-4" />部分数据读取失败，已载入的数据保留；错误不代表没有记录。</p>{loadError && <p className="text-xs">工具：{loadError}</p>}{agentsError && <p className="text-xs">Agent：{agentsError}</p>}{settingsError && <p className="text-xs">系统开关：{settingsError}</p>}</div>}
+      <p className="text-muted-foreground text-xs">“目录调用”只统计可调用工具的调用尝试，不等于成功次数；shell 环境声明经 Bash 使用，不产生独立目录调用。<Link href="/function/commands" prefetch={false} className="ml-2 text-primary hover:underline">查看命令记录</Link></p>
 
       <Tabs defaultValue="system">
         <TabsList>
@@ -427,7 +470,7 @@ export default function ToolsPage() {
             <CardHeader>
               <CardTitle>系统工具</CardTitle>
               <CardDescription>
-                {query.trim()
+                {loadError && tools.length === 0 ? "工具列表尚未载入" : query.trim()
                   ? `${systemTools.length} / ${allSystemCount} 个匹配，点击卡片编辑描述、参数默认值与 Agent 绑定`
                   : `共 ${allSystemCount} 个，点击卡片编辑描述、参数默认值与 Agent 绑定`}
               </CardDescription>
@@ -435,7 +478,7 @@ export default function ToolsPage() {
             <CardContent>
               {systemTools.length === 0 ? (
                 <p className="text-muted-foreground py-6 text-center text-sm">
-                  {query.trim() ? "没有匹配的系统工具" : "（暂无系统工具，等待后端 seed）"}
+                  {loading ? "正在加载工具…" : loadError ? "工具列表读取失败，请刷新重试。" : query.trim() ? "没有匹配的系统工具" : "（暂无系统工具）"}
                 </p>
               ) : (
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -455,7 +498,7 @@ export default function ToolsPage() {
                 <div>
                   <CardTitle>自定义工具</CardTitle>
                   <CardDescription>
-                    {query.trim()
+                    {loadError && tools.length === 0 ? "工具列表尚未载入" : query.trim()
                       ? `shell/command/script/http，${customTools.length} / ${allCustomCount} 个匹配，点击卡片编辑`
                       : `shell(bash 声明) / command(命令) / script(Python) / http(API)，共 ${allCustomCount} 个，点击卡片编辑`}
                   </CardDescription>
@@ -468,7 +511,7 @@ export default function ToolsPage() {
             <CardContent>
               {customTools.length === 0 ? (
                 <p className="text-muted-foreground py-6 text-center text-sm">
-                  {query.trim() ? "没有匹配的自定义工具" : "（暂无自定义工具，点击右上角「新建自定义工具」）"}
+                  {loading ? "正在加载工具…" : loadError ? "工具列表读取失败，请刷新重试。" : query.trim() ? "没有匹配的自定义工具" : "（暂无自定义工具，点击右上角「新建自定义工具」）"}
                 </p>
               ) : (
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -485,7 +528,7 @@ export default function ToolsPage() {
       <Sheet open={!!selected} onOpenChange={(o) => !o && setSelectedKey(null)}>
         <SheetContent
           side="right"
-          className="gap-0 p-0 data-[side=right]:w-[30vw] data-[side=right]:sm:max-w-[30vw]"
+          className="gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-2xl"
         >
           {selected && (
             <>
@@ -498,6 +541,7 @@ export default function ToolsPage() {
                 tool={selected}
                 agents={agents}
                 captureOn={captureOn}
+                bindingsReady={resourcesReady}
                 onSaved={reload}
                 onClose={() => setSelectedKey(null)}
               />
@@ -507,8 +551,10 @@ export default function ToolsPage() {
       </Sheet>
 
       <CustomToolDialog
+        key={customEdit === "new" ? "new" : customEdit?.key || "closed"}
         edit={customEdit}
         agents={agents}
+        bindingsReady={resourcesReady}
         onClose={() => setCustomEdit(null)}
         onSaved={() => {
           setCustomEdit(null);
@@ -536,11 +582,13 @@ type ExecState = {
 function CustomToolDialog({
   edit,
   agents,
+  bindingsReady,
   onClose,
   onSaved,
 }: {
   edit: Tool | "new" | null;
   agents: Agent[];
+  bindingsReady: boolean;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -608,6 +656,7 @@ function CustomToolDialog({
   }
 
   async function save() {
+    if (!bindingsReady) return;
     if (isNew && !/^[a-z][a-z0-9_]*$/.test(key.trim())) {
       toast.error("key 需小写字母开头，仅含小写字母/数字/下划线");
       return;
@@ -675,7 +724,7 @@ function CustomToolDialog({
     <Sheet open={!!edit} onOpenChange={(o) => !o && onClose()}>
       <SheetContent
         side="right"
-        className="flex flex-col gap-0 p-0 data-[side=right]:w-[45vw] data-[side=right]:sm:max-w-[45vw] data-[side=right]:min-w-[480px]"
+        className="flex flex-col gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-3xl"
       >
         <SheetHeader className="px-4">
           <SheetTitle>{isNew ? "新建自定义工具" : `编辑 ${tool?.key}`}</SheetTitle>
@@ -781,13 +830,17 @@ function CustomToolDialog({
           <div className="grid gap-1.5">
             <Label className="text-muted-foreground text-xs">绑定 Agent</Label>
             <div className="flex flex-wrap gap-3">
-              {agents.map((a) => (
-                <label key={a.key} className="flex items-center gap-2 text-sm">
-                  <Checkbox checked={bound.includes(a.key)} onCheckedChange={() => toggleAgent(a.key)} />
+              {agents.map((a) => {
+                const support = agentBindingSupport(a, "tool", key.trim());
+                return <label key={a.key} className="flex items-center gap-2 text-sm" title={support.reason}>
+                  <Checkbox aria-label={`${a.key} 工具绑定`} checked={bound.includes(a.key)} disabled={!bindingsReady || !support.allowed} onCheckedChange={() => toggleAgent(a.key)} />
                   {a.name}<span className="text-muted-foreground font-mono text-xs">{a.key}</span>
-                </label>
-              ))}
+                  {!support.allowed && <span className="text-muted-foreground text-xs">{support.reason}{bound.includes(a.key) ? " 已有配置仅保留。" : ""}</span>}
+                </label>;
+              })}
             </div>
+            {!bindingsReady && <p className="text-destructive text-xs">绑定目录尚未完整载入，暂不接受修改。</p>}
+            {kind === "shell" && <p className="text-muted-foreground text-xs">环境声明仅补充已绑定执行角色的 Bash 说明，不创建独立可调用工具。<Link href="/function/commands" prefetch={false} className="ml-2 text-primary hover:underline">查看命令记录</Link></p>}
           </div>
 
           <div className="flex items-center gap-6">
@@ -828,7 +881,7 @@ function CustomToolDialog({
 
         <Separator />
         <div className="flex items-center gap-2 p-4">
-          <Button size="sm" onClick={save} disabled={saving}>
+          <Button size="sm" onClick={save} disabled={saving || !bindingsReady}>
             <SaveIcon /> {isNew ? "创建" : "保存"}
           </Button>
           {!isNew && (

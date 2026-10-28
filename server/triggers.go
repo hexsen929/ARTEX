@@ -59,6 +59,10 @@ func (s *Server) pgCreateTrigger(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "触发器仅支持自定义 agent")
 		return
 	}
+	if bindingCapabilities(a.Key).RuntimeConfigMode != "direct" {
+		writeErr(w, 400, "该角色通过专用流程或继承角色运行，不新增通用触发器")
+		return
+	}
 	var req triggerReq
 	if err := decode(r, &req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -98,6 +102,15 @@ func (s *Server) pgUpdateTrigger(w http.ResponseWriter, r *http.Request) {
 	var req triggerReq
 	if err := decode(r, &req); err != nil {
 		writeErr(w, 400, err.Error())
+		return
+	}
+	var agentKey string
+	if err := pg.QueryRow(`SELECT agent_key FROM agent_triggers WHERE id=$1`, id).Scan(&agentKey); err != nil {
+		writeErr(w, 400, "触发器不存在或暂不可读取")
+		return
+	}
+	if req.Enabled && bindingCapabilities(agentKey).RuntimeConfigMode != "direct" {
+		writeErr(w, 400, "专用角色不启用通用触发器；可显式关闭或删除原记录")
 		return
 	}
 	if req.IntervalSec < 0 {

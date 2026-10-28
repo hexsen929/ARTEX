@@ -1720,6 +1720,25 @@ CREATE TABLE IF NOT EXISTS credentials (
     verified      BOOLEAN NOT NULL DEFAULT false, -- 已实测可登录
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Additive, restart-safe upgrade of the credential management inventory.
+ALTER TABLE credentials ADD COLUMN IF NOT EXISTS target TEXT NOT NULL DEFAULT '';
+ALTER TABLE credentials ADD COLUMN IF NOT EXISTS source_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE credentials ADD COLUMN IF NOT EXISTS source_intent_id BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE credentials ADD COLUMN IF NOT EXISTS source_exploration_id BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE credentials ADD COLUMN IF NOT EXISTS verification_status TEXT;
+UPDATE credentials SET verification_status=CASE WHEN verified THEN 'verified' ELSE 'unverified' END WHERE verification_status IS NULL;
+ALTER TABLE credentials ALTER COLUMN verification_status SET DEFAULT 'unverified';
+ALTER TABLE credentials ALTER COLUMN verification_status SET NOT NULL;
+ALTER TABLE credentials ADD COLUMN IF NOT EXISTS verification_at TIMESTAMPTZ;
+ALTER TABLE credentials ADD COLUMN IF NOT EXISTS verification_method TEXT NOT NULL DEFAULT '';
+ALTER TABLE credentials ADD COLUMN IF NOT EXISTS verification_evidence TEXT NOT NULL DEFAULT '';
+ALTER TABLE credentials ADD COLUMN IF NOT EXISTS verification_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE credentials ADD COLUMN IF NOT EXISTS verification_history JSONB NOT NULL DEFAULT '[]';
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='credentials'::regclass AND conname='credentials_verification_status_check') THEN
+        ALTER TABLE credentials ADD CONSTRAINT credentials_verification_status_check CHECK (verification_status IN ('unverified','verified','failed'));
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_credentials_task ON credentials(task_id);
 
 -- =====================================================================

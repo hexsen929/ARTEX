@@ -1,11 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Autumn-27/norma/skill"
 	actool "github.com/Autumn-27/norma/tool"
@@ -25,10 +28,14 @@ const maxLedgerSkillName = 128
 // matter — a miss tells you which procedure the agents wished existed.
 type meteredSkill struct {
 	actool.CoreTool
-	pg       *db.DB
+	recorder skillUsageRecorder
 	reg      *skill.Registry
 	agentKey string
 	ri       agent.RunInfo
+}
+
+type skillUsageRecorder interface {
+	InsertSkillUsage(*db.SkillUsage) error
 }
 
 // meterSkillTool returns t unchanged when there is no DB to meter into.
@@ -36,12 +43,70 @@ func meterSkillTool(t actool.CoreTool, pg *db.DB, reg *skill.Registry, agentKey 
 	if pg == nil {
 		return t
 	}
-	return &meteredSkill{CoreTool: t, pg: pg, reg: reg, agentKey: agentKey, ri: ri}
+	return &meteredSkill{CoreTool: t, recorder: pg, reg: reg, agentKey: agentKey, ri: ri}
 }
 
 func (m *meteredSkill) Call(ctx context.Context, input json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
+	// The lookup recorded below and the SDK's real lookup must receive the same
+	// name. Otherwise whitespace can be counted as found but rejected by the SDK.
+	input = normalizeSkillInvocation(input)
 	m.record(input)
 	return m.CoreTool.Call(ctx, input, tc)
+}
+
+// normalizeSkillInvocation trims only top-level name string values. All other
+// bytes (args, unknown fields, nested objects, and duplicate-key order) stay
+// untouched. Invalid JSON is left to the real tool's ordinary validation.
+func normalizeSkillInvocation(input json.RawMessage) json.RawMessage {
+	decoder := json.NewDecoder(bytes.NewReader(input))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return input
+	}
+	type replacement struct {
+		start, end int
+		value      []byte
+	}
+	var replacements []replacement
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return input
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return input
+		}
+		name, isName := key.(string)
+		if !isName || !strings.EqualFold(name, "name") {
+			continue
+		}
+		var value string
+		if json.Unmarshal(raw, &value) != nil || value == strings.TrimSpace(value) {
+			continue
+		}
+		normalized, err := json.Marshal(strings.TrimSpace(value))
+		if err != nil {
+			return input
+		}
+		end := int(decoder.InputOffset())
+		replacements = append(replacements, replacement{start: end - len(raw), end: end, value: normalized})
+	}
+	if closing, err := decoder.Token(); err != nil || closing != json.Delim('}') {
+		return input
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF || len(replacements) == 0 {
+		return input
+	}
+	var output bytes.Buffer
+	previous := 0
+	for _, change := range replacements {
+		output.Write(input[previous:change.start])
+		output.Write(change.value)
+		previous = change.end
+	}
+	output.Write(input[previous:])
+	return output.Bytes()
 }
 
 // record appends the ledger row. Best-effort by design: a metering failure must
@@ -69,10 +134,13 @@ func (m *meteredSkill) record(input json.RawMessage) {
 			}
 		}
 	}
-	if len(name) > maxLedgerSkillName {
+	if !found && len(name) > maxLedgerSkillName {
 		name = name[:maxLedgerSkillName]
+		for !utf8.ValidString(name) {
+			name = name[:len(name)-1]
+		}
 	}
-	err := m.pg.InsertSkillUsage(&db.SkillUsage{
+	err := m.recorder.InsertSkillUsage(&db.SkillUsage{
 		Skill:         name,
 		AgentKey:      m.agentKey,
 		TaskID:        m.ri.TaskID,

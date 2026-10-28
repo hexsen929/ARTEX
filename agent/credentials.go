@@ -153,6 +153,7 @@ func ExtractCredentials(ctx context.Context, prov llm.Provider, prompt, raw stri
 	if strings.TrimSpace(prompt) == "" {
 		prompt = CredentialProcessorPrompt
 	}
+	prompt = withAgentWorkGuidance(prompt, db.CredentialAgentKey)
 	data, _ := json.Marshal(map[string]string{"raw_content": raw})
 	msg, stop, usage, err := prov.Complete(ctx, llm.CompletionRequest{System: []string{prompt}, Messages: []llm.Message{llm.UserText(string(data))}, MaxTokens: maxTokens, Thinking: "disabled"})
 	if err != nil {

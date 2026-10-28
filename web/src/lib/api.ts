@@ -14,6 +14,7 @@ import type {
   Activity,
   Agent,
   AgentDetail,
+  AgentPromptPreview,
   AgentTrigger,
   ArchiveBatchItem,
   Asset,
@@ -34,6 +35,8 @@ import type {
   CoverageAssetRefs,
   CoverageGraphData,
   CredentialTrafficDetail,
+  CredentialMetadataInput,
+  CredentialVerificationInput,
   IntranetCredential,
   DailyTokenBucket,
   DeleteTaskOptions,
@@ -1280,10 +1283,12 @@ export const api = {
   agentVariables: (key: string) =>
     get<{ variables: PromptVar[] }>(`/agents/${key}/variables`).then((r) => arr(r.variables)),
   previewAgentPrompt: (key: string, template: string, sample?: Record<string, string>) =>
-    post<{ rendered: string; error?: string }>(`/agents/${key}/prompt/preview`, { template, sample }),
+    post<AgentPromptPreview>(`/agents/${key}/prompt/preview`, { template, sample }),
   getAgentVisibility: (key: string) => get<{ mcp: number[]; skill: string[] }>(`/agents/${key}/visibility`),
   setAgentVisibility: (key: string, mcp: number[], skill: string[]) =>
     put<{ ok: boolean }>(`/agents/${key}/visibility`, { mcp, skill }),
+  patchAgentVisibility: (key: string, patch: { mcp?: number[]; skill?: string[] }) =>
+    put<{ ok: boolean }>(`/agents/${encodeURIComponent(key)}/visibility`, patch),
 
   // ---- tools (内置工具目录) ----
   tools: () => get<{ tools: Tool[] }>("/tools").then((r) => arr(r.tools)),
@@ -1341,6 +1346,7 @@ export const api = {
 
   // ---- skills (文件系统) ----
   skills: () => get<{ skills: SkillItem[] }>("/skills").then((r) => arr(r.skills)),
+  skillsStatus: () => get<{ skills: SkillItem[]; usage_available?: boolean; usage_error?: string; registry_available?: boolean; registry_error?: string; usage_scope?: string }>("/skills"),
   createSkill: (s: {
     name: string;
     description: string;
@@ -1379,6 +1385,8 @@ export const api = {
   deleteSkillPath: (skill: string, path: string) => del<{ deleted: string }>(`/skills/${skill}/files/${path}`),
   skillUsage: (name: string, limit = 50) =>
     get<{ calls: SkillCall[] }>(`/skills/${name}/usage?limit=${limit}`).then((r) => arr(r.calls)),
+  skillUsageStatus: (name: string, limit = 50) =>
+    get<{ calls: SkillCall[]; scope?: "live"; history_scope?: "live"; usage_available?: boolean; usage_error?: string }>(`/skills/${encodeURIComponent(name)}/usage?limit=${limit}`),
   missingSkills: (limit = 20) =>
     get<{ missing: MissingSkill[] }>(`/skills/missing?limit=${limit}`).then((r) => arr(r.missing)),
   clearMissingSkills: () => del<{ cleared: boolean }>("/skills/missing"),
@@ -1580,4 +1588,16 @@ export const api = {
   teardownTunnel: (id: string) => post<{ ok: boolean }>(`/tunnels/${encodeURIComponent(id)}/teardown`),
   intranetCredentials: (taskId?: string) =>
     get<{ items: IntranetCredential[] }>(`/intranet/credentials${taskQuery(taskId)}`).then((r) => arr(r.items)),
+  // Sensitive values are never included in list/detail projections or browser caches.
+  revealCredential: (id: number, purpose: "view" | "copy", signal?: AbortSignal) =>
+    http<{ id: number; secret: string }>(`/intranet/credentials/${id}/reveal`, {
+      method: "POST",
+      body: JSON.stringify({ purpose }),
+      cache: "no-store",
+      signal,
+    }),
+  updateCredentialVerification: (id: number, input: CredentialVerificationInput) =>
+    put<IntranetCredential>(`/intranet/credentials/${id}/verification`, input),
+  updateCredentialMetadata: (id: number, input: CredentialMetadataInput) =>
+    patch<IntranetCredential>(`/intranet/credentials/${id}/metadata`, input),
 };

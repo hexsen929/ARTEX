@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/Autumn-27/norma/llm"
 	actool "github.com/Autumn-27/norma/tool"
@@ -16,7 +17,11 @@ import (
 // skill loads. Returns a single plain segment + boundary 0 when there is no global
 // block to add.
 func deferredSystem(sysText string, def DeferredInfo) (system []string, boundary int) {
-	sysText += def.FindingGuidance + def.CaseGuidance + def.IntelligenceGuidance
+	sysText += def.FindingGuidance + def.CaseGuidance + def.IntelligenceGuidance + def.SkillReadGuidance
+	if len(def.AssemblyWarnings) > 0 {
+		sysText += "\n\n【本轮工具可用性诊断】\n" + strings.Join(def.AssemblyWarnings, "\n") +
+			"\n按各条诊断区分有效缓存与已排除服务，仅使用本轮实际装配且已授权的工具。依赖已排除服务的步骤记录为受阻，不得宣称已完成，不自动扩大权限、目标或执行范围。\n"
+	}
 	block := actool.RenderDeferredToolsBlock(def.GlobalNames)
 	if block == "" {
 		return []string{sysText}, 0

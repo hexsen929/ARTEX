@@ -1,5 +1,10 @@
 package db
 
+import (
+	"context"
+	"database/sql"
+)
+
 // ToolUsage is one catalog tool invocation. It stores attribution dimensions only:
 // tool arguments and results are deliberately excluded from the ledger.
 type ToolUsage struct {
@@ -25,7 +30,15 @@ VALUES ($1, NULLIF($2,''), $3, $4, $5, NULLIF($6,''))`,
 // ToolUsageCounts returns invocation totals keyed by catalog tool key. Entries
 // without calls are absent; API callers merge the result into the tools catalog.
 func (d *DB) ToolUsageCounts() (map[string]int, error) {
-	rows, err := d.Query(`
+	// An archive/restore atomically moves rows between hot storage and its cold
+	// aggregate. Both reads must observe one snapshot or a move between them can
+	// count the same invocation twice (or miss it entirely).
+	tx, err := d.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	rows, err := tx.Query(`
 SELECT tool_key, COUNT(*)
 FROM tool_usage
 GROUP BY tool_key`)
@@ -45,7 +58,10 @@ GROUP BY tool_key`)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	archived, err := d.archivedTaskAggregates()
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	archived, err := archivedTaskAggregatesFrom(tx)
 	if err != nil {
 		return nil, err
 	}

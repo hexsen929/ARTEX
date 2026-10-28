@@ -2,6 +2,8 @@ package chainskel
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -117,27 +119,27 @@ func TestPivotHintsForIntent(t *testing.T) {
 }
 
 func TestRefsGuideForIntent(t *testing.T) {
-	out := RefsGuideForIntent(payload(t, map[string]any{"summary": "打某站", "chain_tags": []string{"web"}}))
-	if !strings.Contains(out, "skills/chains-web/refs/") || !strings.Contains(out, "精确篇目见对应 SKILL.md") {
-		t.Fatalf("web tag 应给出 refs 指引:\n%s", out)
+	dirs := fixtureRefsDirectories(t, "web", "ad", "pivot")
+	webRefs := filepath.Join(dirs["chains-web"], "refs")
+	adRefs := filepath.Join(dirs["chains-ad"], "refs")
+	out := RefsGuideForIntent(payload(t, map[string]any{"summary": "fixture", "chain_tags": []string{"web"}}), dirs)
+	if !strings.Contains(out, strconv.Quote(webRefs)) || !strings.Contains(out, "精确篇目见对应 SKILL.md") {
+		t.Fatalf("authorized web tag should give its resolved refs directory: %s", out)
 	}
-	// 双 tag:两个路径都在一行里。
-	out = RefsGuideForIntent(payload(t, map[string]any{"summary": "x", "chain_tags": []string{"web", "ad", "pivot"}}))
-	if !strings.Contains(out, "skills/chains-web/refs/") || !strings.Contains(out, "skills/chains-ad/refs/") {
-		t.Fatalf("前 2 个 tag 的路径都应在:\n%s", out)
+	out = RefsGuideForIntent(payload(t, map[string]any{"summary": "x", "chain_tags": []string{"web", "ad", "pivot"}}), dirs)
+	if !strings.Contains(out, strconv.Quote(webRefs)) || !strings.Contains(out, strconv.Quote(adRefs)) || strings.Contains(out, "chains-pivot") {
+		t.Fatalf("only the first two authorized category paths should be present: %s", out)
 	}
-	if strings.Contains(out, "chains-pivot") {
-		t.Fatal("第 3 个 tag 超上限不应出现")
+	out = RefsGuideForIntent(payload(t, map[string]any{"summary": "做 sql 注入测试"}), dirs)
+	if !strings.Contains(out, strconv.Quote(webRefs)) {
+		t.Fatalf("keyword fallback lost the resolved web directory: %s", out)
 	}
-	// 无 tag 回退关键词;无命中静默。
-	out = RefsGuideForIntent(payload(t, map[string]any{"summary": "做 sql 注入测试"}))
-	if !strings.Contains(out, "skills/chains-web/refs/") {
-		t.Fatalf("关键词回退应给出 web refs 指引:\n%s", out)
+	for _, input := range []json.RawMessage{payload(t, map[string]any{"summary": "随便看看"}), json.RawMessage(`{bad json`)} {
+		if out := RefsGuideForIntent(input, dirs); out != "" {
+			t.Fatal("unmatched or invalid intent should not emit paths")
+		}
 	}
-	if out := RefsGuideForIntent(payload(t, map[string]any{"summary": "随便看看"})); out != "" {
-		t.Fatalf("匹配不中应静默不注入, got:\n%s", out)
-	}
-	if out := RefsGuideForIntent(json.RawMessage(`{bad json`)); out != "" {
-		t.Fatal("payload 解析失败应静默不注入")
+	if out := RefsGuideForIntent(payload(t, map[string]any{"chain_tags": []string{"web"}})); out != "" {
+		t.Fatal("legacy caller without resolved directories must not guess a relative path")
 	}
 }

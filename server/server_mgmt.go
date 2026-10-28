@@ -66,7 +66,7 @@ var reAgentKey = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
 // pgReady returns the PG handle, or writes 503 and returns nil if unavailable.
 func (s *Server) pg(w http.ResponseWriter) *db.DB {
-	if s.m.pg == nil {
+	if s.m == nil || s.m.pg == nil {
 		writeErr(w, 503, "管理后台数据源(PostgreSQL)未连接")
 		return nil
 	}
@@ -239,12 +239,23 @@ func (s *Server) pgListAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dtos := agentDTOs(ags)
+	for i := range dtos {
+		dtos[i] = decorateAgentAutomation(pg, dtos[i])
+	}
 	// overlay per-agent binding counts (mcp/skill by id, tools by key) — best-effort.
 	if mcp, skill, tools, err := pg.AgentBindingCounts(); err == nil {
 		for i := range dtos {
+			available := true
+			dtos[i].BindingCountsAvailable = &available
 			dtos[i].McpCount = mcp[ags[i].ID]
 			dtos[i].SkillCount = skill[ags[i].ID]
 			dtos[i].ToolCount = tools[ags[i].Key]
+		}
+	} else {
+		for i := range dtos {
+			available := false
+			dtos[i].BindingCountsAvailable = &available
+			dtos[i].BindingCountsError = "绑定统计暂不可用"
 		}
 	}
 	writeJSON(w, 200, map[string]any{"agents": dtos})
@@ -381,6 +392,23 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	caps := bindingCapabilities(a.Key)
+	if caps.RuntimeConfigMode != "direct" {
+		if (req.MaxTurns != nil && *req.MaxTurns != a.MaxTurns) || (req.RunSeconds != nil && *req.RunSeconds != a.RunSecs) ||
+			(req.WebSearch != nil && *req.WebSearch != a.WebSearch) || (req.InteractiveShell != nil && *req.InteractiveShell != a.InteractiveShell) {
+			writeErr(w, 400, "该角色不使用通用运行预算、搜索或交互配置，请查看运行能力说明")
+			return
+		}
+		req.MaxTurns, req.RunSeconds, req.WebSearch, req.InteractiveShell = nil, nil, nil, nil
+		if caps.RuntimeConfigMode == "inherited" && req.LLMProfileID != nil {
+			var id *int64
+			if json.Unmarshal(req.LLMProfileID, &id) != nil || (id == nil) != (a.LLMProfileID == nil) || (id != nil && *id != *a.LLMProfileID) {
+				writeErr(w, 400, "内网提示词变体的模型配置继承 worker，请在 worker 中设置")
+				return
+			}
+			req.LLMProfileID = nil
+		}
+	}
 	profileChanged := false
 	if req.LLMProfileID != nil { // key present (数字 或 null)
 		var id *int64
@@ -480,28 +508,53 @@ func (s *Server) pgGetAgent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cur, _ := pg.CurrentPrompt(a.ID)
-	vars, _ := pg.PromptVars(a.ID)
+	cur, err := pg.CurrentPrompt(a.ID)
+	if err != nil {
+		writeErr(w, 500, "提示词读取失败")
+		return
+	}
+	vars, err := pg.PromptVars(a.ID)
+	if err != nil {
+		writeErr(w, 500, "提示词变量读取失败")
+		return
+	}
 	vars = withGlobalVars(vars)
-	vers, _ := pg.ListPromptVersions(a.ID)
+	vers, err := pg.ListPromptVersions(a.ID)
+	if err != nil {
+		writeErr(w, 500, "提示词历史读取失败")
+		return
+	}
 	if vers == nil {
 		vers = []db.PromptVersion{}
 	}
-	mcp, _ := pg.AgentVisible(a.ID, "mcp")
-	sk, _ := pg.AgentSkillNames(a.ID)
+	mcp, err := pg.AgentVisible(a.ID, "mcp")
+	if err != nil {
+		writeErr(w, 500, "MCP 授权读取失败")
+		return
+	}
+	sk, err := pg.AgentSkillNames(a.ID)
+	if err != nil {
+		writeErr(w, 500, "Skill 授权读取失败")
+		return
+	}
 	if sk == nil {
 		sk = []string{}
 	}
-	// 可选 LLM 配置列表(id/name/model/是否默认),供前端渲染 "默认模型" 下拉;当前绑定见 agent.llm_profile_id。
-	profs, _ := pg.ListProfiles()
+	profs, err := pg.ListProfiles()
+	if err != nil {
+		writeErr(w, 500, "模型配置列表读取失败")
+		return
+	}
 	llmProfiles := make([]map[string]any, 0, len(profs))
 	for _, p := range profs {
 		llmProfiles = append(llmProfiles, map[string]any{
 			"id": p.ID, "name": p.Name, "model": p.Model, "is_default": p.IsDefault,
 		})
 	}
+	guidanceVersion, guidance := agentWorkGuidanceMetadata(a.Key)
 	writeJSON(w, 200, map[string]any{
-		"agent": agentDTO(a), "prompt": cur, "variables": vars, "versions": vers,
+		"agent": decorateAgentAutomation(pg, agentDTO(a)), "prompt": cur, "variables": vars, "versions": vers,
+		"work_guidance_version": guidanceVersion, "work_guidance": guidance,
 		"visibility":   map[string]any{"mcp": mcp, "skill": sk},
 		"llm_profiles": llmProfiles, // 可绑定的 LLM 配置候选
 
@@ -703,11 +756,14 @@ func (s *Server) pgPreviewPrompt(w http.ResponseWriter, r *http.Request) {
 		body.Template, _ = pg.CurrentPrompt(a.ID)
 	}
 	rendered, err := renderPrompt(body.Template, withGlobalVars(vars), body.Sample)
+	guidanceVersion, guidance := agentWorkGuidanceMetadata(a.Key)
 	if err != nil {
-		writeJSON(w, 200, map[string]any{"rendered": "", "error": err.Error()})
+		writeJSON(w, 200, map[string]any{"rendered": "", "error": err.Error(),
+			"work_guidance_version": guidanceVersion, "work_guidance": guidance})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"rendered": rendered})
+	writeJSON(w, 200, map[string]any{"rendered": rendered,
+		"work_guidance_version": guidanceVersion, "work_guidance": guidance})
 }
 
 func (s *Server) pgGetAgentVisibility(w http.ResponseWriter, r *http.Request) {
@@ -715,10 +771,21 @@ func (s *Server) pgGetAgentVisibility(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	mcp, _ := pg.AgentVisible(a.ID, "mcp")
-	sk, _ := pg.AgentSkillNames(a.ID)
+	mcp, err := pg.AgentVisible(a.ID, "mcp")
+	if err != nil {
+		writeErr(w, 500, "MCP 授权读取失败")
+		return
+	}
+	sk, err := pg.AgentSkillNames(a.ID)
+	if err != nil {
+		writeErr(w, 500, "Skill 授权读取失败")
+		return
+	}
 	if sk == nil {
 		sk = []string{}
+	}
+	if mcp == nil {
+		mcp = []int64{}
 	}
 	writeJSON(w, 200, map[string]any{"mcp": mcp, "skill": sk})
 }
@@ -729,19 +796,19 @@ func (s *Server) pgSetAgentVisibility(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		MCP   []int64  `json:"mcp"`
-		Skill []string `json:"skill"`
+		MCP   *[]int64  `json:"mcp"`
+		Skill *[]string `json:"skill"`
 	}
 	if err := decode(r, &body); err != nil {
+		writeErr(w, 400, "授权请求格式错误")
+		return
+	}
+	if err := validateResourceBindingPatch(pg, a, body.MCP, body.Skill); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if err := pg.SetAgentVisibilityKind(a.ID, "mcp", body.MCP); err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	if err := pg.SetAgentSkillVisibility(a.ID, body.Skill); err != nil {
-		writeErr(w, 500, err.Error())
+	if err := pg.SetAgentBindings(r.Context(), a.ID, body.MCP, body.Skill); err != nil {
+		writeErr(w, 500, "授权保存失败，未应用本次修改")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
@@ -762,17 +829,15 @@ func (s *Server) pgListTools(w http.ResponseWriter, r *http.Request) {
 	if ts == nil {
 		ts = []*db.Tool{}
 	}
-	// Usage is best-effort decoration. Runtime tool resolution keeps using the plain
-	// catalog query, so agent assembly never pays for this aggregate.
 	counts, countErr := pg.ToolUsageCounts()
+	usageError := ""
 	if countErr != nil {
-		log.Printf("[tools] 读取调用统计失败: %v", countErr)
-	} else {
-		for _, tool := range ts {
-			tool.Calls = counts[tool.Key]
-		}
+		log.Printf("[tools] 目录调用统计读取失败")
+		usageError = "目录调用统计暂不可用"
 	}
-	writeJSON(w, 200, map[string]any{"tools": ts})
+	writeJSON(w, 200, map[string]any{"tools": projectToolUsage(ts, counts, countErr),
+		"usage_available": countErr == nil, "usage_error": usageError,
+		"usage_scope": "catalog_invocation_attempts_including_archives"})
 }
 
 // pgUpdateTool saves the page-editable fields of a built-in tool: description,
@@ -801,6 +866,10 @@ func (s *Server) pgUpdateTool(w http.ResponseWriter, r *http.Request) {
 		Enabled     bool            `json:"enabled"`
 	}
 	if err := decode(r, &body); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := validateNewToolBindings(pg, key, cur.Agents, body.Agents); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -967,23 +1036,36 @@ func (s *Server) pgMCPTools(w http.ResponseWriter, r *http.Request) {
 // ---------- skills (文件系统) ----------
 
 type skillFileNode struct {
-	Name          string   `json:"name"`
-	Description   string   `json:"description,omitempty"`
-	License       string   `json:"license,omitempty"`
-	Compatibility string   `json:"compatibility,omitempty"`
-	MCPs          []string `json:"mcps,omitempty"`
-	Files         []string `json:"files"`
-	// Usage ledger (db/skill_usage.go). Calls is 0 and LastUsed nil for a skill that
-	// was never invoked — the ledger only has rows for skills agents actually loaded.
-	Calls    int        `json:"calls"`
-	Tasks    int        `json:"tasks"`
-	Agents   []string   `json:"usage_agents"`
-	LastUsed *time.Time `json:"last_used,omitempty"`
+	Name           string     `json:"name"`
+	Description    string     `json:"description,omitempty"`
+	License        string     `json:"license,omitempty"`
+	Compatibility  string     `json:"compatibility,omitempty"`
+	MCPs           []string   `json:"mcps,omitempty"`
+	Files          []string   `json:"files"`
+	Calls          *int       `json:"calls"`
+	Tasks          *int       `json:"tasks"`
+	Agents         []string   `json:"usage_agents"`
+	LastUsed       *time.Time `json:"last_used,omitempty"`
+	UsageAvailable bool       `json:"usage_available"`
+	UsageError     string     `json:"usage_error,omitempty"`
+	Loadable       bool       `json:"loadable"`
+	LoadError      string     `json:"load_error,omitempty"`
+	DeclaredName   string     `json:"declared_name"`
 }
 
 func (s *Server) fsListSkills(w http.ResponseWriter, r *http.Request) {
-	_ = os.MkdirAll(s.skillDir, 0o755)
-	allReg, _ := skill.LoadDir(s.skillDir)
+	entries, err := os.ReadDir(s.skillDir)
+	if err != nil {
+		writeErr(w, 500, "Skill 根目录读取失败，请检查配置与权限")
+		return
+	}
+	inspections, inspectionErr := inspectSkillCatalog(s.skillDir)
+	allReg, registryErr := skill.LoadDir(s.skillDir)
+	registryAvailable := inspectionErr == nil && registryErr == nil
+	registryError := ""
+	if !registryAvailable {
+		registryError = "Skill 目录元数据读取失败"
+	}
 	metaByDir := map[string]skill.Skill{}
 	if allReg != nil {
 		for _, sk := range allReg.List() {
@@ -992,46 +1074,62 @@ func (s *Server) fsListSkills(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	entries, err := os.ReadDir(s.skillDir)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	// Usage is best-effort decoration: a ledger read failure leaves the counts at
-	// zero rather than failing the skill list itself.
+	usageAvailable := s.m != nil && s.m.pg != nil
+	usageError := ""
 	statBySkill := map[string]db.SkillStat{}
-	if s.m.pg != nil {
+	if usageAvailable {
 		stats, err := s.m.pg.SkillStats()
 		if err != nil {
-			log.Printf("[skills] 读取调用统计失败: %v", err)
+			usageAvailable = false
+		} else {
+			for _, st := range stats {
+				statBySkill[st.Skill] = st
+			}
 		}
-		for _, st := range stats {
-			statBySkill[st.Skill] = st
-		}
+	}
+	if !usageAvailable {
+		usageError = "显式 Skill 加载统计暂不可用"
 	}
 	nodes := []skillFileNode{}
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() && e.Type()&os.ModeSymlink == 0 {
 			continue
 		}
 		dirName := e.Name()
-		node := skillFileNode{Name: dirName, Agents: []string{}}
-		if st, ok := statBySkill[dirName]; ok {
-			node.Calls, node.Tasks, node.Agents, node.LastUsed = st.Calls, st.Tasks, st.Agents, st.LastUsed
+		inspection, known := inspections[dirName]
+		if !known {
+			inspection = inspectSkillEntry(s.skillDir, dirName)
+		}
+		node := skillFileNode{Name: dirName, Agents: []string{}, UsageAvailable: usageAvailable, UsageError: usageError,
+			Loadable: registryAvailable && inspection.Loadable, LoadError: inspection.LoadError, DeclaredName: inspection.DeclaredName}
+		if !registryAvailable {
+			node.LoadError = registryError
+		}
+		if usageAvailable {
+			st := statBySkill[dirName]
+			calls, tasks := st.Calls, st.Tasks
+			node.Calls, node.Tasks, node.LastUsed = &calls, &tasks, st.LastUsed
+			if st.Agents != nil {
+				node.Agents = st.Agents
+			}
 		}
 		if meta, ok := metaByDir[dirName]; ok {
-			node.Description = meta.Description
-			node.License = meta.License
-			node.Compatibility = meta.Compatibility
-			node.MCPs = meta.MCPs
+			node.Description, node.License, node.Compatibility, node.MCPs = meta.Description, meta.License, meta.Compatibility, meta.MCPs
 		}
-		node.Files, _ = walkSkillFiles(filepath.Join(s.skillDir, dirName))
+		if inspection.Loadable || skillLibraryPresent(s.skillDir, dirName) {
+			node.Files, err = walkSkillFiles(filepath.Join(s.skillDir, dirName))
+			if err != nil {
+				node.Loadable, node.LoadError = false, "Skill 文件目录读取失败"
+			}
+		}
 		if node.Files == nil {
 			node.Files = []string{}
 		}
 		nodes = append(nodes, node)
 	}
-	writeJSON(w, 200, map[string]any{"skills": nodes})
+	writeJSON(w, 200, map[string]any{"skills": nodes, "usage_available": usageAvailable, "usage_error": usageError,
+		"registry_available": registryAvailable, "registry_error": registryError,
+		"usage_scope": "explicit_load_attempts_including_archives"})
 }
 
 // fsSkillUsage returns one skill's recent invocations, newest first (detail panel).
@@ -1051,7 +1149,7 @@ func (s *Server) fsSkillUsage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"calls": calls})
+	writeJSON(w, 200, map[string]any{"calls": calls, "scope": "live", "history_scope": "live", "usage_available": true})
 }
 
 // fsMissingSkills lists historical names the current Agent registry failed to
@@ -1161,25 +1259,14 @@ func (s *Server) fsCreateSkill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	// Build a spec-compliant SKILL.md (agentskills.io format):
-	//   YAML frontmatter: name (required), description (required),
-	//                     license, compatibility (optional)
-	//   Markdown body:    step-by-step instructions
+	frontmatter, err := encodeSkillFrontmatter(body.Name, body.Description, body.License, body.Compatibility, body.MCPs)
+	if err != nil {
+		_ = os.RemoveAll(skillPath)
+		writeErr(w, 400, "Skill 元数据格式错误")
+		return
+	}
 	var sb strings.Builder
-	sb.WriteString("---\n")
-	fmt.Fprintf(&sb, "name: %s\n", body.Name)
-	fmt.Fprintf(&sb, "description: %s\n", body.Description)
-	if body.License != "" {
-		fmt.Fprintf(&sb, "license: %s\n", body.License)
-	}
-	if body.Compatibility != "" {
-		fmt.Fprintf(&sb, "compatibility: %s\n", body.Compatibility)
-	}
-	// mcps: MCP servers this skill unlocks on load (skill-gated deferred tools).
-	if mcps := cleanStrs(body.MCPs); len(mcps) > 0 {
-		fmt.Fprintf(&sb, "mcps: %s\n", strings.Join(mcps, ", "))
-	}
-	sb.WriteString("---\n")
+	sb.Write(frontmatter)
 	if strings.TrimSpace(body.Instructions) != "" {
 		sb.WriteString(body.Instructions)
 	} else {
@@ -1235,83 +1322,6 @@ func (s *Server) fsUpdateSkillMeta(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-// rewriteSkillFrontmatter parses the SKILL.md YAML frontmatter and replaces the
-// fields given as non-nil pointers. The instruction body (after the closing ---) is
-// preserved verbatim. Returns an error if the file has no recognisable frontmatter.
-func rewriteSkillFrontmatter(content []byte, mcps *[]string, description, license, compatibility *string) ([]byte, error) {
-	lines := strings.Split(string(content), "\n")
-	if len(lines) < 2 || strings.TrimSpace(lines[0]) != "---" {
-		return nil, fmt.Errorf("SKILL.md has no YAML frontmatter")
-	}
-	fmEnd := -1
-	for i := 1; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) == "---" {
-			fmEnd = i
-			break
-		}
-	}
-	if fmEnd < 0 {
-		return nil, fmt.Errorf("SKILL.md frontmatter is not closed")
-	}
-	// Collect existing key → value from frontmatter (preserve unknown keys)
-	type kv struct{ k, v string }
-	var pairs []kv
-	for _, l := range lines[1:fmEnd] {
-		if idx := strings.IndexByte(l, ':'); idx >= 0 {
-			pairs = append(pairs, kv{strings.TrimSpace(l[:idx]), strings.TrimSpace(l[idx+1:])})
-		} else if strings.TrimSpace(l) != "" {
-			pairs = append(pairs, kv{"", l}) // preserve non-key lines verbatim
-		}
-	}
-	// Apply updates (nil pointer = no change)
-	applyStr := func(key string, val *string) {
-		if val == nil {
-			return
-		}
-		for i, p := range pairs {
-			if p.k == key {
-				pairs[i].v = strings.TrimSpace(*val)
-				return
-			}
-		}
-		pairs = append(pairs, kv{key, strings.TrimSpace(*val)})
-	}
-	applyStr("description", description)
-	applyStr("license", license)
-	applyStr("compatibility", compatibility)
-	if mcps != nil {
-		cleaned := cleanStrs(*mcps)
-		// Remove existing mcps line
-		filtered := pairs[:0]
-		for _, p := range pairs {
-			if p.k != "mcps" {
-				filtered = append(filtered, p)
-			}
-		}
-		pairs = filtered
-		if len(cleaned) > 0 {
-			pairs = append(pairs, kv{"mcps", strings.Join(cleaned, ", ")})
-		}
-	}
-	// Reconstruct
-	var sb strings.Builder
-	sb.WriteString("---\n")
-	for _, p := range pairs {
-		if p.k == "" {
-			sb.WriteString(p.v)
-		} else {
-			fmt.Fprintf(&sb, "%s: %s", p.k, p.v)
-		}
-		sb.WriteByte('\n')
-	}
-	sb.WriteString("---\n")
-	// Body (lines after closing ---)
-	if fmEnd+1 < len(lines) {
-		sb.WriteString(strings.Join(lines[fmEnd+1:], "\n"))
-	}
-	return []byte(sb.String()), nil
-}
-
 // zip-upload safety caps (defeat zip bombs / runaway archives).
 const (
 	maxSkillZipBytes   = 20 << 20  // 20MB compressed request body
@@ -1323,23 +1333,7 @@ const (
 // skillNameFromFrontmatter extracts the `name:` value from a SKILL.md's YAML
 // frontmatter (the block between the first two `---` lines). "" if absent.
 func skillNameFromFrontmatter(md []byte) string {
-	lines := strings.Split(string(md), "\n")
-	inFM := false
-	for _, ln := range lines {
-		t := strings.TrimSpace(ln)
-		if t == "---" {
-			if !inFM {
-				inFM = true
-				continue
-			}
-			break // end of frontmatter
-		}
-		if inFM && strings.HasPrefix(t, "name:") {
-			v := strings.TrimSpace(strings.TrimPrefix(t, "name:"))
-			return strings.Trim(v, `"'`) // name: "中文技能" 也认
-		}
-	}
-	return ""
+	return decodeSkillFrontmatterName(md)
 }
 
 // fsUploadSkill installs a skill from an uploaded .zip. The archive must contain a
@@ -1791,6 +1785,23 @@ func (s *Server) pgToggleSkillVisibility(w http.ResponseWriter, r *http.Request)
 		writeErr(w, 400, err.Error())
 		return
 	}
+	var agentKey string
+	if err := pg.QueryRow(`SELECT key FROM agents WHERE id=$1`, body.AgentID).Scan(&agentKey); err != nil {
+		writeErr(w, 400, "Agent 不存在或授权信息暂不可读")
+		return
+	}
+	if body.Visible {
+		a, err := pg.GetAgentByKey(agentKey)
+		if err != nil || a == nil {
+			writeErr(w, 500, "Agent 授权信息读取失败")
+			return
+		}
+		next := []string{body.SkillName}
+		if err := validateResourceBindingPatch(pg, a, nil, &next); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
 	if err := pg.ToggleSkillVisibility(body.AgentID, body.SkillName, body.Visible); err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -1828,6 +1839,25 @@ func (s *Server) pgToggleVisibility(w http.ResponseWriter, r *http.Request) {
 	if err := decode(r, &body); err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	var agentKey string
+	if err := pg.QueryRow(`SELECT key FROM agents WHERE id=$1`, body.AgentID).Scan(&agentKey); err != nil {
+		writeErr(w, 400, "Agent 不存在或授权信息暂不可读")
+		return
+	}
+	if body.Visible {
+		a, err := pg.GetAgentByKey(agentKey)
+		if err != nil || a == nil {
+			writeErr(w, 500, "Agent 授权信息读取失败")
+			return
+		}
+		if body.Kind == "mcp" {
+			next := []int64{body.ResourceID}
+			if err := validateResourceBindingPatch(pg, a, &next, nil); err != nil {
+				writeErr(w, 400, err.Error())
+				return
+			}
+		}
 	}
 	if err := pg.ToggleVisibility(body.AgentID, body.Kind, body.ResourceID, body.Visible); err != nil {
 		writeErr(w, 500, err.Error())

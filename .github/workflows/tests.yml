@@ -129,3 +129,22 @@ jobs:
         working-directory: web
       - run: npm run build:static
         working-directory: web
+      - name: Prepare isolated browser regression runtime
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
+        run: |
+          npm install --prefix "$RUNNER_TEMP/credential-ui-runtime" --no-save --package-lock=false --ignore-scripts --no-audit --no-fund playwright@1.58.2
+          node "$RUNNER_TEMP/credential-ui-runtime/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Credential management browser regressions
+        env:
+          ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
+          ARTEX_UI_ARTIFACTS: ${{ runner.temp }}/credential-ui-artifacts
+        run: node scripts/credential-ui-smoke.cjs
+        working-directory: web
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: credential-ui-regression
+          path: ${{ runner.temp }}/credential-ui-artifacts
+          if-no-files-found: ignore

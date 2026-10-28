@@ -353,6 +353,7 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 func plannerSystem(goal, dataDir, workDir string) string {
 	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
 	body += executionQualityGuidance("planner")
+	body = withAgentWorkGuidance(body, "planner")
 	return body + artifactSpec(workDir) + untrustedDataRule + chainskel.PlannerMetaRules + plannerHoneypotRules
 }
 
@@ -391,6 +392,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
 	tools, def, cleanup := AugmentTools(ctx, "planner", base)
 	defer cleanup()
+	if def.AssemblyError != nil {
+		return false, "", fmt.Errorf("本轮工具装配未完成，未请求模型: %w", def.AssemblyError)
+	}
 	// 关键态势（刚完成的意图 + 预取的完整图）改放【本轮 user 输入】(见下方 input)，system
 	// 只留静态规划正文。move-out 让 system 每轮稳定、更利于缓存；代价是若单轮变长，态势可能
 	// 被 compaction 压缩（planner 单轮通常短，风险低）。situational 会拼进下方 input。

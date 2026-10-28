@@ -40,6 +40,16 @@ func TestAssembleCachedStdioToolsWithoutStartingProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	origSkills, err := pg.AgentSkillNames(ag.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This fixture tests cached MCP assembly only. Seeded default Skill grants
+	// require real indexes and must not be pointed at this empty temporary root.
+	if err := pg.SetAgentSkillVisibility(ag.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pg.SetAgentSkillVisibility(ag.ID, origSkills) })
 	_, _ = pg.Exec(`DELETE FROM mcp_servers WHERE name='t-lazy-cached'`)
 	m := &db.MCPServer{Name: "t-lazy-cached", Transport: "stdio", Command: "/fixture/must-not-be-started", Enabled: true}
 	m.ID, err = pg.SaveMCP(m)
@@ -59,6 +69,12 @@ func TestAssembleCachedStdioToolsWithoutStartingProcess(t *testing.T) {
 	t.Cleanup(func() { agent.ToolAugment = old })
 	for range 8 {
 		tools, def, cleanup := agent.ToolAugment(context.Background(), "planner")
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if def.AssemblyError != nil {
+			t.Fatal("cached MCP fixture failed authorization assembly", def.AssemblyError)
+		}
 		found := false
 		for _, tool := range tools {
 			if tool.Name() == toolName {
@@ -68,7 +84,6 @@ func TestAssembleCachedStdioToolsWithoutStartingProcess(t *testing.T) {
 				}
 			}
 		}
-		cleanup()
 		if !found || !contains(def.GlobalNames, toolName) {
 			t.Fatal("cached MCP tool was dropped or process startup was attempted")
 		}
@@ -88,7 +103,7 @@ func TestAssembleVisibleSkill(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer pg.Close()
+	t.Cleanup(func() { _ = pg.Close() })
 
 	// Filesystem skill fixture: <skillDir>/t-assemble/SKILL.md. The directory name
 	// (t-assemble) is the visibility key matched against AgentSkillNames.
@@ -102,8 +117,10 @@ func TestAssembleVisibleSkill(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	oldAugment, oldResolve := agent.ToolAugment, agent.ToolResolve
 	wireAgentAugment(pg, skillDir, nil)
-	t.Cleanup(func() { agent.ToolAugment = nil })
+	agent.ToolResolve = nil // this fixture isolates Skill packing, not catalog resolution
+	t.Cleanup(func() { agent.ToolAugment, agent.ToolResolve = oldAugment, oldResolve })
 
 	ag, _ := pg.GetAgentByKey("planner")
 	if ag == nil {
@@ -112,15 +129,31 @@ func TestAssembleVisibleSkill(t *testing.T) {
 
 	// Isolate this test from whatever skill visibility the planner already has in the
 	// shared DB: clear it now, restore it on cleanup.
-	orig, _ := pg.AgentSkillNames(ag.ID)
+	orig, err := pg.AgentSkillNames(ag.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origMCP, err := pg.AgentVisible(ag.ID, "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.SetAgentVisibilityKind(ag.ID, "mcp", nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pg.SetAgentVisibilityKind(ag.ID, "mcp", origMCP) })
 	if err := pg.SetAgentSkillVisibility(ag.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = pg.SetAgentSkillVisibility(ag.ID, orig) })
 
 	// before: skill not visible → no Skill meta-tool
-	extra, _, cleanup := agent.ToolAugment(context.Background(), "planner")
-	cleanup()
+	extra, def, cleanup := agent.ToolAugment(context.Background(), "planner")
+	if cleanup != nil {
+		cleanup()
+	}
+	if def.AssemblyError != nil {
+		t.Fatal("empty Skill grant fixture failed assembly", def.AssemblyError)
+	}
 	if hasSkillTool(extra) {
 		t.Fatalf("expected no Skill meta-tool before the skill is made visible")
 	}
@@ -132,15 +165,25 @@ func TestAssembleVisibleSkill(t *testing.T) {
 	t.Cleanup(func() { _ = pg.ToggleSkillVisibility(ag.ID, skillName, false) })
 
 	// after: the Skill meta-tool is packed in
-	extra, _, cleanup = agent.ToolAugment(context.Background(), "planner")
-	defer cleanup()
+	extra, def, cleanup = agent.ToolAugment(context.Background(), "planner")
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if def.AssemblyError != nil {
+		t.Fatal("visible Skill fixture failed assembly", def.AssemblyError)
+	}
 	if !hasSkillTool(extra) {
 		t.Fatalf("expected the Skill meta-tool after making the skill visible")
 	}
 
 	// AugmentTools appends extra to base without filtering base
-	combined, _, c2 := agent.AugmentTools(context.Background(), "planner", nil)
-	defer c2()
+	combined, combinedDef, c2 := agent.AugmentTools(context.Background(), "planner", nil)
+	if c2 != nil {
+		defer c2()
+	}
+	if combinedDef.AssemblyError != nil {
+		t.Fatal("visible Skill fixture failed combined assembly", combinedDef.AssemblyError)
+	}
 	if !hasSkillTool(combined) {
 		t.Fatalf("AugmentTools should surface the Skill meta-tool")
 	}

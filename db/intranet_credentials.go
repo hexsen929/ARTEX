@@ -9,9 +9,15 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // 凭据类型全集(schema CHECK 与 Go 校验同源)。
@@ -27,17 +33,111 @@ const (
 
 // CredentialRecord 是 credentials 表的一行。Secret 在 Go 层是明文;Create 加密、
 // Get/ListByTask 解密,密钥不出 CredentialStore。
+type CredentialVerificationEvent struct {
+	Status   string    `json:"status"`
+	At       time.Time `json:"at"`
+	Method   string    `json:"method"`
+	Evidence string    `json:"evidence"`
+	By       string    `json:"by"`
+}
+
 type CredentialRecord struct {
-	ID          int64     `json:"id"`
-	TaskID      int64     `json:"task_id"`
-	HostAssetID int64     `json:"host_asset_id,omitempty"`
-	Username    string    `json:"username"`
-	CredType    string    `json:"cred_type"`
-	Secret      string    `json:"secret"` // 明文;落库时加密
-	Domain      string    `json:"domain,omitempty"`
-	Source      string    `json:"source"`
-	Verified    bool      `json:"verified"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID                   int64                         `json:"id"`
+	TaskID               int64                         `json:"task_id"`
+	HostAssetID          int64                         `json:"host_asset_id,omitempty"`
+	Username             string                        `json:"username"`
+	CredType             string                        `json:"cred_type"`
+	Secret               string                        `json:"-"` // Never serialize a store record's decrypted secret.
+	Domain               string                        `json:"domain,omitempty"`
+	Source               string                        `json:"source"`
+	Target               string                        `json:"target"`
+	SourceURL            string                        `json:"source_url"`
+	SourceIntentID       int64                         `json:"source_intent_id"`
+	SourceExplorationID  int64                         `json:"source_exploration_id"`
+	Verified             bool                          `json:"verified"`
+	VerificationStatus   string                        `json:"verification_status"`
+	VerificationAt       *time.Time                    `json:"verification_at"`
+	VerificationMethod   string                        `json:"verification_method"`
+	VerificationEvidence string                        `json:"verification_evidence"`
+	VerificationBy       string                        `json:"verification_by"`
+	VerificationHistory  []CredentialVerificationEvent `json:"verification_history"`
+	CreatedAt            time.Time                     `json:"created_at"`
+	// Display-only fields are hydrated from the currently available task/asset.
+	TaskName      string `json:"task_name"`
+	TaskAvailable bool   `json:"task_available"`
+	TargetLabel   string `json:"target_label"`
+	TargetURL     string `json:"target_url"`
+}
+
+var (
+	ErrCredentialNotFound                   = errors.New("credential not found")
+	ErrCredentialUnavailable                = errors.New("credential task unavailable")
+	ErrCredentialMetadataInvalid            = errors.New("invalid credential metadata")
+	ErrCredentialVerificationInvalid        = errors.New("invalid credential verification")
+	ErrCredentialVerificationContainsSecret = errors.New("credential verification contains secret")
+)
+
+// NormalizeCredentialMetadata keeps authentication domains distinct from source
+// targets. URLs are navigation metadata, never replayable authenticated requests:
+// userinfo is rejected and query/fragment are discarded before persistence.
+func NormalizeCredentialMetadata(target, domain, sourceURL string) (string, string, string, error) {
+	target, domain, sourceURL = strings.TrimSpace(target), strings.TrimSpace(domain), strings.TrimSpace(sourceURL)
+	for _, value := range []string{target, domain, sourceURL} {
+		if !utf8.ValidString(value) || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+			return "", "", "", ErrCredentialMetadataInvalid
+		}
+	}
+	if len(target) > 2048 || len(domain) > 255 || len(sourceURL) > 8192 {
+		return "", "", "", ErrCredentialMetadataInvalid
+	}
+	if target != "" {
+		if strings.Contains(target, "://") {
+			var err error
+			target, err = safeCredentialURL(target)
+			if err != nil {
+				return "", "", "", err
+			}
+		} else {
+			u, err := url.Parse("//" + target)
+			if err != nil || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(target, " \\/?#") {
+				return "", "", "", ErrCredentialMetadataInvalid
+			}
+		}
+	}
+	if sourceURL != "" {
+		var err error
+		sourceURL, err = safeCredentialURL(sourceURL)
+		if err != nil {
+			return "", "", "", err
+		}
+	}
+	return target, domain, sourceURL, nil
+}
+
+func safeCredentialURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Opaque != "" || strings.ContainsAny(u.Host, " \\\t\r\n") {
+		return "", ErrCredentialMetadataInvalid
+	}
+	u.RawQuery, u.Fragment, u.RawFragment, u.ForceQuery = "", "", "", false
+	return u.String(), nil
+}
+
+func NormalizeCredentialVerification(status, method, evidence string) (string, string, string, error) {
+	status, method, evidence = strings.TrimSpace(status), strings.TrimSpace(method), strings.TrimSpace(evidence)
+	if status != "unverified" && status != "verified" && status != "failed" {
+		return "", "", "", ErrCredentialVerificationInvalid
+	}
+	if len(method) > 512 || len(evidence) > 8192 || !utf8.ValidString(method) || !utf8.ValidString(evidence) || strings.IndexFunc(method, unicode.IsControl) >= 0 || strings.ContainsRune(evidence, '\x00') {
+		return "", "", "", ErrCredentialVerificationInvalid
+	}
+	if status == "unverified" {
+		return status, "", "", nil
+	}
+	if method == "" || evidence == "" {
+		return "", "", "", ErrCredentialVerificationInvalid
+	}
+	return status, method, evidence, nil
 }
 
 // ValidCredType 校验凭据类型。
@@ -118,37 +218,74 @@ func (s *CredentialStore) decrypt(stored string) (string, error) {
 
 // Create 插入一条凭据并返回主键。Secret 加密存储。
 func (s *CredentialStore) Create(ctx context.Context, rec *CredentialRecord) (int64, error) {
-	if rec.TaskID <= 0 {
-		return 0, fmt.Errorf("task_id 必填")
+	if rec == nil || rec.TaskID <= 0 {
+		return 0, ErrCredentialMetadataInvalid
 	}
-	if !ValidCredType(rec.CredType) {
-		return 0, fmt.Errorf("非法 cred_type %q(password/hash_nt/hash_lm/hash_sha1/ticket/ssh_key/token)", rec.CredType)
+	if !ValidCredType(rec.CredType) || rec.Secret == "" {
+		return 0, ErrCredentialMetadataInvalid
 	}
-	if rec.Secret == "" {
-		return 0, fmt.Errorf("secret 必填")
+	target, domain, sourceURL, err := NormalizeCredentialMetadata(rec.Target, rec.Domain, rec.SourceURL)
+	if err != nil {
+		return 0, err
+	}
+	if rec.HostAssetID < 0 || rec.SourceIntentID < 0 || rec.SourceExplorationID < 0 {
+		return 0, ErrCredentialMetadataInvalid
+	}
+	if rec.HostAssetID > 0 {
+		var belongs bool
+		if err := s.d.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM assets WHERE id=$1 AND $2=ANY(task_ids))`, rec.HostAssetID, rec.TaskID).Scan(&belongs); err != nil {
+			return 0, err
+		}
+		if !belongs {
+			return 0, ErrCredentialMetadataInvalid
+		}
+	}
+	sourceExplorationID := rec.SourceExplorationID
+	if rec.SourceIntentID > 0 || sourceExplorationID > 0 {
+		// RunInfo permits unknown exploration IDs. Resolve that omission from
+		// the task row, not model input, while still rejecting explicit mismatches
+		// and intent IDs belonging to a different task's exploration.
+		err := s.d.QueryRowContext(ctx, `SELECT t.exploration_id FROM tasks t
+WHERE t.id=$1 AND t.deleted_at IS NULL AND ($2::bigint=0 OR t.exploration_id=$2)
+AND ($3::bigint=0 OR EXISTS(SELECT 1 FROM exploration_nodes n WHERE n.id=$3 AND n.exploration_id=t.exploration_id AND n.kind='intent'))`, rec.TaskID, sourceExplorationID, rec.SourceIntentID).Scan(&sourceExplorationID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrCredentialMetadataInvalid
+		}
+		if err != nil {
+			return 0, err
+		}
 	}
 	enc, err := s.encrypt(rec.Secret)
 	if err != nil {
 		return 0, err
 	}
+	status := "unverified"
+	if rec.Verified {
+		status = "verified"
+	}
 	var id int64
-	err = s.d.QueryRowContext(ctx, `
-INSERT INTO credentials(task_id, host_asset_id, username, cred_type, secret, domain, source, verified)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id`,
-		rec.TaskID, nilIfZero(rec.HostAssetID), rec.Username, rec.CredType, enc,
-		rec.Domain, rec.Source, rec.Verified).Scan(&id)
+	err = s.d.QueryRowContext(ctx, `INSERT INTO credentials(task_id, host_asset_id, username, cred_type, secret, domain, source, verified, target, source_url, source_intent_id, source_exploration_id, verification_status)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+		rec.TaskID, nilIfZero(rec.HostAssetID), rec.Username, rec.CredType, enc, domain, rec.Source, rec.Verified, target, sourceURL, rec.SourceIntentID, sourceExplorationID, status).Scan(&id)
 	return id, err
 }
 
-const credentialCols = `id, task_id, COALESCE(host_asset_id,0), username, cred_type, secret,
-	domain, source, verified, created_at`
+const credentialCols = `c.id, c.task_id, COALESCE(c.host_asset_id,0), c.username, c.cred_type, c.secret,
+ c.domain, c.source, c.verified, c.created_at, c.target, c.source_url, c.source_intent_id, c.source_exploration_id,
+ c.verification_status, c.verification_at, c.verification_method, c.verification_evidence, c.verification_by, c.verification_history,
+ COALESCE(t.name,''), (t.id IS NOT NULL AND t.deleted_at IS NULL AND t.archived_at IS NULL AND NOT EXISTS(SELECT 1 FROM task_archives ar WHERE ar.task_id=t.id AND ar.state IN ('archive_queued','archiving','restore_queued','restoring','delete_queued','deleting'))),
+ COALESCE(NULLIF(a.url,''),NULLIF(a.domain,''),a.ip,''), COALESCE(a.url,'')`
+const credentialFrom = ` FROM credentials c LEFT JOIN tasks t ON t.id=c.task_id
+ LEFT JOIN assets a ON a.id=c.host_asset_id AND c.task_id=ANY(a.task_ids)`
 
 func (s *CredentialStore) scan(row interface{ Scan(...any) error }) (*CredentialRecord, error) {
 	var r CredentialRecord
-	var enc string
+	var enc, assetLabel, assetURL string
+	var history []byte
 	if err := row.Scan(&r.ID, &r.TaskID, &r.HostAssetID, &r.Username, &r.CredType, &enc,
-		&r.Domain, &r.Source, &r.Verified, &r.CreatedAt); err != nil {
+		&r.Domain, &r.Source, &r.Verified, &r.CreatedAt, &r.Target, &r.SourceURL, &r.SourceIntentID, &r.SourceExplorationID,
+		&r.VerificationStatus, &r.VerificationAt, &r.VerificationMethod, &r.VerificationEvidence, &r.VerificationBy, &history,
+		&r.TaskName, &r.TaskAvailable, &assetLabel, &assetURL); err != nil {
 		return nil, err
 	}
 	plain, err := s.decrypt(enc)
@@ -156,62 +293,216 @@ func (s *CredentialStore) scan(row interface{ Scan(...any) error }) (*Credential
 		return nil, fmt.Errorf("credential %d: %w", r.ID, err)
 	}
 	r.Secret = plain
+	r.Verified = r.VerificationStatus == "verified"
+	r.VerificationHistory = []CredentialVerificationEvent{}
+	if err := json.Unmarshal(history, &r.VerificationHistory); err != nil {
+		return nil, errors.New("invalid credential verification history")
+	}
+	if r.VerificationHistory == nil {
+		r.VerificationHistory = []CredentialVerificationEvent{}
+	}
+	r.TargetLabel = r.Target
+	if r.TargetLabel == "" {
+		r.TargetLabel = assetLabel
+		if strings.Contains(assetLabel, "://") {
+			// An asset URL may contain authentication query parameters. Labels
+			// follow the same stripping rules as links, not the raw asset URL.
+			r.TargetLabel, _ = safeCredentialURL(assetLabel)
+		}
+	}
+	for _, candidate := range []string{r.Target, assetURL} {
+		if candidate == "" {
+			continue
+		}
+		if safe, err := safeCredentialURL(candidate); err == nil {
+			u, _ := url.Parse(safe)
+			// Do not attach a different asset/source host to an explicit target.
+			if r.Target != "" && !strings.Contains(r.Target, "://") && !strings.EqualFold(u.Host, r.Target) {
+				continue
+			}
+			r.TargetURL = safe
+			break
+		}
+	}
 	return &r, nil
 }
 
-// Get 取一条(含解密 secret);不存在返回 (nil, nil)。
 func (s *CredentialStore) Get(ctx context.Context, id int64) (*CredentialRecord, error) {
-	r, err := s.scan(s.d.QueryRowContext(ctx,
-		`SELECT `+credentialCols+` FROM credentials WHERE id=$1`, id))
-	if err == sql.ErrNoRows {
+	r, err := s.scan(s.d.QueryRowContext(ctx, `SELECT `+credentialCols+credentialFrom+` WHERE c.id=$1`, id))
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	return r, err
 }
 
-// ListByTask 取一个任务的全部凭据(按 id 升序,含解密 secret)。
+func (s *CredentialStore) list(ctx context.Context, taskID int64) ([]*CredentialRecord, error) {
+	query := `SELECT ` + credentialCols + credentialFrom
+	var args []any
+	if taskID > 0 {
+		query += ` WHERE c.task_id=$1`
+		args = append(args, taskID)
+	}
+	rows, err := s.d.QueryContext(ctx, query+` ORDER BY c.id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*CredentialRecord{}
+	for rows.Next() {
+		r, err := s.scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *CredentialStore) ListByTask(ctx context.Context, taskID int64) ([]*CredentialRecord, error) {
-	rows, err := s.d.QueryContext(ctx,
-		`SELECT `+credentialCols+` FROM credentials WHERE task_id=$1 ORDER BY id`, taskID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []*CredentialRecord{}
-	for rows.Next() {
-		r, err := s.scan(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+	return s.list(ctx, taskID)
 }
-
-// ListAll 取全部凭据(按 id 升序,含解密 secret)——内网作战页跨任务视图用。
-// 调用方负责脱敏(MaskSecret),secret 不明文出 server。
 func (s *CredentialStore) ListAll(ctx context.Context) ([]*CredentialRecord, error) {
-	rows, err := s.d.QueryContext(ctx,
-		`SELECT `+credentialCols+` FROM credentials ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []*CredentialRecord{}
-	for rows.Next() {
-		r, err := s.scan(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+	return s.list(ctx, 0)
 }
 
-// SetVerified 标记凭据是否已实测可登录(复用打分的 verified 加分依赖它)。
+// lockCredentialTask shares the archive queue's task-row lock order. The check
+// and mutation are in one transaction, in addition to the runtime drain fence.
+func (s *CredentialStore) lockCredentialTask(ctx context.Context, tx *sql.Tx, id int64) error {
+	var taskID int64
+	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM credentials WHERE id=$1`, id).Scan(&taskID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrCredentialNotFound
+		}
+		return err
+	}
+	var available bool
+	err := tx.QueryRowContext(ctx, `SELECT archived_at IS NULL FROM tasks WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, taskID).Scan(&available)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrCredentialUnavailable
+	}
+	if err != nil {
+		return err
+	}
+	if !available {
+		return ErrCredentialUnavailable
+	}
+	var blocked bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_archives WHERE task_id=$1 AND state IN ('archive_queued','archiving','restore_queued','restoring','delete_queued','deleting'))`, taskID).Scan(&blocked); err != nil {
+		return err
+	}
+	if blocked {
+		return ErrCredentialUnavailable
+	}
+	return nil
+}
+
+func (s *CredentialStore) UpdateMetadata(ctx context.Context, id int64, target, domain, sourceURL string) error {
+	return s.PatchMetadata(ctx, id, &target, &domain, &sourceURL)
+}
+
+// PatchMetadata merges under the row lock so disjoint concurrent PATCH requests
+// do not silently overwrite each other's changes with an earlier HTTP snapshot.
+func (s *CredentialStore) PatchMetadata(ctx context.Context, id int64, target, domain, sourceURL *string) error {
+	tx, err := s.d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := s.lockCredentialTask(ctx, tx, id); err != nil {
+		return err
+	}
+	var currentTarget, currentDomain, currentSourceURL string
+	if err := tx.QueryRowContext(ctx, `SELECT target,domain,source_url FROM credentials WHERE id=$1 FOR UPDATE`, id).Scan(&currentTarget, &currentDomain, &currentSourceURL); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrCredentialNotFound
+		}
+		return err
+	}
+	if target != nil {
+		currentTarget = *target
+	}
+	if domain != nil {
+		currentDomain = *domain
+	}
+	if sourceURL != nil {
+		currentSourceURL = *sourceURL
+	}
+	currentTarget, currentDomain, currentSourceURL, err = NormalizeCredentialMetadata(currentTarget, currentDomain, currentSourceURL)
+	if err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE credentials SET target=$2,domain=$3,source_url=$4 WHERE id=$1`, id, currentTarget, currentDomain, currentSourceURL)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrCredentialNotFound
+	}
+	return tx.Commit()
+}
+
+func (s *CredentialStore) SetVerification(ctx context.Context, id int64, status, method, evidence, by string) error {
+	status, method, evidence, err := NormalizeCredentialVerification(status, method, evidence)
+	if err != nil {
+		return err
+	}
+	if len(by) > 512 || !utf8.ValidString(by) || strings.IndexFunc(by, unicode.IsControl) >= 0 {
+		return ErrCredentialVerificationInvalid
+	}
+	tx, err := s.d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := s.lockCredentialTask(ctx, tx, id); err != nil {
+		return err
+	}
+	var encrypted string
+	if err := tx.QueryRowContext(ctx, `SELECT secret FROM credentials WHERE id=$1 FOR UPDATE`, id).Scan(&encrypted); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrCredentialNotFound
+		}
+		return err
+	}
+	plain, err := s.decrypt(encrypted)
+	if err != nil {
+		return err
+	}
+	if utf8.RuneCountInString(plain) >= 4 && (strings.Contains(method, plain) || strings.Contains(evidence, plain)) {
+		return ErrCredentialVerificationContainsSecret
+	}
+	if err := updateCredentialVerification(ctx, tx, id, status, method, evidence, by, false); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+type credentialExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func updateCredentialVerification(ctx context.Context, exec credentialExecer, id int64, status, method, evidence, by string, legacy bool) error {
+	res, err := exec.ExecContext(ctx, `UPDATE credentials SET verification_status=$2,verified=($2='verified'),
+ verification_at=CASE WHEN $2='unverified' OR $6 THEN NULL ELSE now() END,
+ verification_method=$3,verification_evidence=$4,verification_by=CASE WHEN $2='unverified' THEN '' ELSE $5 END,
+ verification_history=verification_history || jsonb_build_array(jsonb_build_object('status',$2::text,'at',now(),'method',$3::text,'evidence',$4::text,'by',$5::text)) WHERE id=$1`, id, status, method, evidence, by, legacy)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrCredentialNotFound
+	}
+	return nil
+}
+
+// SetVerified is retained for internal compatibility. It synchronizes both
+// representations atomically but makes no claim about method/evidence/time.
 func (s *CredentialStore) SetVerified(ctx context.Context, id int64, verified bool) error {
-	_, err := s.d.ExecContext(ctx, `UPDATE credentials SET verified=$2 WHERE id=$1`, id, verified)
-	return err
+	status := "unverified"
+	if verified {
+		status = "verified"
+	}
+	return updateCredentialVerification(ctx, s.d, id, status, "", "", "compatibility", true)
 }
 
 // Delete 删除一条。

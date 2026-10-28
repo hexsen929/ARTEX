@@ -84,6 +84,10 @@ func (s *Server) pgCreateConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.AgentKey = strings.TrimSpace(req.AgentKey)
+	if req.AgentKey == "worker.intranet" {
+		writeErr(w, 400, "worker.intranet 是 worker 的提示词与 Skill 变体，请通过原任务的 worker 使用，不单独创建会话")
+		return
+	}
 	if req.AgentKey == "" {
 		writeErr(w, 400, "agent_key 不能为空")
 		return
@@ -99,6 +103,10 @@ func (s *Server) pgCreateConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	if a == nil {
 		writeErr(w, 404, "agent 不存在")
+		return
+	}
+	if !a.Enabled {
+		writeErr(w, 409, "Agent 已停用，历史对话仍可查看")
 		return
 	}
 	if req.LLMProfileID != nil {
@@ -390,6 +398,10 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	if reason := conversationAgentBlockReason(pg, c.AgentKey); reason != "" {
+		writeErr(w, 409, reason)
+		return
+	}
 	var req struct {
 		Message     string           `json:"message"`
 		Attachments []chatAttachment `json:"attachments,omitempty"` // 方式1 上传的文件(路径相对会话工作目录)
@@ -622,6 +634,11 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 		return
 	}
 	// precedence: the conversation agent's own binding → this conversation's pin → global.
+	if reason := conversationAgentBlockReason(s.m.pg, c.AgentKey); reason != "" {
+		finishReason = reason
+		_, _ = s.m.pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true, Summary: reason, Detail: reason})
+		return
+	}
 	ca := s.resolveChatAgent(c)
 	if ca == nil {
 		finishReason = s.chatUnavailableReason()
@@ -749,7 +766,15 @@ func (s *Server) readTriggerBehavior(agentKey string) triggerBehavior {
 // merging by task / all / none); parallel → run each fire in its own concurrent
 // conversation up to trigger_max_parallel. Distinct agents always run concurrently.
 func (s *Server) StartTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string) {
+	if agentKey == "worker.intranet" || agentKey == db.CredentialAgentKey {
+		log.Printf("[trigger] 专用角色不走通用触发会话，未启动独立运行")
+		return
+	}
 	if s.m.pg == nil || s.chatAgentRef() == nil {
+		return
+	}
+	if conversationAgentBlockReason(s.m.pg, agentKey) != "" {
+		log.Printf("[trigger] Agent 不可运行，未加入触发队列")
 		return
 	}
 	cfg := s.readTriggerBehavior(agentKey) // DB read BEFORE the lock (never under queueMu)

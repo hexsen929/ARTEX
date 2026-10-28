@@ -31,6 +31,33 @@ func findingVerifyAutoEnabled(mode string) bool {
 	return mode != "off"
 }
 
+// Automatic work requires both switches: the global mode and the editable
+// verifier's on_finding trigger. Merged evidence uses the same admission rule as
+// a newly discovered finding. A missing/deleted trigger is deliberately not
+// repaired here; doing so could re-enable work the operator explicitly stopped.
+func (s *Server) automaticFindingVerificationEnabled() (bool, error) {
+	if s.m == nil || s.m.pg == nil {
+		return false, errors.New("db 未初始化")
+	}
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var mode string
+	var agentEnabled, triggerEnabled bool
+	err := s.m.pg.QueryRowContext(ctx, `SELECT
+COALESCE((SELECT value FROM settings WHERE key=$1),''),
+EXISTS(SELECT 1 FROM agents WHERE key=$2 AND enabled),
+EXISTS(SELECT 1 FROM agent_triggers WHERE agent_key=$2 AND enabled AND on_finding)`,
+		settingFindingVerifyMode, db.FindingVerifierAgentKey).Scan(&mode, &agentEnabled, &triggerEnabled)
+	if err != nil {
+		return false, err
+	}
+	return findingVerifyAutoEnabled(mode) && agentEnabled && triggerEnabled, nil
+}
+
 func (s *Server) listFindingChecks(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {
@@ -130,6 +157,10 @@ func (s *Server) requestAutomaticFindingCheck(findingID int64, kind string) (*db
 	if s.m == nil || s.m.pg == nil {
 		return nil, false, errors.New("db 未初始化")
 	}
+	enabled, err := s.automaticFindingVerificationEnabled()
+	if err != nil || !enabled {
+		return nil, false, err
+	}
 	finding, err := s.m.pg.GetFinding(findingID)
 	if err != nil {
 		return nil, false, err
@@ -200,18 +231,10 @@ func (s *Server) requestFindingCheck(findingID int64, kind string) (*db.FindingC
 }
 
 // onFindingMerged 是档 A 合并后的 C2 增量重验钩子:新证据搭了既有"已验证"
-// 状态的便车,必须对聚合 finding 重新验证。与 dispatchFindingVerify 同样遵守
-// finding_verify_mode 开关;RequestFindingCheck 内部已有活跃 check 去重,重复
+// 状态的便车,须对聚合 finding 重新验证。与 dispatchFindingVerify 同样遵守
+// finding_verify_mode、Agent 与 on_finding 触发器开关;活跃 check 去重使重复
 // 触发安全。回调在 Record 事务提交后执行,失败仅记日志,不影响上报主流程。
 func (s *Server) onFindingMerged(findingID int64) {
-	mode, _, err := s.m.pg.GetSetting(settingFindingVerifyMode)
-	if err != nil {
-		log.Printf("[verifier] 读取 %s 失败: %v", settingFindingVerifyMode, err)
-		return
-	}
-	if !findingVerifyAutoEnabled(mode) {
-		return
-	}
 	if _, _, err := s.requestAutomaticFindingCheck(findingID, db.FindingCheckKindVerify); err != nil {
 		log.Printf("[verifier] 合并增量重验 finding %d 派发失败: %v", findingID, err)
 	}
@@ -219,16 +242,9 @@ func (s *Server) onFindingMerged(findingID int64) {
 
 // dispatchFindingVerify 是 scheduler 的 on_finding 自动派发钩子:事件只带
 // node_id,经 FindingIDByNodeID 反查 finding(节点与 finding 同事务写入,此刻
-// 已可见)。finding_verify_mode=off 时跳过——不回放,漏掉的由手动入口补。
+// 已可见)。自动准入统一检查 mode、Agent、触发器及父任务状态。调度器仍会
+// 消费跳过事件的水位，不回放历史；需要复核的记录从明确的手动入口发起。
 func (s *Server) dispatchFindingVerify(e db.TaskEvent) {
-	mode, _, err := s.m.pg.GetSetting(settingFindingVerifyMode)
-	if err != nil {
-		log.Printf("[verifier] 读取 %s 失败: %v", settingFindingVerifyMode, err)
-		return
-	}
-	if !findingVerifyAutoEnabled(mode) {
-		return
-	}
 	findingID, err := s.m.pg.FindingIDByNodeID(e.NodeID)
 	if err != nil {
 		log.Printf("[verifier] node %d 反查 finding 失败: %v", e.NodeID, err)
@@ -405,18 +421,28 @@ func (s *Server) seedFindingVerifier() error {
 			return err
 		}
 	}
-	const flag = "finding_verifier_seed_v1"
 	tx, err := s.m.pg.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err = seedFindingVerifierRows(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// All first-install defaults share one transaction. In particular a failed
+// trigger insert must not leave a committed seed flag or half-created Agent.
+// Existing Agent/trigger rows and a completed migration remain user-owned.
+func seedFindingVerifierRows(tx *sql.Tx) error {
+	const flag = "finding_verifier_seed_v1"
 	// Lock this migration, including concurrent server initialization.
-	if _, err = tx.Exec(`SELECT pg_advisory_xact_lock(7337741011)`); err != nil {
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(7337741011)`); err != nil {
 		return err
 	}
 	var done string
-	err = tx.QueryRow(`SELECT value FROM settings WHERE key=$1`, flag).Scan(&done)
+	err := tx.QueryRow(`SELECT value FROM settings WHERE key=$1`, flag).Scan(&done)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -439,25 +465,15 @@ func (s *Server) seedFindingVerifier() error {
 		if _, err = tx.Exec(`UPDATE agents SET current_prompt_id=$1 WHERE id=$2`, pid, id); err != nil {
 			return err
 		}
+		// Only a newly created built-in default receives an automatic trigger.
+		// Never recreate one for a pre-existing Agent: absence may be deliberate.
+		if _, err = tx.Exec(`INSERT INTO agent_triggers(agent_key,enabled,on_finding)
+		VALUES ($1,true,true)`, db.FindingVerifierAgentKey); err != nil {
+			return err
+		}
 	}
 	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES ($1,'true') ON CONFLICT(key) DO UPDATE SET value='true'`, flag); err != nil {
 		return err
-	}
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	if id > 0 {
-		// on_finding 触发器:调度器据此把新 finding 派进 finding_checks 管线
-		// (verifier 在 fireFindings 里特判,不走通用触发队列;FindingMessage 留空,
-		// 会话首条消息由 CreateFindingCheck 生成)。用户可在触发器 UI 停用它,
-		// 与 finding_verify_mode=off 等效。
-		if _, err := s.m.pg.CreateTrigger(&db.AgentTrigger{
-			AgentKey:  db.FindingVerifierAgentKey,
-			Enabled:   true,
-			OnFinding: true,
-		}); err != nil {
-			log.Printf("[verifier] 创建 on_finding 触发器失败: %v", err)
-		}
 	}
 	return nil
 }
