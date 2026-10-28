@@ -216,3 +216,51 @@ func TestCredentialManagementHistoryAndTaskIsolation(t *testing.T) {
 		t.Fatal("metadata crossed archive barrier", err)
 	}
 }
+
+// An exploration omitted by partial RunInfo is resolved from the trusted task
+// row; the intent must still be one of that task's actual intent nodes.
+func TestCredentialCreateResolvesPartialSourceContext(t *testing.T) {
+	d := portTestDB(t)
+	task, err := d.CreateTask("partial credential source fixture", "fixture", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM credentials WHERE task_id=$1`, task.ID); _ = d.DeleteTask(task.ID) })
+	other, err := d.CreateTask("other credential source fixture", "fixture", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(other.ID) })
+	intent, err := d.Exploration(task.ExplorationID).AddIntent(map[string]any{"task": "fixture"}, 1, nil, "human")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherIntent, err := d.Exploration(other.ExplorationID).AddIntent(map[string]any{"task": "fixture"}, 1, nil, "human")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewCredentialStore(d, []byte("partial-source-fixture-key"))
+	id, err := store.Create(t.Context(), &CredentialRecord{TaskID: task.ID, CredType: CredToken, Secret: "fixture-source-secret", Source: "fixture", SourceIntentID: intent})
+	if err != nil {
+		t.Fatal("partial source context was rejected", err)
+	}
+	rec, err := store.Get(t.Context(), id)
+	if err != nil || rec == nil || rec.SourceIntentID != intent || rec.SourceExplorationID != task.ExplorationID {
+		t.Fatal("resolved source context was not persisted")
+	}
+	for _, source := range []struct{ intent, exploration int64 }{
+		{otherIntent, 0},
+		{intent, other.ExplorationID},
+		{otherIntent, task.ExplorationID},
+		{0, other.ExplorationID},
+	} {
+		_, err := store.Create(t.Context(), &CredentialRecord{TaskID: task.ID, CredType: CredToken, Secret: "fixture-rejected-source-secret", Source: "fixture", SourceIntentID: source.intent, SourceExplorationID: source.exploration})
+		if !errors.Is(err, ErrCredentialMetadataInvalid) {
+			t.Fatal("cross-task source context was accepted", err)
+		}
+	}
+	rows, err := store.ListByTask(t.Context(), task.ID)
+	if err != nil || len(rows) != 1 {
+		t.Fatal("rejected source context unexpectedly inserted a credential")
+	}
+}

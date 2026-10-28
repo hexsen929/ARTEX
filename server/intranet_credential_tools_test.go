@@ -89,6 +89,32 @@ func TestCredentialToolStrictInputDoesNotEchoSecret(t *testing.T) {
 	credentialToolCall(t, ctx, s.recordCredentialVerificationTool(), map[string]any{"credential_id": 1, "status": "failed", "method": "fixture", "evidence": "fixture", "by": "forged"}, true)
 }
 
+func TestCredentialListToolAcceptsOmittedReadArgumentsOnly(t *testing.T) {
+	s := &Server{}
+	for _, input := range []json.RawMessage{nil, json.RawMessage(""), json.RawMessage(" \t\r\n"), json.RawMessage(`{}`)} {
+		result, err := s.listCredentialsTool().Call(context.Background(), input, nil)
+		// No task context intentionally stops the call before database access;
+		// reaching that check proves omitted arguments normalize to an object.
+		if err != nil || !result.IsError || !strings.Contains(result.Flatten(), "需要任务上下文") {
+			t.Fatal("zero-parameter list call rejected omitted arguments before context validation")
+		}
+	}
+	for _, input := range []json.RawMessage{json.RawMessage(`null`), json.RawMessage(`[]`), json.RawMessage(`{"unknown":true}`)} {
+		result, err := s.listCredentialsTool().Call(context.Background(), input, nil)
+		if err != nil || !result.IsError || !strings.Contains(result.Flatten(), "只接受空 JSON 对象") {
+			t.Fatal("list call accepted non-object or unknown arguments")
+		}
+	}
+	for _, tool := range []actool.CoreTool{s.addCredentialTool(), s.recordCredentialVerificationTool()} {
+		for _, input := range []json.RawMessage{nil, json.RawMessage(""), json.RawMessage(" \t\r\n")} {
+			result, err := tool.Call(context.Background(), input, nil)
+			if err != nil || !result.IsError || strings.Contains(result.Flatten(), "需要任务上下文") {
+				t.Fatal("credential writer accepted omitted arguments")
+			}
+		}
+	}
+}
+
 func TestCredentialToolsPreserveTaskProvenanceAndVerificationHistory(t *testing.T) {
 	pg := openIntranetTestDB(t)
 	store := db.NewCredentialStore(pg, []byte("fixture-credential-tools-key"))

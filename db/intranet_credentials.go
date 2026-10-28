@@ -240,13 +240,19 @@ func (s *CredentialStore) Create(ctx context.Context, rec *CredentialRecord) (in
 			return 0, ErrCredentialMetadataInvalid
 		}
 	}
-	if rec.SourceIntentID > 0 || rec.SourceExplorationID > 0 {
-		var valid bool
-		if err := s.d.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks t WHERE t.id=$1 AND t.deleted_at IS NULL AND t.exploration_id=$2 AND ($3=0 OR EXISTS(SELECT 1 FROM exploration_nodes n WHERE n.id=$3 AND n.exploration_id=t.exploration_id)))`, rec.TaskID, rec.SourceExplorationID, rec.SourceIntentID).Scan(&valid); err != nil {
-			return 0, err
-		}
-		if !valid {
+	sourceExplorationID := rec.SourceExplorationID
+	if rec.SourceIntentID > 0 || sourceExplorationID > 0 {
+		// RunInfo permits unknown exploration IDs. Resolve that omission from
+		// the task row, not model input, while still rejecting explicit mismatches
+		// and intent IDs belonging to a different task's exploration.
+		err := s.d.QueryRowContext(ctx, `SELECT t.exploration_id FROM tasks t
+WHERE t.id=$1 AND t.deleted_at IS NULL AND ($2::bigint=0 OR t.exploration_id=$2)
+AND ($3::bigint=0 OR EXISTS(SELECT 1 FROM exploration_nodes n WHERE n.id=$3 AND n.exploration_id=t.exploration_id AND n.kind='intent'))`, rec.TaskID, sourceExplorationID, rec.SourceIntentID).Scan(&sourceExplorationID)
+		if errors.Is(err, sql.ErrNoRows) {
 			return 0, ErrCredentialMetadataInvalid
+		}
+		if err != nil {
+			return 0, err
 		}
 	}
 	enc, err := s.encrypt(rec.Secret)
@@ -260,7 +266,7 @@ func (s *CredentialStore) Create(ctx context.Context, rec *CredentialRecord) (in
 	var id int64
 	err = s.d.QueryRowContext(ctx, `INSERT INTO credentials(task_id, host_asset_id, username, cred_type, secret, domain, source, verified, target, source_url, source_intent_id, source_exploration_id, verification_status)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
-		rec.TaskID, nilIfZero(rec.HostAssetID), rec.Username, rec.CredType, enc, domain, rec.Source, rec.Verified, target, sourceURL, rec.SourceIntentID, rec.SourceExplorationID, status).Scan(&id)
+		rec.TaskID, nilIfZero(rec.HostAssetID), rec.Username, rec.CredType, enc, domain, rec.Source, rec.Verified, target, sourceURL, rec.SourceIntentID, sourceExplorationID, status).Scan(&id)
 	return id, err
 }
 

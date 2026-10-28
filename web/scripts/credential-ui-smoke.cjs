@@ -225,6 +225,16 @@ async function main() {
   const secretAbsent = async () => !(await page.locator("body").innerText()).includes(FIXTURE_SECRET);
   const revealRequests = () => requests.filter((item) => item.path.endsWith("/reveal"));
   const expectRows = (count) => eventually(async () => (await page.locator("tbody tr").count()) === count, `Expected ${count} credential rows`);
+  const expectTaskLink = async (link, taskId) => {
+    const href = await link.getAttribute("href");
+    assert.ok(href, "Task navigation link is missing");
+    const destination = new URL(href, origin);
+    assert.equal(destination.origin, origin, "Task navigation must remain within this application");
+    // Next static export normalizes internal Links to a trailing slash.
+    assert.equal(destination.pathname.replace(/\/+$/, ""), "/function/tasks/detail");
+    assert.deepEqual([...destination.searchParams.entries()], [["id", String(taskId)]]);
+    assert.equal(destination.hash, "");
+  };
   const openPrimary = async () => {
     await page.getByTestId("credential-details-23").click();
     const dialog = page.getByRole("dialog");
@@ -249,7 +259,7 @@ async function main() {
       assert.ok(await secretAbsent(), "Full fixture secret appeared before explicit reveal");
       assert.equal(revealRequests().length, 0, "List requested full secrets automatically");
       const row = page.getByRole("row").filter({ hasText: PRIMARY_USERNAME });
-      assert.equal(await row.getByRole("link", { name: `#101 · ${TASK_A}`, exact: true }).getAttribute("href"), "/function/tasks/detail?id=101");
+      await expectTaskLink(row.getByRole("link", { name: `#101 · ${TASK_A}`, exact: true }), 101);
       assert.ok((await row.innerText()).includes("target.example.invalid"));
       assert.ok((await row.innerText()).includes("CORP"));
       const external = row.getByRole("link", { name: "打开目标", exact: true });
@@ -287,7 +297,7 @@ async function main() {
       const dialog = await openPrimary();
       await dialog.getByText(PRIMARY_SOURCE, { exact: true }).waitFor();
       assert.equal(await dialog.getByRole("link", { name: "打开来源（不含查询参数）", exact: true }).getAttribute("href"), "https://source.example.invalid/evidence");
-      assert.equal(await dialog.getByRole("link", { name: "回到所属任务", exact: true }).getAttribute("href"), "/function/tasks/detail?id=101");
+      await expectTaskLink(dialog.getByRole("link", { name: "回到所属任务", exact: true }), 101);
       assert.ok((await dialog.innerText()).includes("意图 #723"));
       assert.ok(await secretAbsent());
       await closeDialog();

@@ -133,6 +133,11 @@ func (s *Server) listCredentialsTool() actool.CoreTool {
 		ReadOnly:    func(json.RawMessage) bool { return true },
 		Permissions: sessionPerm,
 		Run: func(ctx context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+			// Older callers omit arguments for this zero-parameter read tool.
+			// Keep that compatibility local; credential writers remain strict.
+			if len(bytes.TrimSpace(in)) == 0 {
+				in = json.RawMessage(`{}`)
+			}
 			if !decodeCredentialToolInput(in, &struct{}{}) {
 				return actool.Errorf("list_credentials 只接受空 JSON 对象"), nil
 			}
