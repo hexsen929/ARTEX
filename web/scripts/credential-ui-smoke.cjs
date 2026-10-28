@@ -436,12 +436,20 @@ async function main() {
       assert.equal(unexpectedAPI.size, 0, `Unmocked API calls: ${[...unexpectedAPI].join(", ")}`);
     });
 
+    // Allow the intentionally exercised failure toasts to expire before visual QA.
+    await new Promise((resolve) => setTimeout(resolve, 5000));
     await page.screenshot({ path: path.join(artifacts, "credential-list-desktop.png"), fullPage: true });
     const dialog = await openPrimary();
     assert.ok(await secretAbsent());
     await dialog.screenshot({ path: path.join(artifacts, "credential-details-masked.png") });
     await closeDialog();
     await page.setViewportSize({ width: 390, height: 844 });
+    await check("compact mobile header remains horizontal without page overflow", async () => {
+      const heading = await page.getByRole("heading", { name: "内网作战", exact: true }).boundingBox();
+      assert.ok(heading && heading.height <= 40 && heading.width >= 70, "Mobile title was squeezed into vertical text");
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), "Mobile page overflowed horizontally outside the table scroller");
+      assert.ok(await page.getByRole("button", { name: "刷新", exact: true }).isVisible());
+    });
     await page.screenshot({ path: path.join(artifacts, "credential-list-mobile.png"), fullPage: true });
     fs.writeFileSync(path.join(artifacts, "result.json"), JSON.stringify({ passed: completed, requests: requests.map(({ method, path: endpoint, task }) => ({ method, path: endpoint, task })), outboundRequests: [...blockedExternal] }, null, 2));
     console.log(`Credential UI smoke passed: ${completed.length} scenarios; artifacts contain synthetic fixtures only.`);

@@ -233,10 +233,10 @@ export default function IntranetPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
       {/* Header */}
-      <div className="flex items-center justify-between gap-4">
-        <div className="flex items-center gap-2">
-          <NetworkIcon className="h-5 w-5 text-muted-foreground" />
-          <h1 className="text-xl font-semibold tracking-tight">内网作战</h1>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <NetworkIcon className="h-5 w-5 shrink-0 text-muted-foreground" />
+          <h1 className="text-xl font-semibold tracking-tight whitespace-nowrap">内网作战</h1>
           <Badge variant="secondary" className="tabular-nums">
             会话 {aliveSessions}/{sessions.length}
           </Badge>
@@ -247,10 +247,10 @@ export default function IntranetPage() {
             凭据 {loadErrors.credentials && credentials.length === 0 ? "—" : credentials.length}
           </Badge>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 self-stretch sm:self-auto">
           {/* 任务过滤:照 findings 页下拉范式;选中值同时作用于拓扑与三台账(含 10s 轮询)。 */}
           <Select value={taskId} onValueChange={setTaskId}>
-            <SelectTrigger size="sm" className="w-48">
+            <SelectTrigger size="sm" className="min-w-0 flex-1 sm:w-48 sm:flex-none">
               <SelectValue placeholder="任务" />
             </SelectTrigger>
             <SelectContent>
@@ -268,7 +268,7 @@ export default function IntranetPage() {
               })}
             </SelectContent>
           </Select>
-          <Button variant="outline" size="sm" className="h-8 gap-1" onClick={refreshAll}>
+          <Button variant="outline" size="sm" className="h-8 shrink-0 gap-1" onClick={refreshAll}>
             <RefreshCwIcon className={cn("size-3.5", loadingTopology && "animate-spin")} />
             刷新
           </Button>
@@ -299,12 +299,12 @@ export default function IntranetPage() {
       <Card className="gap-0 py-0">
         <button
           type="button"
-          className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+          className="flex w-full flex-wrap items-center justify-between gap-2 px-4 py-3 text-left sm:flex-nowrap sm:gap-3"
           aria-expanded={showTopology}
           aria-controls="intranet-topology-content"
           onClick={() => setTopologyExpanded(!showTopology)}
         >
-          <span className="flex items-center gap-2 text-sm font-medium">
+          <span className="flex shrink-0 items-center gap-2 text-sm font-medium whitespace-nowrap">
             {showTopology ? <ChevronDownIcon className="size-4" /> : <ChevronRightIcon className="size-4" />}
             资产与会话拓扑
           </span>
