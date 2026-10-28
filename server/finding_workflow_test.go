@@ -37,9 +37,38 @@ func workflowTool(t *testing.T, tools []actool.CoreTool, name string) actool.Cor
 	return nil
 }
 
+func isolateFindingWorkflowKnowledgeFixture(t *testing.T, pg *db.DB, key string) {
+	t.Helper()
+	a, err := pg.GetAgentByKey(key)
+	if err != nil || a == nil {
+		t.Fatal("workflow fixture role unavailable", err)
+	}
+	skills, err := pg.AgentSkillNames(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcp, err := pg.AgentVisible(a.ID, "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// These tests exercise traffic/domain workflow tools and use an empty
+	// temporary Skill root. Do not borrow seeded knowledge or external MCPs.
+	if err := pg.SetAgentSkillVisibility(a.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.SetAgentVisibilityKind(a.ID, "mcp", nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = pg.SetAgentSkillVisibility(a.ID, skills)
+		_ = pg.SetAgentVisibilityKind(a.ID, "mcp", mcp)
+	})
+}
+
 func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 	s, initial, request := trafficEvidenceServer(t)
 	pg := s.m.pg
+	isolateFindingWorkflowKnowledgeFixture(t, pg, "planner")
 	ctx := context.Background()
 	if _, err := pg.Exec(`DELETE FROM settings WHERE key=$1`, settingAgentTrafficBinding); err != nil {
 		t.Fatal(err)
@@ -92,7 +121,12 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 	notices := 0
 	ts.SetNotifyFinding(func(int64, string) { notices++ })
 	tools, def, cleanup := agent.AugmentTools(ctx, "planner", ts.PlannerTools())
-	defer cleanup()
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if def.AssemblyError != nil {
+		t.Fatal("planner workflow fixture failed tool assembly", def.AssemblyError)
+	}
 	if !strings.Contains(def.FindingGuidance, "evidence_hint_id") || !strings.Contains(def.FindingGuidance, "取消 Worker") {
 		t.Fatal("Planner missed runtime guidance")
 	}
@@ -184,7 +218,12 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 	}
 	workflowCall(t, ctx, s.toolGetFindingTraffic(), map[string]any{"finding_id": recorded.FindingID}, false)
 	tools, def, closeTools := agent.AugmentTools(ctx, "planner", ts.PlannerTools())
-	defer closeTools()
+	if closeTools != nil {
+		defer closeTools()
+	}
+	if def.AssemblyError != nil {
+		t.Fatal("disabled planner workflow fixture failed tool assembly", def.AssemblyError)
+	}
 	if strings.Contains(def.FindingGuidance, "**报告前自动关联流量") {
 		t.Fatal("disabled feature still injects auto-binding guidance")
 	}
@@ -265,6 +304,7 @@ func TestFindingWorkflowMigrationPreservesUserConfiguration(t *testing.T) {
 func TestFindingWorkflowReporterBindsBeforeWritingReport(t *testing.T) {
 	s, f, request := trafficEvidenceServer(t)
 	pg := s.m.pg
+	isolateFindingWorkflowKnowledgeFixture(t, pg, "reporter")
 	ctx := context.Background()
 	if err := pg.SetBool(settingAgentTrafficBinding, true); err != nil {
 		t.Fatal(err)
@@ -276,7 +316,12 @@ func TestFindingWorkflowReporterBindsBeforeWritingReport(t *testing.T) {
 	seedServerEvidenceFlow(t, s, "reporter-proof", []byte("local proof payload"))
 	seedServerEvidenceFlow(t, s, "reporter-baseline", []byte("local normal response"))
 	tools, def, cleanup := agent.AugmentTools(ctx, "reporter", nil)
-	defer cleanup()
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if def.AssemblyError != nil {
+		t.Fatal("reporter workflow fixture failed tool assembly", def.AssemblyError)
+	}
 	if !strings.Contains(def.FindingGuidance, "报告前自动关联流量") || !strings.Contains(def.FindingGuidance, "绑定成功后重新调用") {
 		t.Fatal("reporter did not receive binding workflow")
 	}
@@ -314,7 +359,12 @@ func TestFindingWorkflowReporterBindsBeforeWritingReport(t *testing.T) {
 		t.Fatal(r.Code, r.Body)
 	}
 	off, offDef, closeOff := agent.AugmentTools(ctx, "reporter", nil)
-	defer closeOff()
+	if closeOff != nil {
+		defer closeOff()
+	}
+	if offDef.AssemblyError != nil {
+		t.Fatal("disabled reporter workflow fixture failed tool assembly", offDef.AssemblyError)
+	}
 	if strings.Contains(offDef.FindingGuidance, "**报告前自动关联流量") {
 		t.Fatal("off reporter still receives auto-binding guidance")
 	}

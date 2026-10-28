@@ -121,7 +121,36 @@ func TestChatMentionWorkerReceivesServerDetails(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
+	// This worker fixture verifies server-side mention expansion, not Skill or
+	// MCP execution. Use this manager's metadata explicitly instead of a global
+	// hook left by an earlier fixture, and restore only this role's grants.
+	role, err := m.pg.GetAgentByKey("worker")
+	if err != nil || role == nil {
+		t.Fatal("worker fixture role unavailable", err)
+	}
+	oldSkills, err := m.pg.AgentSkillNames(role.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldMCP, err := m.pg.AgentVisible(role.ID, "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.pg.SetAgentSkillVisibility(role.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.pg.SetAgentVisibilityKind(role.ID, "mcp", nil); err != nil {
+		t.Fatal(err)
+	}
+	oldAugment, oldResolve := agent.ToolAugment, agent.ToolResolve
+	wireAgentAugment(m.pg, t.TempDir(), nil)
+	agent.ToolResolve = nil // catalog filtering is covered by dedicated assembly fixtures
+	t.Cleanup(func() {
+		agent.ToolAugment, agent.ToolResolve = oldAugment, oldResolve
+		_ = m.pg.SetAgentSkillVisibility(role.ID, oldSkills)
+		_ = m.pg.SetAgentVisibilityKind(role.ID, "mcp", oldMCP)
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{ctx: ctx, m: m, engine: NewEngine(m)}
 	task, err := m.CreateTask("Worker mention test", "Read referenced records", nil, 0, 0)
@@ -181,7 +210,11 @@ func TestChatMentionWorkerReceivesServerDetails(t *testing.T) {
 			t.Fatalf("worker missing reference details: %s", blob)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("worker did not receive a model request")
+		node, _ := task.Store.GetNode(iid)
+		if node != nil {
+			t.Fatalf("worker did not receive a model request: state=%s blocked_reason=%s", node.State, node.BlockedReason)
+		}
+		t.Fatal("worker did not receive a model request; fixture intent disappeared")
 	}
 	drain, stop := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stop()

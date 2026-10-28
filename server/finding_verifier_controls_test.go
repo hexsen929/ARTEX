@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 )
 
@@ -248,7 +249,14 @@ func TestManualFindingVerificationRemainsExplicitWithAutomaticControlsOff(t *tes
 		t.Fatal("explicit manual verification was blocked by automatic controls", err)
 	}
 	f.waitProvider(t)
-	f.pauseCommitted(t)
+	// The task's pause was already committed before this explicit manual run.
+	// Seal this check without submitting a second (invalid) pause transition.
+	f.s.concMu.Lock()
+	err = f.s.cancelTaskFindingChecks(f.task.ID, agent.AbortChatPausedWithTask)
+	f.s.concMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 	waitRetestIdle(t, f.s)
 }
 
