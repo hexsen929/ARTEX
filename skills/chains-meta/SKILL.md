@@ -19,21 +19,21 @@ description: 元决策反问决策链原文索引(卡住自检/观测真伪/正�
 
 ## 铁律
 
-- 连续 15~25 次尝试响应完全同质(无新状态码/长度/时序差异)= 信息梯度为零,立即换维度,别凭"感觉快成了"续命(refs/meta-orthogonal.md)
-- 换的是维度(轴),不是同一轴上的参数值;转向前留"挂起标记"(卡在哪、试过哪些、何时回来)(refs/meta-orthogonal.md)
-- 正常/异常请求被抹平成同一页面 = 统一拦截层接住,请求根本没到应用层(refs/meta-stuck-detect.md)
-- 回显阴性从不等于漏洞阴性:200 + 无回显先做阴性/阳性对照,排除 WAF 伪造响应再下结论(refs/meta-trust-obs.md)
-- 命门在手先收口:能直接转 shell/flag 的原语握紧时,发散 = 自杀,确认打死才准发散(refs/meta-close-the-kill.md)
+- 连续 15~25 次尝试响应完全同质(无新状态码/长度/时序差异)= 信息梯度为零,立即换维度,别凭"感觉快成了"续命(${SKILL_DIR}/refs/meta-orthogonal.md)
+- 换的是维度(轴),不是同一轴上的参数值;转向前留"挂起标记"(卡在哪、试过哪些、何时回来)(${SKILL_DIR}/refs/meta-orthogonal.md)
+- 正常/异常请求被抹平成同一页面 = 统一拦截层接住,请求根本没到应用层(${SKILL_DIR}/refs/meta-stuck-detect.md)
+- 回显阴性从不等于漏洞阴性:200 + 无回显先做阴性/阳性对照,排除 WAF 伪造响应再下结论(${SKILL_DIR}/refs/meta-trust-obs.md)
+- 命门在手先收口:能直接转 shell/flag 的原语握紧时,发散 = 自杀,确认打死才准发散(${SKILL_DIR}/refs/meta-close-the-kill.md)
 
 ## refs/ 原文清单
 
-- `refs/meta-close-the-kill.md` — 到了命门先收口:别在能拿 shell 的位置掉头发散(含平台耦合内容:s2 节"黑板 remember/recall"已在 JSON 标记 platform_specific)
-- `refs/meta-give-up.md` — 何时放弃一条路、何时回头(覆盖矩阵判榨干)
-- `refs/meta-orthogonal.md` — 换维度:正交路径的枚举
-- `refs/meta-priority.md` — 性价比排序:先打哪后打哪
-- `refs/meta-stuck-detect.md` — 卡住自检:被墙的信号识别
-- `refs/meta-trust-obs.md` — 把观测当真还是当假:工具/环境是否在骗我
+- `${SKILL_DIR}/refs/meta-close-the-kill.md` — 到了命门先收口:别在能拿 shell 的位置掉头发散(含平台耦合内容:s2 节"黑板 remember/recall"已在 JSON 标记 platform_specific)
+- `${SKILL_DIR}/refs/meta-give-up.md` — 何时放弃一条路、何时回头(覆盖矩阵判榨干)
+- `${SKILL_DIR}/refs/meta-orthogonal.md` — 换维度:正交路径的枚举
+- `${SKILL_DIR}/refs/meta-priority.md` — 性价比排序:先打哪后打哪
+- `${SKILL_DIR}/refs/meta-stuck-detect.md` — 卡住自检:被墙的信号识别
+- `${SKILL_DIR}/refs/meta-trust-obs.md` — 把观测当真还是当假:工具/环境是否在骗我
 
 ## 用法
 
-先用本索引定位篇目与场景节(`### 场景句`),再 Read 对应文件;回答/决策时优先遵循其中的判据与转向规则。worker 无 Glob/Grep,按上面的精确相对路径直接 Read。
+先用本索引定位篇目与场景节(`### 场景句`),再 Read 对应文件;回答/决策时优先遵循其中的判据与转向规则。worker 无 Glob/Grep,按上面的 ${SKILL_DIR} 绝对路径直接 Read。

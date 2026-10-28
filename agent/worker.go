@@ -538,9 +538,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 类别的"场景→判据→转向"骨架;至多 2 类、总字符 cap 8K,骨架缺失静默不注入。
 	sysBody += chainskel.ForIntent(intent.Payload)
 	// L4 原文指引:意图命中类别时追加一行静态指引,告诉 worker 完整反问决策链
-	// 原文的可 Read 路径(skills/chains-<cat>/refs/),与骨架同一套类别解析,
-	// 匹配不中静默不注入。
-	sysBody += chainskel.RefsGuideForIntent(intent.Payload)
+	// 原文的可 Read 绝对路径来自本次实际加载且已授权的 Skill,与骨架同一套
+	// 类别解析；不依赖任务工作目录,也不暴露未授权或缺失 Skill 的路径。
+	sysBody += chainskel.RefsGuideForIntent(intent.Payload, def.SkillDirs)
 	if as != nil {
 		if ids := intentAssetIDs(intent); len(ids) > 0 {
 			if assets, err := as.GetByIDs(ids); err == nil && len(assets) > 0 {

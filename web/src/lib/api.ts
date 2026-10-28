@@ -1287,6 +1287,8 @@ export const api = {
   getAgentVisibility: (key: string) => get<{ mcp: number[]; skill: string[] }>(`/agents/${key}/visibility`),
   setAgentVisibility: (key: string, mcp: number[], skill: string[]) =>
     put<{ ok: boolean }>(`/agents/${key}/visibility`, { mcp, skill }),
+  patchAgentVisibility: (key: string, patch: { mcp?: number[]; skill?: string[] }) =>
+    put<{ ok: boolean }>(`/agents/${encodeURIComponent(key)}/visibility`, patch),
 
   // ---- tools (内置工具目录) ----
   tools: () => get<{ tools: Tool[] }>("/tools").then((r) => arr(r.tools)),
@@ -1344,6 +1346,7 @@ export const api = {
 
   // ---- skills (文件系统) ----
   skills: () => get<{ skills: SkillItem[] }>("/skills").then((r) => arr(r.skills)),
+  skillsStatus: () => get<{ skills: SkillItem[]; usage_available?: boolean; usage_error?: string; registry_available?: boolean; registry_error?: string; usage_scope?: string }>("/skills"),
   createSkill: (s: {
     name: string;
     description: string;
@@ -1382,6 +1385,8 @@ export const api = {
   deleteSkillPath: (skill: string, path: string) => del<{ deleted: string }>(`/skills/${skill}/files/${path}`),
   skillUsage: (name: string, limit = 50) =>
     get<{ calls: SkillCall[] }>(`/skills/${name}/usage?limit=${limit}`).then((r) => arr(r.calls)),
+  skillUsageStatus: (name: string, limit = 50) =>
+    get<{ calls: SkillCall[]; scope?: "live"; history_scope?: "live"; usage_available?: boolean; usage_error?: string }>(`/skills/${encodeURIComponent(name)}/usage?limit=${limit}`),
   missingSkills: (limit = 20) =>
     get<{ missing: MissingSkill[] }>(`/skills/missing?limit=${limit}`).then((r) => arr(r.missing)),
   clearMissingSkills: () => del<{ cleared: boolean }>("/skills/missing"),

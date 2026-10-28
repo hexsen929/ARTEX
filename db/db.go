@@ -363,9 +363,9 @@ ON CONFLICT DO NOTHING`, r.kind, r.pattern, r.note); err != nil {
 // agent keys that should see it by default. The skill FILES themselves live on the
 // filesystem (SkillDir, loaded by norma at runtime); DB only carries this visibility
 // binding. Skills omitted here (e.g. scopesentry) ship invisible by
-// default — the user turns them on per-agent when needed. scopesentry additionally
-// declares `mcps: ScopeSentry`, which only takes effect once it's made visible and
-// that MCP is enabled/configured.
+// default — the user turns them on per-agent when needed. ScopeSentry requires
+// separately configured, enabled and explicitly authorized MCP access; merely
+// granting its Skill does not enable or grant that service.
 var builtinSkillVisibility = map[string][]string{
 	"chains-meta":              {"goals", "planner", "pentest", "worker.intranet"},
 	"chains-recon":             {"goals", "planner", "pentest", "retester", "verifier", "worker", "worker.intranet"},

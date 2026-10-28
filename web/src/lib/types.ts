@@ -1207,6 +1207,17 @@ export interface LLMPoolStatus {
 }
 
 // ---- Agents ----
+export interface AgentRuntimeCapabilities {
+  execution_agent_key: string;
+  tool_binding_mode: "direct" | "inherited" | "limited" | "unsupported";
+  mcp_binding_mode: "direct" | "inherited" | "unsupported";
+  skill_binding_mode: "direct" | "readonly" | "unsupported";
+  allowed_tool_keys?: string[];
+  runtime_config_mode?: "direct" | "inherited" | "llm_only";
+  runtime_config_agent_key?: string;
+  note?: string;
+}
+
 export interface Agent {
   id: string;
   key: string; // 内置为 goals/planner/mainagent/worker；自定义为用户自定 key
@@ -1228,6 +1239,18 @@ export interface Agent {
   mcp_count?: number;
   skill_count?: number;
   tool_count?: number;
+  /** Explicit enabled bindings, not a runtime health or effective-tool count. */
+  binding_counts_available?: boolean;
+  binding_counts_error?: string;
+  capabilities?: AgentRuntimeCapabilities;
+  automation?: {
+    kind: "finding_verification" | "credential_processing";
+    available: boolean;
+    enabled: boolean;
+    configured: boolean;
+    state: string;
+    reason: string;
+  };
 }
 
 export interface PromptVar {
@@ -1304,9 +1327,14 @@ export interface SkillItem {
   compatibility?: string; // optional: environment requirements
   mcps?: string[]; // MCP server names this skill unlocks on load
   files: string[]; // files in the skill directory
-  // 调用统计（skill_usage 账本）。从未被调用过的 skill：calls=0、last_used 缺省。
-  calls: number;
-  tasks: number; // 加载过它的任务数（chat 会话不计入）
+  // 显式 Skill 加载记录；不包含代码自动注入，统计不可用为 null。
+  calls: number | null;
+  usage_available?: boolean;
+  usage_error?: string;
+  loadable?: boolean;
+  load_error?: string;
+  declared_name?: string;
+  tasks: number | null; // 加载过它的任务数；统计不可用为 null
   usage_agents: string[]; // 加载过它的 agent key
   last_used?: string;
 }
@@ -1345,7 +1373,10 @@ export interface Tool {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   exec?: Record<string, any>; // 自定义工具执行规格(kind!=builtin)
   deferred?: boolean; // schema 延迟(SearchExtraTools/ExecuteExtraTool)
-  calls?: number; // persistent runtime invocation count (older APIs may omit it)
+  calls?: number | null; // catalog invocation attempts, not successful executions
+  usage_kind?: "callable" | "shell_declaration";
+  usage_available?: boolean;
+  usage_error?: string;
 }
 
 // ---- Stats ----

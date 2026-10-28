@@ -2,8 +2,11 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
@@ -106,6 +109,46 @@ func chatSystem(agentKey, dataDir, workDir string) string {
 	return withAgentWorkGuidance(body, agentKey) + chatWorkDirSpec(workDir)
 }
 
+// restrictedChatProvider bounds actual SDK provider calls as well as logical
+// tool-turns: token-limit recovery does not count toward norma.MaxTurns.
+// It is per Chat invocation and leaves the caller's context/deadline intact.
+type restrictedChatProvider struct {
+	llm.Provider
+	mu        sync.Mutex
+	remaining int
+}
+
+func (p *restrictedChatProvider) take() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.remaining <= 0 {
+		return fmt.Errorf("受限角色本轮模型调用预算已用尽")
+	}
+	p.remaining--
+	return nil
+}
+
+func (p *restrictedChatProvider) Complete(ctx context.Context, request llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	if err := p.take(); err != nil {
+		return llm.Message{}, "", llm.Usage{}, err
+	}
+	return p.Provider.Complete(ctx, request)
+}
+
+func (p *restrictedChatProvider) Stream(ctx context.Context, request llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+	return func(yield func(llm.StreamEvent, error) bool) {
+		if err := p.take(); err != nil {
+			yield(llm.StreamEvent{}, err)
+			return
+		}
+		for event, err := range p.Provider.Stream(ctx, request) {
+			if !yield(event, err) {
+				return
+			}
+		}
+	}
+}
+
 // chatVars carries the runtime variables a custom agent's prompt may reference.
 // DataDir (server data root) + Now (server wall-clock, refreshed each turn) are the
 // universal ones; any other {{.X}} fails to render and falls back to
@@ -122,7 +165,11 @@ type chatVars struct{ DataDir, Now string }
 // tool_use / tool_result / text / result), tagged with the agent key as the
 // worker lane.
 func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message string, maxTurns int, maxDuration time.Duration, webSearch bool, emit func(db.Activity)) (string, error) {
+	if agentKey == "worker.intranet" {
+		return "", fmt.Errorf("worker.intranet 是 worker 的任务提示词变体，请从任务运行，不支持独立对话执行")
+	}
 	proxyAddr, proxyCACert := c.proxyForChat(ctx)
+	restricted := agentKey == db.CredentialAgentKey || agentKey == "goals"
 	// gate the global web-search opts by this agent's own flag.
 	ws := c.webSearch
 	if !webSearch {
@@ -144,6 +191,9 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	ctx = WithRunInfo(ctx, runInfo)
 	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
 	defer cleanup()
+	if def.AssemblyError != nil {
+		return "", fmt.Errorf("本轮工具装配未完成，未请求模型: %w", def.AssemblyError)
+	}
 
 	system, boundary := deferredSystem(chatSystem(agentKey, c.workDir, sessionWorkDir), def)
 	opts := agentcore.Options{
@@ -154,12 +204,12 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		DeferredTools:   def.Deferred,
 		UnlockSet:       def.Unlock,
 		PermissionMode:  permission.ModeBypass,
-		EnableWebFetch:  true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
+		EnableWebFetch:  !restricted, // limited/data-only roles must not gain implicit SDK network tools
 		WebFetchProxy:   proxyAddr,
 		WebFetchCACert:  proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
-		EnableWebSearch:       ws.Enabled,
+		EnableWebSearch:       ws.Enabled && !restricted,
 		WebSearchBackend:      ws.Backend,
 		BraveSearchAPIKey:     ws.BraveKey,
 		TavilySearchAPIKey:    ws.TavilyKey,
@@ -182,6 +232,22 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		NonStreaming: c.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    c.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
+	if restricted {
+		opts.Todos = nil
+		opts.DisableBackgroundTasks = true
+		limit := 8
+		if agentKey == db.CredentialAgentKey {
+			limit = 1
+		}
+		if opts.MaxTurns <= 0 || opts.MaxTurns > limit {
+			opts.MaxTurns = limit
+		}
+		opts.Provider = &restrictedChatProvider{Provider: c.prov, remaining: opts.MaxTurns}
+		// A settlement or automatic summary is another model call. These
+		// limited runners have no writeback/execution phase to settle.
+		opts.Settlement = nil
+		opts.Compaction = nil
+	}
 	if c.guard != nil {
 		opts.Hooks = c.guard.Hooks()
 	}
@@ -190,7 +256,9 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		opts.SessionID = sessionID
 	}
 	// 实验功能:开启后由 noa 接管上下文压缩(归档集中在 <workDir>/noa/<SessionID> 下,持久)。
-	enableNoa(&opts, c.noaEnabledFn, c.workDir, "chat-"+sessionID, noaWarn("chat-"+sessionID))
+	if !restricted {
+		enableNoa(&opts, c.noaEnabledFn, c.workDir, "chat-"+sessionID, noaWarn("chat-"+sessionID))
+	}
 	ctx = attachSideCapture(ctx, &opts)
 	s := agentcore.NewSession(opts)
 	defer s.Close()

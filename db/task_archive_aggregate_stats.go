@@ -33,6 +33,14 @@ type archivedMissingSkillEvent struct {
 func archivedMissingSkillAggregates(q interface {
 	Query(string, ...any) (*sql.Rows, error)
 }) ([]taskArchiveAggregate, error) {
+	return archivedTaskAggregatesFrom(q)
+}
+
+// archivedTaskAggregatesFrom accepts the caller's transaction so ledger totals
+// and archives are read from the same snapshot during concurrent compaction.
+func archivedTaskAggregatesFrom(q interface {
+	Query(string, ...any) (*sql.Rows, error)
+}) ([]taskArchiveAggregate, error) {
 	rows, err := q.Query(`SELECT archive.aggregate_stats
 FROM task_archives archive
 JOIN tasks task ON task.id=archive.task_id
@@ -101,19 +109,7 @@ func mergeUnacknowledgedArchivedSkillStats(live []SkillStat, archived []taskArch
 }
 
 func (d *DB) archivedTaskAggregates() ([]taskArchiveAggregate, error) {
-	rawItems, err := d.ArchivedAggregateStats()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]taskArchiveAggregate, 0, len(rawItems))
-	for _, raw := range rawItems {
-		var item taskArchiveAggregate
-		if err := json.Unmarshal(raw, &item); err != nil {
-			return nil, err
-		}
-		out = append(out, item)
-	}
-	return out, nil
+	return archivedTaskAggregatesFrom(d)
 }
 
 func mergeAgentKeys(current, incoming []string) []string {

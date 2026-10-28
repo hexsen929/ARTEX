@@ -560,13 +560,13 @@ func (d *DB) AgentBindingCounts() (mcp map[int64]int, skill map[int64]int, tools
 		}
 		return rows.Err()
 	}
-	if err = byID(`SELECT agent_id, count(DISTINCT resource_id) FROM agent_visibility WHERE resource_kind='mcp' AND enabled GROUP BY agent_id`, mcp); err != nil {
+	if err = byID(`SELECT v.agent_id, count(DISTINCT v.resource_id) FROM agent_visibility v JOIN mcp_servers s ON s.id=v.resource_id WHERE v.resource_kind='mcp' AND v.enabled AND s.enabled GROUP BY v.agent_id`, mcp); err != nil {
 		return
 	}
 	if err = byID(`SELECT agent_id, count(*) FROM agent_skill_visibility WHERE enabled GROUP BY agent_id`, skill); err != nil {
 		return
 	}
-	rows, e := d.Query(`SELECT elem, count(*) FROM tools, jsonb_array_elements_text(agents) AS elem GROUP BY elem`)
+	rows, e := d.Query(`SELECT elem, count(*) FROM tools, jsonb_array_elements_text(agents) AS elem WHERE tools.enabled GROUP BY elem`)
 	if e != nil {
 		err = e
 		return

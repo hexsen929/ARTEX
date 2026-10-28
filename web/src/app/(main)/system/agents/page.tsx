@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { Bot, PlusIcon, Trash2Icon } from "lucide-react";
+import { AlertCircleIcon, Bot, PlusIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -39,6 +39,7 @@ import {
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { AgentEditor } from "@/components/agent-editor";
 import { api } from "@/lib/api";
+import { agentRuntimeCapabilities, bindingCountLabel } from "@/lib/tool-bindings";
 import type { Agent } from "@/lib/types";
 
 // AgentGridCard is one clickable tile opening the agent's editor drawer. Custom
@@ -52,6 +53,7 @@ function AgentGridCard({
   onOpen: () => void;
   onDeleted: () => void;
 }) {
+  const capabilities = agentRuntimeCapabilities(agent);
   async function del() {
     try {
       await api.deleteAgent(agent.key);
@@ -63,7 +65,7 @@ function AgentGridCard({
   }
   return (
     <div className="hover:border-primary/50 group relative flex flex-col gap-2 rounded-lg border p-4 transition-colors">
-      <button type="button" onClick={onOpen} className="flex flex-col gap-2 text-left">
+      <button type="button" data-testid={`agent-card-${agent.key}`} onClick={onOpen} className="flex flex-col gap-2 text-left">
         <div className="flex flex-wrap items-center gap-2">
           <Bot className="text-muted-foreground size-4" />
           <span className="text-sm font-medium">{agent.name}</span>
@@ -87,10 +89,13 @@ function AgentGridCard({
           {agent.description || "（无描述）"}
         </p>
         <div className="text-muted-foreground flex flex-wrap gap-1.5 text-[10px]">
-          <span className="rounded border px-1.5 py-0.5">MCP {agent.mcp_count ?? 0}</span>
-          <span className="rounded border px-1.5 py-0.5">Skill {agent.skill_count ?? 0}</span>
-          <span className="rounded border px-1.5 py-0.5">工具 {agent.tool_count ?? 0}</span>
+          <span className="rounded border px-1.5 py-0.5">{capabilities.mcp_binding_mode === "inherited" ? `MCP 沿用 ${capabilities.execution_agent_key}` : capabilities.mcp_binding_mode === "unsupported" ? "不使用 MCP" : `MCP 绑定 ${bindingCountLabel(agent.mcp_count, agent.binding_counts_available)}`}</span>
+          <span className="rounded border px-1.5 py-0.5">{capabilities.skill_binding_mode === "unsupported" ? "不使用 Skill" : `${capabilities.skill_binding_mode === "readonly" ? "Skill 指导" : "Skill 绑定"} ${bindingCountLabel(agent.skill_count, agent.binding_counts_available)}`}</span>
+          <span className="rounded border px-1.5 py-0.5">{capabilities.tool_binding_mode === "inherited" ? `工具沿用 ${capabilities.execution_agent_key}` : capabilities.tool_binding_mode === "unsupported" ? "无执行工具" : `${capabilities.tool_binding_mode === "limited" ? "基础工具绑定" : "工具绑定"} ${bindingCountLabel(agent.tool_count, agent.binding_counts_available)}`}</span>
         </div>
+        {capabilities.note && <p className="text-muted-foreground text-xs">{capabilities.note}</p>}
+        {agent.binding_counts_available === false && <p className="text-destructive text-xs">绑定统计不可用，不代表没有授权。</p>}
+        {agent.automation && <p data-testid={`agent-automation-${agent.key}`} className={agent.automation.available ? "text-muted-foreground text-xs" : "text-amber-700 text-xs dark:text-amber-300"}>{agent.automation.available ? agent.automation.reason : `自动流程状态未知：${agent.automation.reason || "读取失败"}`}</p>}
       </button>
       {!agent.builtin && (
         <AlertDialog>
@@ -209,12 +214,23 @@ function CreateAgentDialog({ onCreated }: { onCreated: (key: string) => void }) 
 export default function AgentsPage() {
   const [agents, setAgents] = React.useState<Agent[]>([]);
   const [editKey, setEditKey] = React.useState<string | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState("");
+  const requestGeneration = React.useRef(0);
 
   const reload = React.useCallback(() => {
-    api.agents().then(setAgents).catch(() => setAgents([]));
+    const generation = ++requestGeneration.current;
+    setLoading(true);
+    api.agents().then((items) => {
+      if (generation !== requestGeneration.current) return;
+      setAgents(items); setLoadError("");
+    }).catch((error: unknown) => {
+      if (generation === requestGeneration.current) setLoadError(error instanceof Error ? error.message : "Agent 列表读取失败");
+    }).finally(() => { if (generation === requestGeneration.current) setLoading(false); });
   }, []);
   React.useEffect(() => {
     reload();
+    return () => { requestGeneration.current++; };
   }, [reload]);
 
   const editing = agents.find((a) => a.key === editKey) ?? null;
@@ -236,14 +252,17 @@ export default function AgentsPage() {
         />
       </div>
 
+      {loadError && <div role="alert" data-testid="agents-load-error" className="flex flex-wrap items-center gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950/30 dark:text-amber-200"><AlertCircleIcon className="size-4" /><span>Agent 列表读取失败，已载入数据保留：{loadError}</span><Button size="sm" variant="outline" onClick={reload}><RefreshCwIcon />重试</Button></div>}
+      <p className="text-muted-foreground text-xs">这里展示启用的显式绑定，不是实际可用能力或成功调用数；运行时还受任务、全局开关与资源就绪状态限制。继承角色单独注明执行来源。</p>
+
       <Card>
         <CardHeader>
           <CardTitle>Agent 清单</CardTitle>
-          <CardDescription>共 {agents.length} 个</CardDescription>
+          <CardDescription>{loading && agents.length === 0 ? "正在加载…" : loadError && agents.length === 0 ? "列表尚未载入" : `共 ${agents.length} 个`}</CardDescription>
         </CardHeader>
         <CardContent>
           {agents.length === 0 ? (
-            <p className="text-muted-foreground py-6 text-center text-sm">（暂无 Agent）</p>
+            <p className="text-muted-foreground py-6 text-center text-sm">{loading ? "正在加载 Agent…" : loadError ? "读取失败，请重试。" : "（暂无 Agent）"}</p>
           ) : (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {agents.map((a) => (
@@ -257,7 +276,7 @@ export default function AgentsPage() {
       <Sheet open={!!editing} onOpenChange={(o) => !o && setEditKey(null)}>
         <SheetContent
           side="right"
-          className="flex flex-col gap-0 p-0 data-[side=right]:w-[45vw] data-[side=right]:sm:max-w-[45vw]"
+          className="flex flex-col gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-4xl"
         >
           {editing && (
             <>

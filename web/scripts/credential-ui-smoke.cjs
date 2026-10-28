@@ -99,10 +99,39 @@ const agentFixtures = {
     work_guidance: "",
   },
 };
+const runtimeAgentFixtures = [
+  { ...agentFixtures.worker.agent, mcp_count: 4, skill_count: 3, tool_count: 8, binding_counts_available: true,
+    capabilities: { execution_agent_key: "worker", tool_binding_mode: "direct", mcp_binding_mode: "direct", skill_binding_mode: "direct", runtime_config_mode: "direct" } },
+  { id: "21", key: "worker.intranet", name: "执行·内网", role: "worker", builtin: true, enabled: true, mcp_count: 4, skill_count: 2, tool_count: 0, binding_counts_available: true,
+    capabilities: { execution_agent_key: "worker", tool_binding_mode: "inherited", mcp_binding_mode: "inherited", skill_binding_mode: "direct", runtime_config_mode: "inherited", runtime_config_agent_key: "worker", note: "执行工具与 MCP 沿用 worker；Skill 单独授权。" } },
+  { id: "22", key: "goals", name: "目标拆解", role: "goals", builtin: true, enabled: true, mcp_count: 0, skill_count: 2, tool_count: 3, binding_counts_available: true,
+    capabilities: { execution_agent_key: "goals", tool_binding_mode: "limited", mcp_binding_mode: "unsupported", skill_binding_mode: "readonly", runtime_config_mode: "llm_only", runtime_config_agent_key: "goals", allowed_tool_keys: ["set_goals", "set_constraints", "add_task_scope"], note: "目标拆解仅使用有限基础工具与只读 Skill 指导，不开放 Bash、交互 Shell 或 MCP。" } },
+  { id: "23", key: "credential_processor", name: "凭据整理", role: "assistant", builtin: false, enabled: true, mcp_count: 0, skill_count: 0, tool_count: 0, binding_counts_available: true,
+    capabilities: { execution_agent_key: "credential_processor", tool_binding_mode: "unsupported", mcp_binding_mode: "unsupported", skill_binding_mode: "unsupported", runtime_config_mode: "llm_only", note: "凭据整理仅做无工具的结构化模型调用，不执行命令或加载执行依赖。" },
+    automation: { kind: "credential_processing", available: true, enabled: false, configured: false, state: "disabled", reason: "fixture 凭据整理总开关未开启" } },
+  { id: "24", key: "verifier", name: "漏洞验证", role: "assistant", builtin: false, enabled: true, mcp_count: 4, skill_count: 2, tool_count: 2, binding_counts_available: true,
+    automation: { kind: "finding_verification", available: false, enabled: false, configured: true, state: "unknown", reason: "fixture trigger state unavailable" } },
+  { ...agentFixtures.fixture_custom.agent, mcp_count: 0, skill_count: 0, tool_count: 0, binding_counts_available: false, binding_counts_error: "fixture binding statistics unavailable" },
+];
+const toolFixtures = [
+  { key: "external_fixture_cli", system: false, kind: "shell", description: "Synthetic environment declaration; this fixture never executes it.", schema: {}, agents: ["worker", "worker.intranet"], enabled: true, deferred: false, exec: {}, calls: null, usage_kind: "shell_declaration", usage_available: false },
+  { key: "fixture_callable_zero", system: true, kind: "builtin", description: "Synthetic callable with a known zero invocation count.", schema: { type: "object", properties: {} }, agents: ["worker"], enabled: true, deferred: false, calls: 0, usage_kind: "callable", usage_available: true },
+  { key: "fixture_callable_unknown", system: true, kind: "builtin", description: "Synthetic callable with unavailable statistics, not a zero count.", schema: { type: "object", properties: {} }, agents: ["worker"], enabled: true, deferred: false, calls: null, usage_kind: "callable", usage_available: false, usage_error: "fixture tool statistics unavailable" },
+];
+const skillFixtures = [
+  { name: "fixture-skill", declared_name: "fixture-skill", description: "Synthetic explicit-load fixture.", files: ["SKILL.md", "refs/fixture.md"], calls: 3, tasks: 1, usage_agents: ["worker"], last_used: fixtureTime, usage_available: true, loadable: true, mcps: [] },
+  { name: "chains-web", declared_name: "chains-web", description: "Synthetic built-in rules and explicit-load accounting are distinct.", files: ["SKILL.md"], calls: 0, tasks: 0, usage_agents: [], usage_available: true, loadable: true, mcps: [] },
+  { name: "fixture-broken", description: "Synthetic malformed metadata fixture.", files: ["SKILL.md"], calls: 0, tasks: 0, usage_agents: [], usage_available: true, loadable: false, load_error: "fixture invalid Skill metadata", mcps: [] },
+];
 const requests = [];
 const unexpectedAPI = new Set();
 const blockedExternal = new Set();
-const state = { failCredentials: false, failVerification: false, delayNextReveal: 0, failAgentPreview: false };
+const state = {
+  failCredentials: false, failVerification: false, delayNextReveal: 0, failAgentPreview: false,
+  failToolsList: false, failSkillSummary: false,
+  failSkillUsage: new Set(), failSkillVisibility: new Set(),
+  delayNextSkillUsage: "", delayNextSkillFile: "",
+};
 const mime = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
   ".json": "application/json", ".txt": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png",
@@ -137,9 +166,44 @@ async function serveAPI(request, response, url) {
   if (endpoint === "/api/intercept/pending") return sendJSON(response, 200, { pending: [] });
   if (endpoint === "/api/auth/status") return sendJSON(response, 200, { initialized: true });
   if (endpoint === "/api/tasks") return sendJSON(response, 200, { tasks, active: "" });
+  if (endpoint === "/api/agents" && method === "GET") return sendJSON(response, 200, { agents: runtimeAgentFixtures });
   if (endpoint === "/api/mcp" && method === "GET") return sendJSON(response, 200, { servers: [] });
-  if (endpoint === "/api/skills" && method === "GET") return sendJSON(response, 200, { skills: [] });
-  if (endpoint === "/api/tools" && method === "GET") return sendJSON(response, 200, { tools: [] });
+  if (endpoint === "/api/skills" && method === "GET") return sendJSON(response, 200, {
+    skills: skillFixtures.map((item) => state.failSkillSummary ? { ...item, calls: null, usage_available: false, usage_error: "fixture Skill statistics unavailable" } : item),
+    usage_available: !state.failSkillSummary, usage_error: state.failSkillSummary ? "fixture Skill statistics unavailable" : "", registry_available: true,
+  });
+  if (endpoint === "/api/skills/missing" && method === "GET") return sendJSON(response, 200, { missing: [] });
+  const skillAction = endpoint.match(/^\/api\/skills\/(fixture-skill|chains-web|fixture-broken)(?:\/(usage|files)(?:\/(.+))?)?$/);
+  if (skillAction && method === "GET") {
+    const name = skillAction[1];
+    if (skillAction[2] === "usage") {
+      const calls = name === "fixture-skill" ? [{ ts: fixtureTime, agent_key: "fixture-explicit-history", task_id: 777, session_id: "", args_len: 0 }] : [];
+      if (state.delayNextSkillUsage === name) {
+        state.delayNextSkillUsage = "";
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+      if (state.failSkillUsage.has(name)) return sendJSON(response, 503, { error: "fixture usage unavailable" });
+      return sendJSON(response, 200, { calls, usage_available: true, scope: "live" });
+    }
+    if (skillAction[2] === "files" && skillAction[3]) {
+      const content = `# FIXTURE FILE ${name}\nSynthetic file content only.`;
+      if (state.delayNextSkillFile === name) {
+        state.delayNextSkillFile = "";
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+      return sendJSON(response, 200, { content, file: skillAction[3] });
+    }
+    if (skillAction[2] === "files") return sendJSON(response, 200, { files: skillFixtures.find((item) => item.name === name).files });
+  }
+  const skillVisibility = endpoint.match(/^\/api\/visibility\/skill\/(fixture-skill|chains-web|fixture-broken)$/);
+  if (skillVisibility && method === "GET") {
+    if (state.failSkillVisibility.has(skillVisibility[1])) return sendJSON(response, 503, { error: "fixture visibility unavailable" });
+    return sendJSON(response, 200, { agents: skillVisibility[1] === "fixture-broken" ? [] : ["11"] });
+  }
+  if (endpoint === "/api/tools" && method === "GET") {
+    if (state.failToolsList) return sendJSON(response, 503, { error: "fixture tools refresh unavailable" });
+    return sendJSON(response, 200, { tools: toolFixtures });
+  }
   if (endpoint === "/api/settings" && method === "GET") return sendJSON(response, 200, { traffic_capture: false, web_search_enabled: false });
   const agentAction = endpoint.match(/^\/api\/agents\/(worker|fixture_custom)(?:\/(prompt(?:\/preview)?|triggers))?$/);
   if (agentAction) {
@@ -581,6 +645,140 @@ async function main() {
       assert.equal(errors.length, 0, `Unexpected browser exceptions: ${errors.join("; ")}`);
       assert.equal(blockedExternal.size, 0, `UI attempted outbound requests: ${[...blockedExternal].join(", ")}`);
       assert.equal(unexpectedAPI.size, 0, `Unmocked API calls: ${[...unexpectedAPI].join(", ")}`);
+      assert.ok(await secretAbsent());
+    });
+
+    await check("tool cards distinguish environment declarations, known zero and unknown statistics", async () => {
+      await page.goto(origin + "/system/tools/", { waitUntil: "networkidle" });
+      await page.getByTestId("tool-card-fixture_callable_zero").waitFor();
+      assert.equal(await page.getByTestId("tool-usage-fixture_callable_zero").innerText(), "目录调用 0");
+      assert.equal(await page.getByTestId("tool-usage-fixture_callable_unknown").innerText(), "统计不可用");
+      await page.getByRole("tab", { name: "自定义工具", exact: true }).click();
+      const declaration = page.getByTestId("tool-card-external_fixture_cli");
+      await declaration.waitFor();
+      assert.equal(await declaration.getByTestId("tool-usage-external_fixture_cli").innerText(), "环境声明");
+      assert.ok((await declaration.innerText()).includes("独立调用次数不适用"));
+      assert.ok(!(await declaration.innerText()).includes("调用 0"));
+      await declaration.click();
+      const editor = page.getByRole("dialog");
+      const inherited = editor.getByRole("checkbox", { name: "worker.intranet 工具绑定", exact: true });
+      assert.ok(await inherited.isDisabled(), "Variant-only bindings must not be silently editable as independent grants");
+      assert.ok(await inherited.isChecked(), "Existing inactive variant binding must remain displayed instead of being silently removed");
+      assert.ok(await editor.getByRole("checkbox", { name: "credential_processor 工具绑定", exact: true }).isDisabled());
+      assert.ok(await editor.getByRole("checkbox", { name: "goals 工具绑定", exact: true }).isDisabled());
+      await closeDialog();
+      await page.screenshot({ path: path.join(artifacts, "tools-environment-declaration.png"), fullPage: true });
+    });
+
+    await check("tool list read failures preserve loaded records without mutating bindings", async () => {
+      await page.getByRole("tab", { name: "系统工具", exact: true }).click();
+      state.failToolsList = true;
+      await page.getByRole("button", { name: "刷新", exact: true }).click();
+      await page.getByTestId("tools-load-error").getByText("工具：fixture tools refresh unavailable", { exact: true }).waitFor();
+      await page.getByTestId("tool-card-fixture_callable_zero").waitFor();
+      assert.equal(await page.getByTestId("tool-usage-fixture_callable_zero").innerText(), "目录调用 0");
+      state.failToolsList = false;
+      await page.getByRole("button", { name: "刷新", exact: true }).click();
+      await page.getByTestId("tools-load-error").waitFor({ state: "hidden" });
+      assert.equal(requests.filter((item) => item.method !== "GET" && /^\/api\/tools(?:\/|$)/.test(item.path)).length, 0, "Viewing tool readiness altered tool bindings");
+    });
+
+    await check("Agent cards explain inherited tools, restricted goals and no-tool credential processing", async () => {
+      await page.goto(origin + "/system/agents/", { waitUntil: "networkidle" });
+      const inherited = page.getByTestId("agent-card-worker.intranet");
+      await inherited.waitFor();
+      assert.ok((await inherited.innerText()).includes("工具沿用 worker"));
+      assert.ok((await inherited.innerText()).includes("MCP 沿用 worker"));
+      const goals = page.getByTestId("agent-card-goals");
+      assert.ok((await goals.innerText()).includes("Skill 指导 2"));
+      assert.ok((await goals.innerText()).includes("基础工具绑定 3"));
+      assert.ok((await goals.innerText()).includes("不开放 Bash"));
+      const processor = page.getByTestId("agent-card-credential_processor");
+      assert.ok((await processor.innerText()).includes("无执行工具"));
+      assert.ok((await processor.innerText()).includes("不使用 Skill"));
+      assert.ok((await processor.innerText()).includes("结构化模型调用"));
+      assert.ok((await page.getByTestId("agent-automation-credential_processor").innerText()).includes("凭据整理总开关未开启"));
+      assert.ok((await page.getByTestId("agent-automation-verifier").innerText()).includes("自动流程状态未知"));
+      const unknownBindings = page.getByTestId("agent-card-fixture_custom");
+      assert.ok((await unknownBindings.innerText()).includes("绑定统计不可用"));
+      assert.ok(!(await unknownBindings.innerText()).includes("工具绑定 0"));
+    });
+
+    await check("Skill overview describes explicit loads and exposes invalid directories", async () => {
+      await page.goto(origin + "/system/skills/", { waitUntil: "networkidle" });
+      const overview = page.getByTestId("skills-overview");
+      await overview.getByRole("heading", { name: "技能库总览", exact: true }).waitFor();
+      assert.ok((await overview.innerText()).includes("显式加载记录"));
+      assert.ok((await overview.innerText()).includes("不等于未使用自动规则"));
+      assert.ok((await overview.innerText()).includes("以下目录存在加载问题"));
+      assert.ok(!(await overview.innerText()).includes("从未被任何"));
+      await page.getByTestId("skill-select-fixture-broken").click();
+      const broken = page.getByTestId("skill-detail-fixture-broken");
+      await broken.getByRole("heading", { name: "fixture-broken", exact: true }).waitFor();
+      assert.ok((await broken.innerText()).includes("fixture invalid Skill metadata"));
+      assert.ok((await broken.innerText()).includes("此目录不计为可加载 Skill"));
+    });
+
+    await check("unavailable Skill summary statistics remain unknown instead of becoming zero", async () => {
+      state.failSkillSummary = true;
+      await page.goto(origin + "/system/skills/", { waitUntil: "networkidle" });
+      const overview = page.getByTestId("skills-overview");
+      await page.getByTestId("skills-module-errors").getByText("fixture Skill statistics unavailable", { exact: true }).waitFor();
+      assert.ok((await overview.innerText()).includes("统计不可用"));
+      assert.ok((await overview.innerText()).includes("统计未就绪，不标记为未加载"));
+      assert.ok((await page.getByTestId("skill-select-fixture-skill").innerText()).includes("未知"));
+      state.failSkillSummary = false;
+      await page.getByRole("button", { name: "刷新 Skill 模块", exact: true }).click();
+      await page.getByTestId("skills-module-errors").waitFor({ state: "hidden" });
+      await eventually(async () => !(await page.getByTestId("skill-select-fixture-skill").innerText()).includes("未知"), "Restored Skill statistics did not leave unknown state");
+    });
+
+    await check("Skill detail errors are visible and block authorization writes until a successful retry", async () => {
+      state.failSkillUsage.add("fixture-skill");
+      state.failSkillVisibility.add("fixture-skill");
+      await page.goto(origin + "/system/skills/", { waitUntil: "networkidle" });
+      await page.getByTestId("skill-select-fixture-skill").click();
+      const detail = page.getByTestId("skill-detail-fixture-skill");
+      await detail.getByTestId("skill-usage-error").getByText("读取近期加载明细失败：fixture usage unavailable", { exact: true }).waitFor();
+      await detail.getByTestId("skill-visibility-error").getByText("读取授权失败：fixture visibility unavailable", { exact: true }).waitFor();
+      const workerGrant = detail.getByRole("checkbox", { name: "执行 Skill 可见性", exact: true });
+      assert.ok(await workerGrant.isDisabled(), "Unknown authorization state was presented as editable/unassigned");
+      assert.ok(!(await detail.innerText()).includes("近期热数据中暂无显式加载记录"), "Usage failure was misrepresented as empty history");
+      assert.equal(requests.filter((item) => item.method !== "GET" && item.path.startsWith("/api/visibility/")).length, 0, "An authorization read failure produced a write");
+      state.failSkillUsage.delete("fixture-skill");
+      state.failSkillVisibility.delete("fixture-skill");
+      await detail.getByRole("button", { name: "重试读取授权", exact: true }).click();
+      await detail.getByTestId("skill-visibility-error").waitFor({ state: "hidden" });
+      await eventually(async () => !(await workerGrant.isDisabled()), "Successful authorization retry did not restore editing readiness");
+      assert.ok(await workerGrant.isChecked());
+      await detail.getByRole("button", { name: "重试加载明细", exact: true }).click();
+      await detail.getByTestId("skill-usage-error").waitFor({ state: "hidden" });
+      await detail.getByText("fixture-explicit-history", { exact: true }).waitFor();
+      assert.ok(await detail.getByRole("checkbox", { name: "凭据整理 Skill 可见性", exact: true }).isDisabled());
+      await page.screenshot({ path: path.join(artifacts, "skill-detail-readiness.png"), fullPage: true });
+    });
+
+    await check("late Skill usage responses never replace the newly selected directory", async () => {
+      await page.getByTestId("skill-select-chains-web").click();
+      const zero = page.getByTestId("skill-detail-chains-web");
+      await zero.getByText("近期热数据中暂无显式加载记录；历史记录可能已归档，汇总总数仍包含归档。", { exact: true }).waitFor();
+      const before = requests.filter((item) => item.path === "/api/skills/fixture-skill/usage").length;
+      state.delayNextSkillUsage = "fixture-skill";
+      await page.getByTestId("skill-select-fixture-skill").click();
+      await eventually(() => requests.filter((item) => item.path === "/api/skills/fixture-skill/usage").length > before, "Delayed fixture Skill usage request did not start");
+      await page.getByTestId("skill-select-chains-web").click();
+      await zero.getByRole("heading", { name: "chains-web", exact: true }).waitFor();
+      await new Promise((resolve) => setTimeout(resolve, 850));
+      assert.equal(await page.getByTestId("skill-detail-fixture-skill").count(), 0);
+      assert.ok(!(await zero.innerText()).includes("fixture-explicit-history"), "Late records leaked from the prior Skill selection");
+      assert.equal(requests.filter((item) => item.method !== "GET" && item.path.startsWith("/api/visibility/")).length, 0);
+    });
+
+    await check("module audits preserve existing permissions and never invoke tools or external services", async () => {
+      assert.equal(errors.length, 0, `Unexpected browser exceptions: ${errors.join("; ")}`);
+      assert.equal(blockedExternal.size, 0, `UI attempted outbound requests: ${[...blockedExternal].join(", ")}`);
+      assert.equal(unexpectedAPI.size, 0, `Unmocked API calls: ${[...unexpectedAPI].join(", ")}`);
+      assert.equal(requests.filter((item) => item.method !== "GET" && /^\/api\/(tools|visibility|agents\/[^/]+\/config)(?:\/|$)/.test(item.path)).length, 0);
       assert.ok(await secretAbsent());
     });
     fs.writeFileSync(path.join(artifacts, "result.json"), JSON.stringify({ passed: completed, requests: requests.map(({ method, path: endpoint, task }) => ({ method, path: endpoint, task })), outboundRequests: [...blockedExternal] }, null, 2));
