@@ -371,6 +371,13 @@ func rowExists(tx *sql.Tx, table string, id int64) bool {
 }
 
 func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
+	if table == "credentials" {
+		var err error
+		raw, err = credentialArchiveDefaults(raw)
+		if err != nil {
+			return err
+		}
+	}
 	// json_populate_recordset inserts NULL for absent columns, bypassing SQL
 	// defaults. Preserve compatibility with v3 archives predating side memory.
 	if (table == "side_question_sessions" || table == "side_question_requests") && len(raw) > 0 {
@@ -834,4 +841,40 @@ WHERE task.archived_at IS NOT NULL`)
 		out = append(out, raw)
 	}
 	return out, rows.Err()
+}
+
+// Older archive rows predate credential metadata and tri-state verification.
+// json_populate_recordset supplies NULL rather than column defaults, so fill
+// only absent/null additive fields and never invent a historical verification.
+func credentialArchiveDefaults(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		return raw, nil
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		for _, name := range []string{"target", "source_url", "verification_method", "verification_evidence", "verification_by"} {
+			if len(row[name]) == 0 || string(row[name]) == "null" {
+				row[name] = json.RawMessage(`""`)
+			}
+		}
+		for _, name := range []string{"source_intent_id", "source_exploration_id"} {
+			if len(row[name]) == 0 || string(row[name]) == "null" {
+				row[name] = json.RawMessage(`0`)
+			}
+		}
+		if len(row["verification_status"]) == 0 || string(row["verification_status"]) == "null" {
+			status := `"unverified"`
+			if string(row["verified"]) == "true" {
+				status = `"verified"`
+			}
+			row["verification_status"] = json.RawMessage(status)
+		}
+		if len(row["verification_history"]) == 0 || string(row["verification_history"]) == "null" {
+			row["verification_history"] = json.RawMessage(`[]`)
+		}
+	}
+	return json.Marshal(rows)
 }

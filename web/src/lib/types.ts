@@ -1840,18 +1840,54 @@ export interface TunnelInfo {
   error?: string;
 }
 
-/** GET /api/intranet/credentials 的凭据记录（密钥已脱敏）。 */
+export type CredentialVerificationStatus = "unverified" | "verified" | "failed";
+
+/** 凭据台账的脱敏投影。完整 secret 仅由独立、按需请求返回。 */
 export interface IntranetCredential {
-  id: string;
+  id: number;
+  task_id: number;
+  task_name: string;
+  task_available: boolean;
+  host_asset_id?: number;
   cred_type: string;
   username: string;
+  /** 所属目标/站点，与 AD/Realm 认证域分开。 */
+  target: string;
+  target_label: string;
+  target_url?: string;
   domain: string;
   secret_masked: string;
   source: string;
+  source_url: string;
+  source_intent_id?: number;
+  source_exploration_id?: number;
+  /** 兼容旧调用；false 只表示未标记成功，不代表验证失败。 */
   verified: boolean;
+  verification_status: CredentialVerificationStatus;
+  verification_at?: string | null;
+  verification_method: string;
+  verification_evidence: string;
+  verification_by: string;
+  verification_history?: Array<{
+    status: CredentialVerificationStatus;
+    at: string;
+    method: string;
+    evidence: string;
+    by: string;
+  }>;
   created_at: string;
-  /** 归属任务 id（后端 JSON number；0 = 未关联）。 */
-  task_id?: number;
+}
+
+export interface CredentialVerificationInput {
+  status: CredentialVerificationStatus;
+  method: string;
+  evidence: string;
+}
+
+export interface CredentialMetadataInput {
+  target: string;
+  domain: string;
+  source_url: string;
 }
 
 // Original execution selected from an approval, never submitted to the reviewer.

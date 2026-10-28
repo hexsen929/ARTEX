@@ -1145,6 +1145,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tunnels", s.intranetListTunnels)
 	mux.HandleFunc("POST /api/tunnels/{id}/teardown", s.intranetTeardownTunnel)
 	mux.HandleFunc("GET /api/intranet/credentials", s.intranetListCredentials)
+	mux.HandleFunc("POST /api/intranet/credentials/{id}/reveal", s.intranetRevealCredential)
+	mux.HandleFunc("PUT /api/intranet/credentials/{id}/verification", s.intranetUpdateCredentialVerification)
+	mux.HandleFunc("PATCH /api/intranet/credentials/{id}/metadata", s.intranetUpdateCredentialMetadata)
 	mux.HandleFunc("GET /api/findings/{id}/inline-history", s.findingInlineHistory)
 	mux.HandleFunc("GET /api/intranet/topology", s.intranetTopology)
 
@@ -4312,7 +4315,7 @@ func cors(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 		w.Header().Add("Vary", "Origin")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(204)

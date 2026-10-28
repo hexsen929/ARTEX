@@ -34,6 +34,8 @@ import type {
   CoverageAssetRefs,
   CoverageGraphData,
   CredentialTrafficDetail,
+  CredentialMetadataInput,
+  CredentialVerificationInput,
   IntranetCredential,
   DailyTokenBucket,
   DeleteTaskOptions,
@@ -1580,4 +1582,16 @@ export const api = {
   teardownTunnel: (id: string) => post<{ ok: boolean }>(`/tunnels/${encodeURIComponent(id)}/teardown`),
   intranetCredentials: (taskId?: string) =>
     get<{ items: IntranetCredential[] }>(`/intranet/credentials${taskQuery(taskId)}`).then((r) => arr(r.items)),
+  // Sensitive values are never included in list/detail projections or browser caches.
+  revealCredential: (id: number, purpose: "view" | "copy", signal?: AbortSignal) =>
+    http<{ id: number; secret: string }>(`/intranet/credentials/${id}/reveal`, {
+      method: "POST",
+      body: JSON.stringify({ purpose }),
+      cache: "no-store",
+      signal,
+    }),
+  updateCredentialVerification: (id: number, input: CredentialVerificationInput) =>
+    put<IntranetCredential>(`/intranet/credentials/${id}/verification`, input),
+  updateCredentialMetadata: (id: number, input: CredentialMetadataInput) =>
+    patch<IntranetCredential>(`/intranet/credentials/${id}/metadata`, input),
 };

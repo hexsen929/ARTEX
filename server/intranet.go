@@ -541,6 +541,7 @@ func (s *Server) intranetTeardownTunnel(w http.ResponseWriter, r *http.Request) 
 // 不含复用 score:打分是按任务上下文(凭据×本任务资产)算的,全局列表无此
 // 上下文;页面要建议走 agent 工具 credential_reuse_plan。
 func (s *Server) intranetListCredentials(w http.ResponseWriter, r *http.Request) {
+	credentialNoStore(w)
 	if s.credStore == nil {
 		writeErr(w, 503, "凭据子系统未就绪(DB 未连接)")
 		return
@@ -557,17 +558,12 @@ func (s *Server) intranetListCredentials(w http.ResponseWriter, r *http.Request)
 		creds, err = s.credStore.ListAll(r.Context())
 	}
 	if err != nil {
-		writeErr(w, 500, "凭据读取失败: "+err.Error())
+		writeErr(w, 500, "凭据读取失败")
 		return
 	}
 	items := []map[string]any{}
 	for _, c := range creds {
-		items = append(items, map[string]any{
-			"id": c.ID, "task_id": c.TaskID, "username": c.Username,
-			"cred_type": c.CredType, "secret_masked": db.MaskSecret(c.Secret),
-			"domain": c.Domain, "source": c.Source, "verified": c.Verified,
-			"host_asset_id": c.HostAssetID, "created_at": c.CreatedAt,
-		})
+		items = append(items, credentialItem(c))
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }
