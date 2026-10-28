@@ -419,11 +419,12 @@ async function main() {
       assert.ok((await page.locator("tbody").innerText()).includes("fixture-bob"));
       state.failCredentials = true;
       await page.getByRole("button", { name: "刷新", exact: true }).click();
-      await page.getByRole("alert").getByText("凭据：fixture credential refresh failed", { exact: true }).waitFor();
+      const loadAlert = page.getByRole("alert").filter({ hasText: "部分数据加载失败" });
+      await loadAlert.getByText("凭据：fixture credential refresh failed", { exact: true }).waitFor();
       assert.ok((await page.locator("tbody").innerText()).includes("fixture-bob"), "Refresh failure erased known records");
       state.failCredentials = false;
       await page.getByRole("button", { name: "刷新", exact: true }).click();
-      await page.getByRole("alert").waitFor({ state: "hidden" });
+      await loadAlert.waitFor({ state: "hidden" });
       await selectOption(page.getByRole("combobox").first(), "全部任务");
       await page.getByTestId("credential-details-23").waitFor();
       assert.ok(await secretAbsent());
