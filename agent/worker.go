@@ -400,6 +400,11 @@ func workerSystem(proxyAddr, caCert, dataDir, runDir string, intranetFlags ...bo
 		tail = workerIntranetRules
 	}
 	body += executionQualityGuidance("worker")
+	guidanceKey := "worker"
+	if intranet {
+		guidanceKey = "worker.intranet"
+	}
+	body = withAgentWorkGuidance(body, guidanceKey)
 	// caCert is present only when the recording MITM is on, which is exactly when
 	// the traffic_* tools are registered — so it gates the traffic-tool note.
 	// Optional finding guidance is added for every role after tool resolution.

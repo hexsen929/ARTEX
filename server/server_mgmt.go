@@ -500,8 +500,10 @@ func (s *Server) pgGetAgent(w http.ResponseWriter, r *http.Request) {
 			"id": p.ID, "name": p.Name, "model": p.Model, "is_default": p.IsDefault,
 		})
 	}
+	guidanceVersion, guidance := agentWorkGuidanceMetadata(a.Key)
 	writeJSON(w, 200, map[string]any{
 		"agent": agentDTO(a), "prompt": cur, "variables": vars, "versions": vers,
+		"work_guidance_version": guidanceVersion, "work_guidance": guidance,
 		"visibility":   map[string]any{"mcp": mcp, "skill": sk},
 		"llm_profiles": llmProfiles, // 可绑定的 LLM 配置候选
 
@@ -703,11 +705,14 @@ func (s *Server) pgPreviewPrompt(w http.ResponseWriter, r *http.Request) {
 		body.Template, _ = pg.CurrentPrompt(a.ID)
 	}
 	rendered, err := renderPrompt(body.Template, withGlobalVars(vars), body.Sample)
+	guidanceVersion, guidance := agentWorkGuidanceMetadata(a.Key)
 	if err != nil {
-		writeJSON(w, 200, map[string]any{"rendered": "", "error": err.Error()})
+		writeJSON(w, 200, map[string]any{"rendered": "", "error": err.Error(),
+			"work_guidance_version": guidanceVersion, "work_guidance": guidance})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"rendered": rendered})
+	writeJSON(w, 200, map[string]any{"rendered": rendered,
+		"work_guidance_version": guidanceVersion, "work_guidance": guidance})
 }
 
 func (s *Server) pgGetAgentVisibility(w http.ResponseWriter, r *http.Request) {

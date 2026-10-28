@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Cloud-only browser regression for the exported credential management UI.
+ * Cloud-only browser regression for the exported credential and Agent UIs.
  *
  * Run after build:static on the GitHub Actions runner:
  *   ARTEX_PLAYWRIGHT_DIR=/tmp/runtime/node_modules/playwright \
@@ -30,6 +30,9 @@ const outputDirectory = path.resolve(__dirname, "..", "out");
 const artifacts = path.resolve(process.env.ARTEX_UI_ARTIFACTS || path.join(process.env.RUNNER_TEMP || "/tmp", "credential-ui-artifacts"));
 if (!fs.existsSync(path.join(outputDirectory, "intranet", "index.html"))) {
   throw new Error("Missing static export: run npm run build:static in the cloud frontend job first.");
+}
+if (!fs.existsSync(path.join(outputDirectory, "system", "agents", "detail", "index.html"))) {
+  throw new Error("Missing static Agent detail export.");
 }
 fs.mkdirSync(artifacts, { recursive: true });
 
@@ -72,10 +75,34 @@ const tasks = [
   { id: 101, name: TASK_A, description: "Synthetic task A", status: "done" },
   { id: 202, name: TASK_B, description: "Synthetic task B", status: "done" },
 ];
+const AGENT_GUIDANCE_VERSION = "ui-fixture-v1";
+const AGENT_GUIDANCE = "\n\n【角色工作规范 · worker · ui-fixture-v1】\n优先既有工具，记录真实证据和失败判据；保留任务范围、审批和停止条件。";
+const agentFixtures = {
+  worker: {
+    agent: { id: "11", key: "worker", name: "执行", role: "worker", builtin: true, enabled: true, max_turns: 7, run_seconds: 600, web_search: false, interactive_shell: false },
+    prompt: "FIXTURE_CUSTOM_WORKER_BODY\n工作目录：{{.DataDir}}",
+    variables: [{ name: "DataDir", description: "虚构工作目录", example: "/fixture/data", source: "runtime" }],
+    versions: [{ version: 7, ts: fixtureTime, note: "fixture original", template_text: "FIXTURE_CUSTOM_WORKER_BODY\n工作目录：{{.DataDir}}" }],
+    visibility: { mcp: [71], skill: ["fixture-skill"] },
+    llm_profiles: [],
+    work_guidance_version: AGENT_GUIDANCE_VERSION,
+    work_guidance: AGENT_GUIDANCE,
+  },
+  fixture_custom: {
+    agent: { id: "12", key: "fixture_custom", name: "自定义回归角色", role: "assistant", builtin: false, enabled: true, max_turns: 3, run_seconds: 600, web_search: false, interactive_shell: false },
+    prompt: "FIXTURE_CUSTOM_ROLE_BODY",
+    variables: [],
+    versions: [{ version: 2, ts: fixtureTime, note: "fixture custom original", template_text: "FIXTURE_CUSTOM_ROLE_BODY" }],
+    visibility: { mcp: [], skill: [] },
+    llm_profiles: [],
+    work_guidance_version: "",
+    work_guidance: "",
+  },
+};
 const requests = [];
 const unexpectedAPI = new Set();
 const blockedExternal = new Set();
-const state = { failCredentials: false, failVerification: false, delayNextReveal: 0 };
+const state = { failCredentials: false, failVerification: false, delayNextReveal: 0, failAgentPreview: false };
 const mime = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
   ".json": "application/json", ".txt": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png",
@@ -110,6 +137,30 @@ async function serveAPI(request, response, url) {
   if (endpoint === "/api/intercept/pending") return sendJSON(response, 200, { pending: [] });
   if (endpoint === "/api/auth/status") return sendJSON(response, 200, { initialized: true });
   if (endpoint === "/api/tasks") return sendJSON(response, 200, { tasks, active: "" });
+  if (endpoint === "/api/mcp" && method === "GET") return sendJSON(response, 200, { servers: [] });
+  if (endpoint === "/api/skills" && method === "GET") return sendJSON(response, 200, { skills: [] });
+  if (endpoint === "/api/tools" && method === "GET") return sendJSON(response, 200, { tools: [] });
+  if (endpoint === "/api/settings" && method === "GET") return sendJSON(response, 200, { traffic_capture: false, web_search_enabled: false });
+  const agentAction = endpoint.match(/^\/api\/agents\/(worker|fixture_custom)(?:\/(prompt(?:\/preview)?|triggers))?$/);
+  if (agentAction) {
+    const fixture = agentFixtures[agentAction[1]];
+    if (!agentAction[2] && method === "GET") return sendJSON(response, 200, fixture);
+    if (agentAction[2] === "triggers" && method === "GET") return sendJSON(response, 200, { triggers: [] });
+    if (agentAction[2] === "prompt/preview" && method === "POST") {
+      const guidance = { work_guidance_version: fixture.work_guidance_version, work_guidance: fixture.work_guidance };
+      if (state.failAgentPreview) return sendJSON(response, 200, { rendered: "", error: "fixture template preview failed", ...guidance });
+      return sendJSON(response, 200, { rendered: body.template.replaceAll("{{.DataDir}}", "/fixture/data"), ...guidance });
+    }
+    if (agentAction[2] === "prompt" && method === "PUT") {
+      assert.deepEqual(Object.keys(body).sort(), ["note", "template"], "Prompt saving must submit the editable body only");
+      assert.equal(typeof body.template, "string");
+      assert.ok(!body.template.includes(AGENT_GUIDANCE), "Runtime guidance leaked into the saved prompt body");
+      const version = fixture.versions[0].version + 1;
+      fixture.prompt = body.template;
+      fixture.versions.unshift({ version, ts: fixtureTime, note: "fixture saved", template_text: body.template });
+      return sendJSON(response, 200, { version });
+    }
+  }
   if (endpoint === "/api/sessions" || endpoint === "/api/tunnels") return sendJSON(response, 200, { items: [] });
   if (endpoint === "/api/intranet/topology") return sendJSON(response, 200, { nodes: [], edges: [], segments: [] });
   if (endpoint === "/api/intranet/credentials" && method === "GET") {
@@ -451,8 +502,89 @@ async function main() {
       assert.ok(await page.getByRole("button", { name: "刷新", exact: true }).isVisible());
     });
     await page.screenshot({ path: path.join(artifacts, "credential-list-mobile.png"), fullPage: true });
+
+    await page.setViewportSize({ width: 1680, height: 1050 });
+    await check("Agent runtime guidance is read-only and separate from editable and previewed bodies", async () => {
+      await page.goto(origin + "/system/agents/detail/?key=worker", { waitUntil: "networkidle" });
+      const bodyEditor = page.getByRole("textbox", { name: "提示词正文", exact: true });
+      await eventually(async () => (await bodyEditor.inputValue()) === agentFixtures.worker.prompt, "Agent custom prompt did not load");
+      const panel = page.getByTestId("agent-work-guidance");
+      assert.equal(await panel.count(), 1);
+      assert.ok((await panel.locator("summary").innerText()).includes(AGENT_GUIDANCE_VERSION));
+      await panel.locator("summary").click();
+      await panel.locator("pre").waitFor();
+      assert.equal((await panel.locator("pre").innerText()).trim(), AGENT_GUIDANCE.trim());
+      assert.equal(await panel.getByRole("textbox").count(), 0, "Runtime guidance must not be editable");
+      assert.ok(!(await bodyEditor.inputValue()).includes(AGENT_GUIDANCE_VERSION));
+      assert.ok((await panel.innerText()).includes("保留自定义提示词正文与历史版本"));
+      await page.screenshot({ path: path.join(artifacts, "agent-work-guidance.png"), fullPage: true });
+
+      await page.getByRole("button", { name: "预览渲染", exact: true }).click();
+      let preview = page.getByRole("dialog");
+      await preview.getByText("FIXTURE_CUSTOM_WORKER_BODY", { exact: false }).waitFor();
+      const previewPanel = preview.getByTestId("agent-work-guidance");
+      await previewPanel.locator("summary").click();
+      assert.equal((await previewPanel.locator("pre").innerText()).trim(), AGENT_GUIDANCE.trim());
+      assert.ok((await preview.innerText()).includes("正文预览"));
+      assert.equal(requests.filter((item) => item.path.endsWith("/prompt/preview")).at(-1).body.template, agentFixtures.worker.prompt);
+      await closeDialog();
+
+      state.failAgentPreview = true;
+      await page.getByRole("button", { name: "预览渲染", exact: true }).click();
+      preview = page.getByRole("dialog");
+      await preview.getByText("渲染错误：fixture template preview failed", { exact: true }).waitFor();
+      const errorPanel = preview.getByTestId("agent-work-guidance");
+      await errorPanel.locator("summary").click();
+      assert.equal((await errorPanel.locator("pre").innerText()).trim(), AGENT_GUIDANCE.trim());
+      await closeDialog();
+      state.failAgentPreview = false;
+      assert.equal(await bodyEditor.inputValue(), agentFixtures.worker.prompt, "Preview changed the editable prompt");
+    });
+
+    await check("saving an Agent prompt preserves runtime guidance, history and permissions independently", async () => {
+      const beforeAgent = structuredClone(agentFixtures.worker.agent);
+      const beforeVisibility = structuredClone(agentFixtures.worker.visibility);
+      const priorVersion = structuredClone(agentFixtures.worker.versions[0]);
+      const editedBody = "FIXTURE_EDITED_WORKER_BODY\n工作目录：{{.DataDir}}";
+      const bodyEditor = page.getByRole("textbox", { name: "提示词正文", exact: true });
+      await bodyEditor.fill(editedBody);
+      await page.getByRole("button", { name: "保存为新版本", exact: true }).click();
+      await eventually(() => agentFixtures.worker.prompt === editedBody, "Agent prompt save did not persist");
+      await page.getByText(`v${agentFixtures.worker.versions[0].version}`, { exact: true }).waitFor();
+      await eventually(async () => (await bodyEditor.inputValue()) === editedBody, "Saved Agent prompt did not reload");
+      const saved = requests.filter((item) => item.method === "PUT" && item.path === "/api/agents/worker/prompt").at(-1);
+      assert.deepEqual(saved.body, { template: editedBody, note: "" });
+      assert.equal(agentFixtures.worker.versions.length, 2);
+      assert.deepEqual(agentFixtures.worker.versions[1], priorVersion, "Prompt save rewrote prior history");
+      assert.deepEqual(agentFixtures.worker.agent, beforeAgent);
+      assert.deepEqual(agentFixtures.worker.visibility, beforeVisibility);
+      assert.equal(agentFixtures.worker.work_guidance, AGENT_GUIDANCE);
+      assert.ok(!agentFixtures.worker.versions[0].template_text.includes(AGENT_GUIDANCE_VERSION));
+      assert.equal(requests.filter((item) => item.method !== "GET" && /^\/api\/(agents\/worker\/(config|visibility)|tools|settings)/.test(item.path)).length, 0, "Prompt editing changed permissions or model settings");
+    });
+
+    await check("unknown custom Agent roles keep their body without a runtime guidance panel", async () => {
+      await page.goto(origin + "/system/agents/detail/?key=fixture_custom", { waitUntil: "networkidle" });
+      const bodyEditor = page.getByRole("textbox", { name: "提示词正文", exact: true });
+      await eventually(async () => (await bodyEditor.inputValue()) === agentFixtures.fixture_custom.prompt, "Custom Agent body did not load");
+      assert.equal(await page.getByTestId("agent-work-guidance").count(), 0);
+      assert.ok(!(await page.locator("body").innerText()).includes(AGENT_GUIDANCE_VERSION));
+      await page.getByRole("button", { name: "预览渲染", exact: true }).click();
+      const preview = page.getByRole("dialog");
+      await preview.getByText("FIXTURE_CUSTOM_ROLE_BODY", { exact: true }).waitFor();
+      assert.equal(await preview.getByTestId("agent-work-guidance").count(), 0);
+      await closeDialog();
+      assert.equal(agentFixtures.fixture_custom.versions.length, 1);
+    });
+
+    await check("Agent pages preserve zero browser exceptions, outbound traffic and unexpected API calls", async () => {
+      assert.equal(errors.length, 0, `Unexpected browser exceptions: ${errors.join("; ")}`);
+      assert.equal(blockedExternal.size, 0, `UI attempted outbound requests: ${[...blockedExternal].join(", ")}`);
+      assert.equal(unexpectedAPI.size, 0, `Unmocked API calls: ${[...unexpectedAPI].join(", ")}`);
+      assert.ok(await secretAbsent());
+    });
     fs.writeFileSync(path.join(artifacts, "result.json"), JSON.stringify({ passed: completed, requests: requests.map(({ method, path: endpoint, task }) => ({ method, path: endpoint, task })), outboundRequests: [...blockedExternal] }, null, 2));
-    console.log(`Credential UI smoke passed: ${completed.length} scenarios; artifacts contain synthetic fixtures only.`);
+    console.log(`Management UI smoke passed: ${completed.length} scenarios; artifacts contain synthetic fixtures only.`);
   } catch (error) {
     await page.screenshot({ path: path.join(artifacts, "credential-ui-failure.png"), fullPage: true }).catch(() => {});
     fs.writeFileSync(path.join(artifacts, "failure.json"), JSON.stringify({ passed: completed, error: error.message, browserErrors: errors, unexpectedAPI: [...unexpectedAPI], outboundRequests: [...blockedExternal] }, null, 2));

@@ -25,6 +25,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Markdown } from "@/components/markdown";
 import { api } from "@/lib/api";
+import { readAgentWorkGuidance, type AgentWorkGuidance } from "@/lib/agent-work-guidance";
 import { cn } from "@/lib/utils";
 import type { Agent, AgentDetail, AgentTrigger, MCPServer, PromptVar, PromptVersion, Settings, SkillItem, Tool } from "@/lib/types";
 
@@ -32,10 +33,37 @@ import type { Agent, AgentDetail, AgentTrigger, MCPServer, PromptVar, PromptVers
 // only usable when capture is on. Keep this list in sync with traffic.SeedToolMetas.
 const TRAFFIC_TOOL_KEYS = new Set(["traffic_search", "traffic_get"]);
 
+function AgentWorkGuidancePanel({ guidance }: { guidance: AgentWorkGuidance | undefined }) {
+  if (!guidance) return null;
+  return (
+    <details className="rounded-md border bg-muted/20 p-3" data-testid="agent-work-guidance">
+      <summary className="cursor-pointer text-sm font-medium">
+        运行时工作规范
+        <Badge variant="secondary" className="ml-2 align-middle font-mono text-[10px]">
+          {guidance.version || "版本未标记"}
+        </Badge>
+        <span className="ml-2 text-xs font-normal text-muted-foreground">只读 · 点击展开</span>
+      </summary>
+      <p className="mt-3 text-xs text-muted-foreground">
+        平台在运行时独立追加，升级时随程序更新；保留自定义提示词正文与历史版本。下一次运行生效，不改变当前运行，也不变更工具权限、范围与审批。
+      </p>
+      <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-background p-3 font-mono text-xs">
+        {guidance.text}
+      </pre>
+    </details>
+  );
+}
+
 // AgentEditor is the tabbed editor for one agent, used inside the agents-page
 // drawer (and reused full-page for deep links). Tabs: 配置与提示词 / MCP / Skill /
 // Tools. Config + prompt save as before; visibility + tool bindings toggle live.
 export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?: () => void }) {
+  // A role change owns a fresh state/request lifetime. Late loads or save
+  // callbacks from the previous role may never replace the new role's editor.
+  return <AgentEditorInner key={agentKey} agentKey={agentKey} onSaved={onSaved} />;
+}
+
+function AgentEditorInner({ agentKey, onSaved }: { agentKey: string; onSaved?: () => void }) {
   const [detail, setDetail] = React.useState<AgentDetail | null>(null);
   const [versions, setVersions] = React.useState<PromptVersion[]>([]);
   const [variables, setVariables] = React.useState<PromptVar[]>([]);
@@ -50,6 +78,8 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   const [mcpVisible, setMcpVisible] = React.useState<number[]>([]);
   const [skillVisible, setSkillVisible] = React.useState<string[]>([]);
   const [preview, setPreview] = React.useState("");
+  const [previewGuidance, setPreviewGuidance] = React.useState<AgentWorkGuidance | undefined>();
+  const previewGeneration = React.useRef(0);
   const [maxTurns, setMaxTurns] = React.useState("0");
   const [runSecs, setRunSecs] = React.useState("600");
   // "" = 跟随(未绑定)；否则为 profile id 字符串
@@ -112,11 +142,24 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
     reload();
   }, [reload]);
 
+  React.useEffect(() => {
+    previewGeneration.current++;
+    setPreview("");
+    setPreviewGuidance(undefined);
+    return () => { previewGeneration.current++; };
+  }, [agentKey]);
+
   async function doPreview() {
+    const generation = ++previewGeneration.current;
+    setPreview("正在渲染…");
+    setPreviewGuidance(undefined);
     try {
       const r = await api.previewAgentPrompt(agentKey, prompt);
+      if (generation !== previewGeneration.current) return;
       setPreview(r.error ? "渲染错误：" + r.error : r.rendered);
+      setPreviewGuidance(readAgentWorkGuidance(r));
     } catch (e) {
+      if (generation !== previewGeneration.current) return;
       setPreview("预览失败：" + (e as Error).message);
     }
   }
@@ -383,8 +426,16 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
             </div>
           </div>
 
-          <Textarea className="font-mono text-xs" rows={16} value={prompt}
-            placeholder="留空则使用内置默认提示词" onChange={(e) => setPrompt(e.target.value)} />
+          <div className="grid gap-2">
+            <Label htmlFor={`agent-prompt-${agentKey}`}>提示词正文</Label>
+            <Textarea id={`agent-prompt-${agentKey}`} className="font-mono text-xs" rows={16} value={prompt}
+              placeholder="留空则使用内置默认提示词" onChange={(e) => setPrompt(e.target.value)} />
+            <p className="text-muted-foreground text-xs">
+              “保存为新版本”仅保存此正文，不会把下方运行时工作规范写入正文或覆盖历史版本。
+            </p>
+          </div>
+
+          <AgentWorkGuidancePanel guidance={readAgentWorkGuidance(detail?.agent.key === agentKey ? detail : undefined)} />
 
           <div className="flex flex-wrap gap-2">
             <Dialog>
@@ -396,10 +447,16 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
               <DialogContent className="sm:max-w-2xl">
                 <DialogHeader>
                   <DialogTitle>渲染预览</DialogTitle>
-                  <DialogDescription>所有 {`{{.Var}}`} 已由后端用示例值替换。</DialogDescription>
+                  <DialogDescription>
+                    正文中的 {`{{.Var}}`} 已由后端用示例值替换，运行时工作规范独立展示；完整运行时还会加入工具和任务等上下文。
+                  </DialogDescription>
                 </DialogHeader>
                 <div className="max-h-[60vh] overflow-auto rounded-md border bg-muted/30 p-3">
+                  <h3 className="mb-2 text-sm font-medium">正文预览</h3>
                   <Markdown text={preview} />
+                  <div className="mt-4">
+                    <AgentWorkGuidancePanel guidance={previewGuidance} />
+                  </div>
                 </div>
               </DialogContent>
             </Dialog>

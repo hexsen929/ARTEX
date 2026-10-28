@@ -14,6 +14,7 @@ import type {
   Activity,
   Agent,
   AgentDetail,
+  AgentPromptPreview,
   AgentTrigger,
   ArchiveBatchItem,
   Asset,
@@ -1282,7 +1283,7 @@ export const api = {
   agentVariables: (key: string) =>
     get<{ variables: PromptVar[] }>(`/agents/${key}/variables`).then((r) => arr(r.variables)),
   previewAgentPrompt: (key: string, template: string, sample?: Record<string, string>) =>
-    post<{ rendered: string; error?: string }>(`/agents/${key}/prompt/preview`, { template, sample }),
+    post<AgentPromptPreview>(`/agents/${key}/prompt/preview`, { template, sample }),
   getAgentVisibility: (key: string) => get<{ mcp: number[]; skill: string[] }>(`/agents/${key}/visibility`),
   setAgentVisibility: (key: string, mcp: number[], skill: string[]) =>
     put<{ ok: boolean }>(`/agents/${key}/visibility`, { mcp, skill }),
