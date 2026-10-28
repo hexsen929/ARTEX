@@ -147,3 +147,64 @@ func TestSkillFrontmatterErrorsDoNotEchoPrivateInput(t *testing.T) {
 		t.Fatal("invalid string was accepted or echoed")
 	}
 }
+
+func TestDecodeSkillFrontmatterNameResolvesStringsQuotingAndAliases(t *testing.T) {
+	for _, tc := range []struct {
+		header string
+		want   string
+	}{
+		{"name: on\n", "on"},
+		{"name: \"on\"\n", "on"},
+		{"name: 'true'\n", "true"},
+		{"name: \"false\"\n", "false"},
+		{"name: \"null\"\n", "null"},
+		{"name: !!str 007\n", "007"},
+		{"name: \"中文-技能\"\n", "中文-技能"},
+		{"name: \"\\u4e2d\\u6587-\\u6280\\u80fd\"\n", "中文-技能"},
+		{"original: &skill-alias 'aliased-skill'\nname: *skill-alias\n", "aliased-skill"},
+		{"name: 'fixture-skill' # not part of the name\n", "fixture-skill"},
+	} {
+		content := []byte("---\r\n" + strings.ReplaceAll(tc.header, "\n", "\r\n") + "---\r\n# Untouched body\r\n")
+		before := bytes.Clone(content)
+		if got := decodeSkillFrontmatterName(content); got != tc.want {
+			t.Errorf("YAML name decode = %q, want %q", got, tc.want)
+		}
+		if !bytes.Equal(before, content) {
+			t.Fatal("name inspection changed the input file bytes")
+		}
+	}
+	// This is a decoder, not an authorization or filesystem-name validator.
+	if got := decodeSkillFrontmatterName([]byte("---\nname: '../not-a-safe-path'\n---\nBody\n")); got != "../not-a-safe-path" || validSkillName(got) {
+		t.Fatal("upload name safety validation was silently changed or bypassed")
+	}
+}
+
+func TestEncodedSkillNameRoundTripsIntoUploadDecoder(t *testing.T) {
+	for _, name := range []string{"on", "off", "true", "false", "null", "yes", "no", "中文-技能", "fixture-skill"} {
+		header, err := encodeSkillFrontmatter(name, "metadata: literal\nsecond line", "", "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := append(header, []byte("# Exact Markdown body\n")...)
+		if got := decodeSkillFrontmatterName(content); got != name || !validSkillName(got) {
+			t.Fatalf("encoder/upload name roundtrip = %q, want %q", got, name)
+		}
+	}
+}
+
+func TestDecodeSkillFrontmatterNameReturnsEmptyForMalformedOrAbsentName(t *testing.T) {
+	for _, content := range []string{
+		"# No frontmatter\n",
+		"---\nname: 'unterminated\n---\nBody\n",
+		"---\nname: [not, a, scalar]\n---\nBody\n",
+		"---\nname: *missing-alias\n---\nBody\n",
+		"---\nname: one\nname: two\n---\nBody\n",
+		"---\ndescription: no-name\n---\nBody\n",
+		"---\nname: fixture\n",
+		"---\nname: \"\\0\"\n---\nBody\n",
+	} {
+		if got := decodeSkillFrontmatterName([]byte(content)); got != "" {
+			t.Fatalf("invalid/absent YAML name produced %q", got)
+		}
+	}
+}

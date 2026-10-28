@@ -1333,23 +1333,7 @@ const (
 // skillNameFromFrontmatter extracts the `name:` value from a SKILL.md's YAML
 // frontmatter (the block between the first two `---` lines). "" if absent.
 func skillNameFromFrontmatter(md []byte) string {
-	lines := strings.Split(string(md), "\n")
-	inFM := false
-	for _, ln := range lines {
-		t := strings.TrimSpace(ln)
-		if t == "---" {
-			if !inFM {
-				inFM = true
-				continue
-			}
-			break // end of frontmatter
-		}
-		if inFM && strings.HasPrefix(t, "name:") {
-			v := strings.TrimSpace(strings.TrimPrefix(t, "name:"))
-			return strings.Trim(v, `"'`) // name: "中文技能" 也认
-		}
-	}
-	return ""
+	return decodeSkillFrontmatterName(md)
 }
 
 // fsUploadSkill installs a skill from an uploaded .zip. The archive must contain a

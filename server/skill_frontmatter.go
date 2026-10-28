@@ -75,6 +75,31 @@ func parseSkillFrontmatter(head []byte) (*yaml.Node, error) {
 	return mapping, nil
 }
 
+// decodeSkillFrontmatterName reads the YAML value rather than line syntax.
+// Quoting, escapes and aliases are resolved by the same parser as metadata
+// editing; path/name safety validation remains the upload caller's concern.
+func decodeSkillFrontmatterName(content []byte) string {
+	head, _, err := splitSkillFrontmatter(content)
+	if err != nil {
+		return ""
+	}
+	mapping, err := parseSkillFrontmatter(head)
+	if err != nil {
+		return ""
+	}
+	for i := 0; i < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value != "name" {
+			continue
+		}
+		var name string
+		if err := mapping.Content[i+1].Decode(&name); err != nil || !utf8.ValidString(name) || strings.ContainsRune(name, 0) {
+			return ""
+		}
+		return name
+	}
+	return ""
+}
+
 func skillMetadataString(value string) (*yaml.Node, error) {
 	if !utf8.ValidString(value) || strings.ContainsRune(value, 0) || len(value) > maxSkillIndexBytes {
 		return nil, errSkillFrontmatter
