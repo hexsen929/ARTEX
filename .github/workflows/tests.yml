@@ -107,6 +107,7 @@ jobs:
           go test -race ./agent -run 'Test(ChatProxyOverride|ChatPreservesParent|ConcurrentTaskChats)' -count=1 -timeout=3m
           go test -race ./server -run 'TestSideCheckpoint' -count=1 -timeout=3m
           go test -race ./agent -run 'Test(TaskAssociatedVerifierSideCapture|SideCaptureParent)' -count=1 -timeout=3m
+          go test -race ./agent ./llmguard -run 'Test(ResponsesError|StructuredProviderError|StructuredStatus|OnlyConcreteTransport|CancellationWinsOverStructured)' -count=1 -timeout=3m
 
   # Run frontend checks independently: backend compilation failures must not
   # hide TypeScript or UI regressions during a cross-cutting source port.

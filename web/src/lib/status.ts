@@ -36,7 +36,7 @@ const intent: Record<string, StatusMeta> = {
   running: { label: "执行中", tone: "blue" },
   paused: { label: "已暂停", tone: "amber" },
   done: { label: "已完成", tone: "green" },
-  // blocked = 模型/API/网络故障重试用尽，这条意图基本没真正探成（非目标拦截）。
+  // blocked = 本轮执行异常中断；原因和已有进展以错误详情、执行记录为准（非目标拦截）。
   blocked: { label: "执行出错", tone: "red" },
   // exhausted = 达到步数/时间预算被中途掐断、只写回部分结果（非方向已探尽）。
   exhausted: { label: "预算耗尽", tone: "violet" },
