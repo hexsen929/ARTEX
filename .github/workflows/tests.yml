@@ -7,8 +7,10 @@ on:
 permissions:
   contents: read
 jobs:
+  # Pin the validated image: ubuntu-latest now selects 26.04, which is not
+  # supported by the pinned Playwright browser runtime used below.
   tool-packaging:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +21,7 @@ jobs:
         run: python3 -m unittest discover -s packaging -p 'test_*.py'
 
   compile:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +46,7 @@ jobs:
           done
           exit "$failed"
   regression:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
       postgres:
@@ -112,7 +114,7 @@ jobs:
   # Run frontend checks independently: backend compilation failures must not
   # hide TypeScript or UI regressions during a cross-cutting source port.
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
