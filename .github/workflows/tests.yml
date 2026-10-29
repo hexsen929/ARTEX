@@ -7,8 +7,10 @@ on:
 permissions:
   contents: read
 jobs:
+  # Pin the validated image: ubuntu-latest now selects 26.04, which is not
+  # supported by the pinned Playwright browser runtime used below.
   tool-packaging:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +21,7 @@ jobs:
         run: python3 -m unittest discover -s packaging -p 'test_*.py'
 
   compile:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -43,8 +45,13 @@ jobs:
             rm -f "$scratch/package.test"
           done
           exit "$failed"
+      - name: Mac ARM64 application compile
+        run: |
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o "$scratch/artex" ./cmd/artex
   regression:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
       postgres:
@@ -107,11 +114,13 @@ jobs:
           go test -race ./agent -run 'Test(ChatProxyOverride|ChatPreservesParent|ConcurrentTaskChats)' -count=1 -timeout=3m
           go test -race ./server -run 'TestSideCheckpoint' -count=1 -timeout=3m
           go test -race ./agent -run 'Test(TaskAssociatedVerifierSideCapture|SideCaptureParent)' -count=1 -timeout=3m
+          go test -race ./agent ./llmguard -run 'Test(ResponsesError|StructuredProviderError|StructuredStatus|OnlyConcreteTransport|CancellationWinsOverStructured)' -count=1 -timeout=3m
+          go test -race ./server -run 'Test(RuntimeMerge|MergeScreenshot|MergeAutoTitle|MergeFindingSide)' -count=1 -timeout=3m
 
   # Run frontend checks independently: backend compilation failures must not
   # hide TypeScript or UI regressions during a cross-cutting source port.
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -123,7 +132,9 @@ jobs:
       - run: npm ci
         working-directory: web
       - name: Frontend unit tests
-        run: node --experimental-strip-types --test src/lib/*.test.mjs
+        run: |
+          node --experimental-strip-types --test src/lib/*.test.mjs
+          node --test src/lib/mock/*.test.cjs
         working-directory: web
       - run: npx tsc --noEmit
         working-directory: web
@@ -141,6 +152,12 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
           ARTEX_UI_ARTIFACTS: ${{ runner.temp }}/credential-ui-artifacts
         run: node scripts/credential-ui-smoke.cjs
+        working-directory: web
+      - name: Merged findings filters and report browser regressions
+        env:
+          ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
+        run: node scripts/newfindingmerge-ui-smoke.cjs
         working-directory: web
       - uses: actions/upload-artifact@v4
         if: always()

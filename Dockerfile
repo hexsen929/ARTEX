@@ -15,6 +15,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     fi \
     && apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates ripgrep curl wget vim git jq unzip \
+      tzdata \
       dnsutils iputils-ping netcat-openbsd inetutils-telnet whois nmap \
     && rm -rf /var/lib/apt/lists/*
 RUN set -eu; \
@@ -33,6 +34,7 @@ RUN npm config set registry "$NPM_REGISTRY" \
          PLAYWRIGHT_DOWNLOAD_HOST="$PLAYWRIGHT_DOWNLOAD_HOST" playwright install --with-deps chromium; \
        else playwright install --with-deps chromium; fi \
     && rm -rf /var/lib/apt/lists/*
+ENV TZ=Asia/Shanghai
 COPY dist/${TARGETARCH}/artex /app/artex
 WORKDIR /app
 COPY start.sh /app/start.sh

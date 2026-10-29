@@ -137,6 +137,48 @@ func TestTerminalTextNonAbortReasons(t *testing.T) {
 	}
 }
 
+func TestTerminalTextModelErrorDoesNotInventCauseOrRetryOutcome(t *testing.T) {
+	for _, message := range []string{
+		"openai-responses: stream error",
+		"openai-responses: server_error: upstream failed",
+		"401 invalid API key",
+		"429 rate limited",
+		"invalid request: unsupported parameter",
+	} {
+		t.Run(message, func(t *testing.T) {
+			trace := &runTrace{startedAt: time.Now().Add(-12 * time.Minute)}
+			trace.start("tu_1", "Read", `{"path":"fixture.txt"}`)
+			trace.done("tu_1")
+			term := &harness.Terminal{
+				Reason: harness.ReasonModelError,
+				Err:    errors.New(message),
+				Turns:  10,
+				Usage:  llm.Usage{InputTokens: 1200, OutputTokens: 340},
+			}
+			summary, detail := terminalText(context.Background(), term, trace)
+			for _, want := range []string{
+				"model_error", message, "已完成的工具调用和事实记录保留",
+				"不代表此前工作无效", "结合底层错误和执行过程", "get_worker_trace",
+				"10 轮模型回合", "本次运行耗时", "1200", "340", "已正常返回",
+			} {
+				if !strings.Contains(detail, want) {
+					t.Errorf("detail missing %q:\n%s", want, detail)
+				}
+			}
+			for _, unsupported := range []string{
+				"重试用尽", "传输层故障", "基本没真正探成", "未返回结果", "达到运行预算上限",
+			} {
+				if strings.Contains(summary, unsupported) || strings.Contains(detail, unsupported) {
+					t.Errorf("terminal text invented %q:\n%s", unsupported, detail)
+				}
+			}
+			if term.Reason != harness.ReasonModelError || term.Turns != 10 || term.Err.Error() != message {
+				t.Fatalf("rendering changed the terminal event: %+v", term)
+			}
+		})
+	}
+}
+
 func TestAbortCausesAreWellFormed(t *testing.T) {
 	all := []*AbortCause{
 		AbortPausedByUser, AbortPausedByOrchestrator, AbortTaskDeleted, AbortPausedOnReload,

@@ -36,12 +36,31 @@ func (s *Server) callbackHostForTunnel(adapter string) (string, error) {
 }
 
 func (s *Server) writeSettingsPayload(w http.ResponseWriter) {
+	pools, poolErr := s.m.WorkerPoolsChecked()
+	if poolErr != nil {
+		writeErr(w, http.StatusInternalServerError, "Worker 模型池读取失败；保留已有配置，请先修复设置")
+		return
+	}
+	workers := 0
+	for _, pool := range pools {
+		workers += pool.Workers
+	}
+	if len(pools) == 0 {
+		var err error
+		workers, err = s.m.WorkersChecked()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "Worker 并发设置读取失败；保留已有配置")
+			return
+		}
+	}
 	callback, err := s.callbackAddress()
 	if err != nil && callback.Source == "" {
 		writeErr(w, http.StatusInternalServerError, "回连地址读取失败："+err.Error())
 		return
 	}
 	payload := s.settingsPayload()
+	payload["worker_pools"] = pools
+	payload["workers"] = workers
 	payload["callback_addr"] = callback.Address
 	payload["callback_addr_source"] = callback.Source
 	payload["callback_addr_locked"] = callback.Locked

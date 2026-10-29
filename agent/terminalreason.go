@@ -35,7 +35,7 @@ var reasonHint = map[harness.TerminalReason]string{
 	harness.ReasonCompleted:         "模型正常结束了本轮，但没有留下文字总结；事实和资产以本轮工具调用记录为准",
 	harness.ReasonMaxTurns:          "达到步数上限(MaxTurns)：已进入收尾流程；是否成功保存以工具记录为准，不代表意图已完成",
 	harness.ReasonTimeout:           "达到单次运行的墙钟预算(MaxDuration)：到点停止新探索并尝试收尾；是否成功保存以工具记录为准，未完成部分保留待继续",
-	harness.ReasonModelError:        "模型或 API 调用失败（网络、鉴权、限流、供应商 5xx 等），重试用尽后意图标记为 blocked——传输层故障导致这条意图基本没真正探成；查其执行过程（get_worker_trace）后再决定重派或换法",
+	harness.ReasonModelError:        "模型或 API 调用异常，本轮已中断；已完成的工具调用和事实记录保留，不代表此前工作无效；请结合底层错误和执行过程（get_worker_trace）判断原因与后续处理",
 	harness.ReasonBlockingLimit:     "上下文长度达到硬上限，请求在发出前被拦截；应收窄意图粒度或压缩工具返回",
 	harness.ReasonPromptTooLong:     "提示词过长且上下文压缩重试已经用尽，无法继续执行",
 	harness.ReasonImageError:        "当前模型不支持本轮多模态内容；请切换支持视觉的模型或避免工具返回图片",

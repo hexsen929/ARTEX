@@ -539,9 +539,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     timeout_seconds INTEGER NOT NULL DEFAULT 0,
     plan_heartbeat_seconds INTEGER NOT NULL DEFAULT 300,
     coverage_enabled BOOLEAN NOT NULL DEFAULT true,
+    worker_count   INTEGER NOT NULL DEFAULT 0, -- 0=用全局默认 workers
     pinned_at      TIMESTAMPTZ,
     first_run_at   TIMESTAMPTZ,
     deadline_at    TIMESTAMPTZ,
+    active_run_seconds BIGINT NOT NULL DEFAULT 0,
+    run_segment_started_at TIMESTAMPTZ,
     archived_at    TIMESTAMPTZ,
     deleted_at     TIMESTAMPTZ,
     completed_at   TIMESTAMPTZ,
@@ -561,6 +564,8 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued BOOLEAN NOT NULL DEFAULT false
 -- 给 agent 开放 add_task_scope/list_untested_assets;false=全部关闭(见 task_scope.go)。
 -- 存量任务默认 true 保持原行为;company 关联(task_scope kind=company)不受此开关影响。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS coverage_enabled BOOLEAN NOT NULL DEFAULT true;
+-- 任务级 Worker 运行数量;0=用全局默认(settings.workers)。补旧库。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS worker_count INTEGER NOT NULL DEFAULT 0;
 -- queued_at makes admission FIFO reflect the actual enqueue order rather than the
 -- task creation order. queue_mode distinguishes first bootstrap from resuming an
 -- exploration that already owns goals/history.
@@ -574,6 +579,8 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_chain_revision BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_run_seconds BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS run_segment_started_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_tasks_category ON tasks(category_id, created_at DESC)
     WHERE deleted_at IS NULL AND category_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_pinned ON tasks(pinned_at DESC)
@@ -632,16 +639,21 @@ CREATE TABLE IF NOT EXISTS task_templates (
     nkey        TEXT NOT NULL UNIQUE,
     description TEXT NOT NULL,
     goal        TEXT NOT NULL,
+    remark      TEXT NOT NULL DEFAULT '',
     -- 预设的任务分类；分类删除时置空（与 tasks.category_id 一致，不阻断）。
     category_id     BIGINT REFERENCES task_categories(id) ON DELETE SET NULL,
     -- 预设的任务级拦截/允许规则快照(AssetInterceptRuleInput 数组)；应用模板时灌进新任务。
     intercept_rules JSONB NOT NULL DEFAULT '[]',
+    -- 预设的任务级 Worker 运行数量;0=用全局默认。
+    worker_count INTEGER NOT NULL DEFAULT 0,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- 补旧库(已发版,加列带 IF NOT EXISTS)。
 ALTER TABLE task_templates ADD COLUMN IF NOT EXISTS category_id BIGINT REFERENCES task_categories(id) ON DELETE SET NULL;
 ALTER TABLE task_templates ADD COLUMN IF NOT EXISTS intercept_rules JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE task_templates ADD COLUMN IF NOT EXISTS remark TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_templates ADD COLUMN IF NOT EXISTS worker_count INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_task_templates_updated ON task_templates(updated_at DESC, id DESC);
 DROP TRIGGER IF EXISTS trg_task_templates_upd ON task_templates;
 CREATE TRIGGER trg_task_templates_upd BEFORE UPDATE ON task_templates
@@ -1560,6 +1572,54 @@ CREATE TABLE IF NOT EXISTS finding_case_suggestions (
     UNIQUE(left_id,right_id),
     CHECK(left_id < right_id)
 );
+-- A suggestion is a group.  left_id/right_id remain compatibility anchors for
+-- old clients and are kept at the two smallest surviving member ids.
+ALTER TABLE finding_case_suggestions DROP CONSTRAINT IF EXISTS finding_case_suggestions_left_id_right_id_key;
+CREATE TABLE IF NOT EXISTS finding_case_suggestion_members (
+    suggestion_id BIGINT NOT NULL REFERENCES finding_case_suggestions(id) ON DELETE CASCADE,
+    finding_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    PRIMARY KEY (suggestion_id, finding_id)
+);
+CREATE INDEX IF NOT EXISTS idx_finding_case_suggestion_members_finding
+    ON finding_case_suggestion_members(finding_id);
+INSERT INTO finding_case_suggestion_members(suggestion_id, finding_id)
+    SELECT id, left_id FROM finding_case_suggestions ON CONFLICT DO NOTHING;
+INSERT INTO finding_case_suggestion_members(suggestion_id, finding_id)
+    SELECT id, right_id FROM finding_case_suggestions ON CONFLICT DO NOTHING;
+-- Anchors have cascading foreign keys.  Re-anchor a group before an anchor
+-- finding is deleted so a 3+ member suggestion survives the cascade.
+CREATE OR REPLACE FUNCTION finding_case_suggestion_reanchor() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    sid BIGINT;
+    new_left BIGINT;
+    new_right BIGINT;
+BEGIN
+    FOR sid IN
+        SELECT id FROM finding_case_suggestions
+        WHERE left_id = OLD.id OR right_id = OLD.id
+    LOOP
+        SELECT min(m.finding_id) INTO new_left
+        FROM finding_case_suggestion_members m
+        JOIN findings f ON f.id = m.finding_id
+        WHERE m.suggestion_id = sid AND m.finding_id <> OLD.id;
+        SELECT min(m.finding_id) INTO new_right
+        FROM finding_case_suggestion_members m
+        JOIN findings f ON f.id = m.finding_id
+        WHERE m.suggestion_id = sid AND m.finding_id <> OLD.id
+          AND m.finding_id > new_left;
+        IF new_left IS NOT NULL AND new_right IS NOT NULL THEN
+            UPDATE finding_case_suggestions
+            SET left_id = new_left, right_id = new_right
+            WHERE id = sid;
+        END IF;
+    END LOOP;
+    RETURN OLD;
+END $$;
+DROP TRIGGER IF EXISTS finding_case_suggestion_reanchor ON findings;
+CREATE TRIGGER finding_case_suggestion_reanchor
+BEFORE DELETE ON findings FOR EACH ROW
+EXECUTE FUNCTION finding_case_suggestion_reanchor();
 -- Rejected/detached pairs are a durable human veto, also checked on group unions.
 CREATE TABLE IF NOT EXISTS finding_case_blocks (
     left_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,

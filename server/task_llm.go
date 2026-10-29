@@ -28,6 +28,7 @@ type taskAgentBundle struct {
 	pl             *agent.Planner
 	wk             *agent.Worker
 	main           *agent.MainAgent
+	pinnedWorkers  map[int64]*agent.Worker
 }
 
 type llmAuditProfile struct {
@@ -49,9 +50,10 @@ type llmActivityMetadata struct {
 }
 
 type taskLLMRuntime struct {
-	s        *Server
-	taskID   string
-	agentKey string
+	s            *Server
+	taskID       string
+	agentKey     string
+	pinProfileID *int64
 }
 
 type taskLLMError struct {
@@ -102,13 +104,27 @@ type taskLLMStreamHooks struct {
 	transition func(taskLLMSelection, db.TaskLLMTransition, error)
 }
 
-// current resolves the provider this role runs on, by precedence:
-// Agent 绑定 → 任务 LLM 配置链 → 全局/环境配置。
+// current resolves the provider this role runs on. Pinned workers use only their
+// assigned profile; legacy task agents use Agent 绑定 → 任务 LLM 配置链 → 全局/环境配置.
 // 绑定优先于任务链：某个角色被显式指定了模型，就一直跑在那个模型上；绑定不存在或
 // 构建失败时才降级到任务链，任务链为空时再降级到全局配置。
 // 返回的 profile id 只有走任务链时才非零 —— streamTaskLLM 以此判断额度错误是否
 // 应该推进任务的故障转移状态（绑定/全局路径不改任务链状态，沿用既有语义）。
 func (r *taskLLMRuntime) current() (taskLLMSelection, error) {
+	if r.pinProfileID != nil {
+		// Pinned worker runtimes are exclusive: resolve their profile before
+		// touching bindings or the task failover state. A missing or invalid
+		// profile is an error, never an invitation to use another model.
+		prov, cfg, ok := r.s.providerForProfile(*r.pinProfileID)
+		if !ok {
+			// A profile can disappear between slot admission and a later model
+			// turn. Mark the router-owned failure so the engine cannot replay a
+			// whole intent that may already have executed tools on prior turns.
+			return taskLLMSelection{}, &taskLLMError{taskID: r.taskID, cause: fmt.Errorf("LLM profile #%d is missing or invalid", *r.pinProfileID)}
+		}
+		t, _ := r.s.m.Task(r.taskID)
+		return taskLLMSelection{task: t, provider: prov, retry: cfg.Retry}, nil
+	}
 	taskNum, err := parseTaskID(r.taskID)
 	if err != nil {
 		return taskLLMSelection{}, err
@@ -153,6 +169,10 @@ func (r *taskLLMRuntime) current() (taskLLMSelection, error) {
 // the caller. If failover switches profiles, the change takes effect on the next
 // agent run (a fresh Session is built per run in captureRun).
 func (r *taskLLMRuntime) activeCfg() (agent.Config, bool) {
+	if r.pinProfileID != nil {
+		_, cfg, ok := r.s.providerForProfile(*r.pinProfileID)
+		return cfg, ok
+	}
 	taskNum, err := parseTaskID(r.taskID)
 	if err != nil {
 		return agent.Config{}, false
@@ -444,6 +464,12 @@ func isRetryableStreamError(err error) bool {
 // CompactionWindow mirrors current()'s precedence so the context window always
 // matches the provider the role will actually stream on.
 func (r *taskLLMRuntime) CompactionWindow() int {
+	if r.pinProfileID != nil {
+		if _, cfg, ok := r.s.providerForProfile(*r.pinProfileID); ok {
+			return cfg.CompactionWindow()
+		}
+		return (agent.Config{}).CompactionWindow()
+	}
 	if _, cfg, ok := r.s.agentBindingProvider(r.agentKey); ok {
 		return cfg.CompactionWindow()
 	}
@@ -552,18 +578,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	window := workerRuntime.CompactionWindow()
 	wk := agent.NewWorker(workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns("worker"))
-	wk.SetFindingRecorder(s.evidenceStore())
-	wk.SetCompactionWindowResolver(workerRuntime.CompactionWindow)
-	wk.SetNonStreaming(workerRuntime.nonStreaming) // 按任务当前激活 profile 的流式开关(每轮读)
-	wk.SetMaxTokens(workerRuntime.maxTokens)       // 同上,输出上限也跟随当前激活 profile
-	wk.SetNoaEnabled(s.m.NoaCompactionEnabled)     // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
-	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
-	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
-	wk.SetTaskProxyResolverChecked(s.m.TaskProxyForTaskChecked) // route failures stop this run instead of silently changing egress
-	wk.SetWebSearch(s.webSearchFor("worker"))
-	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
-	wk.SetIntranetResolver(s.taskIntranet)           // 期 4:内网期(立足点/隧道)切 worker.intranet 提示词变体
-	wk.SetUAResolver(s.uaForTask)                    // 批 5 B4:按任务稳定分配的客户端 UA → BashEnv ARTEX_UA
+	s.configureTaskWorker(wk, workerRuntime)
 	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetFindingRecorder(s.evidenceStore())
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
@@ -595,10 +610,62 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	main.SetGuard(s.agentGuard()) // 审批门:mainagent 的工具调用同样过 PreToolUse 拦截
 	bundle := &taskAgentBundle{
 		runtime: goalRuntime, plannerRuntime: plannerRuntime, workerRuntime: workerRuntime,
-		mainRuntime: mainRuntime, pl: pl, wk: wk, main: main,
+		mainRuntime: mainRuntime, pl: pl, wk: wk, main: main, pinnedWorkers: map[int64]*agent.Worker{},
 	}
 	s.taskAgents[t.ID] = bundle
 	return bundle
+}
+
+// configureTaskWorker keeps legacy and profile-pinned workers on the same
+// task routing, authorization and prompt-variant path. Pool selection changes
+// only the model; it must not bypass task proxy failures or lose task context.
+func (s *Server) configureTaskWorker(wk *agent.Worker, runtime *taskLLMRuntime) {
+	wk.SetFindingRecorder(s.evidenceStore())
+	wk.SetCompactionWindowResolver(runtime.CompactionWindow)
+	wk.SetNonStreaming(runtime.nonStreaming)   // 按任务当前激活 profile 的流式开关(每轮读)
+	wk.SetMaxTokens(runtime.maxTokens)         // 同上,输出上限也跟随当前激活 profile
+	wk.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
+	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
+	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	wk.SetTaskProxyResolverChecked(s.m.TaskProxyForTaskChecked) // route failures stop this run instead of silently changing egress
+	wk.SetWebSearch(s.webSearchFor("worker"))
+	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
+	wk.SetIntranetResolver(s.taskIntranet)           // 期 4:内网期(立足点/隧道)切 worker.intranet 提示词变体
+	wk.SetUAResolver(s.uaForTask)                    // 批 5 B4:按任务稳定分配的客户端 UA → BashEnv ARTEX_UA
+}
+
+func (s *Server) workerForTaskSlot(t *Task, slot WorkerSlot) (*agent.Worker, error) {
+	if slot.ProfileID <= 0 {
+		return nil, errors.New("worker slot is not pinned")
+	}
+	_, cfg, ok := s.providerForProfile(slot.ProfileID)
+	if !ok {
+		return nil, fmt.Errorf("LLM profile #%d is missing or invalid", slot.ProfileID)
+	}
+	s.taskAgentMu.Lock()
+	bundle := s.taskAgents[t.ID]
+	s.taskAgentMu.Unlock()
+	if bundle == nil {
+		bundle = s.agentsForTask(t)
+	}
+	s.taskAgentMu.Lock()
+	defer s.taskAgentMu.Unlock()
+	if current := s.taskAgents[t.ID]; current != nil {
+		bundle = current
+	}
+	if bundle.pinnedWorkers == nil {
+		bundle.pinnedWorkers = make(map[int64]*agent.Worker)
+	}
+	if worker := bundle.pinnedWorkers[slot.ProfileID]; worker != nil {
+		return worker, nil
+	}
+	id := slot.ProfileID
+	runtime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "worker", pinProfileID: &id}
+	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
+	worker := agent.NewWorker(runtime, cfg.Model, s.m.dir, tx, runtime.CompactionWindow(), s.agentMaxTurns("worker"))
+	s.configureTaskWorker(worker, runtime)
+	bundle.pinnedWorkers[id] = worker
+	return worker, nil
 }
 
 func (s *Server) syncTaskLLMState(pt *db.Task) {

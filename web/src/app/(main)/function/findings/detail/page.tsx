@@ -5,11 +5,13 @@ import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
-import { ArrowLeftIcon, ArrowUpRightIcon, ShieldAlertIcon } from "lucide-react";
+import { ArrowLeftIcon, ArrowUpRightIcon, BotIcon, FileTextIcon, Loader2Icon, ShieldAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
+import { FindingAutoChat } from "@/components/finding-auto-chat";
 import { FindingInlineHistory } from "@/components/finding-inline-history";
+import { FindingReproductionPanel } from "@/components/finding-reproduction-panel";
 import { FindingRetestPanel } from "@/components/finding-retest-panel";
 import { FindingVerificationEditor, FindingVerificationBadge } from "@/components/finding-verification";
 import { FindingTrafficPanel } from "@/components/finding-traffic-panel";
@@ -46,6 +48,12 @@ function fmtTime(ts: string) {
   return new Date(ts).toLocaleString("zh-CN");
 }
 
+function usesStructuredReproduction(report: string) {
+  return (
+    /^##\s+(?:复现步骤|测试过程|复现过程)\s*$/im.test(report) && /^\s*(?:###\s*)?步骤\s*\d+[.、:：)）]/im.test(report)
+  );
+}
+
 // FieldRow is one label/value line in the right-hand status panel.
 function FieldRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -60,66 +68,110 @@ function FindingDetailInner() {
   const searchParams = useSearchParams();
   const id = searchParams.get("id") ?? "";
   const contextTaskId = searchParams.get("context_task") ?? "";
+  const backHref = contextTaskId ? `/function/tasks/detail?id=${contextTaskId}&tab=findings` : "/function/findings";
   const [finding, setFinding] = React.useState<Finding | null>(null);
+  const [loadedScope, setLoadedScope] = React.useState("");
   const [loaded, setLoaded] = React.useState(false);
   const [tab, setTab] = React.useState("overview");
+  const [reportGenerating, setReportGenerating] = React.useState(false);
+  const [autoChatOpen, setAutoChatOpen] = React.useState(false);
+  const scopeKey = JSON.stringify([id, contextTaskId]);
+  const activeScope = React.useRef(scopeKey);
+  const loadSequence = React.useRef(0);
+  activeScope.current = scopeKey;
+  const title = finding?.name || finding?.vulnclass || "未分类";
 
   const load = React.useCallback(() => {
+    const requestedScope = JSON.stringify([id, contextTaskId]);
+    if (activeScope.current !== requestedScope) return;
+    const sequence = ++loadSequence.current;
+    const isCurrent = () => sequence === loadSequence.current && activeScope.current === requestedScope;
     if (!id) {
+      setLoadedScope(requestedScope);
       setLoaded(true);
       return;
     }
     api
       .getFinding(id, contextTaskId || undefined)
-      .then((f) => setFinding(f))
-      .catch(() => setFinding(null))
-      .finally(() => setLoaded(true));
+      .then((f) => { if (isCurrent()) setFinding(f); })
+      .catch(() => { if (isCurrent()) setFinding(null); })
+      .finally(() => {
+        if (isCurrent()) {
+          setLoadedScope(requestedScope);
+          setLoaded(true);
+        }
+      });
   }, [contextTaskId, id]);
   React.useEffect(() => {
+    setFinding(null);
+    setLoaded(false);
     load();
+    return () => { loadSequence.current++; };
   }, [load]);
+  const updateFinding = React.useCallback((updated: Finding) => {
+    if (activeScope.current === scopeKey) setFinding(updated);
+  }, [scopeKey]);
 
   const changeSeverity = React.useCallback(
     async (next: Severity) => {
       if (!finding || finding.inherited || next === finding.severity) return;
+      const requestedScope = scopeKey;
       const prev = finding.severity;
       setFinding({ ...finding, severity: next });
       try {
         const updated = await api.setFindingSeverity(id, next);
-        setFinding(updated);
+        if (activeScope.current === requestedScope) setFinding(updated);
         toast.success(`严重等级已改为「${statusMeta("severity", next).label}」`);
       } catch (e) {
-        setFinding((cur) => (cur ? { ...cur, severity: prev } : cur));
+        if (activeScope.current === requestedScope) setFinding((cur) => (cur ? { ...cur, severity: prev } : cur));
         toast.error("更新失败：" + (e as Error).message);
       }
     },
-    [finding, id],
+    [finding, id, scopeKey],
   );
 
   const changeStatus = React.useCallback(
     async (next: FindingStatus) => {
       if (!finding || finding.inherited || next === finding.status) return;
+      const requestedScope = scopeKey;
       const prev = finding.status;
       setFinding({ ...finding, status: next });
       try {
         const updated = await api.setFindingStatus(id, next);
-        setFinding(updated);
+        if (activeScope.current === requestedScope) setFinding(updated);
         toast.success(`处理状态已改为「${statusMeta("finding", next).label}」`);
       } catch (e) {
-        setFinding((cur) => (cur ? { ...cur, status: prev } : cur));
+        if (activeScope.current === requestedScope) setFinding((cur) => (cur ? { ...cur, status: prev } : cur));
         toast.error("更新失败：" + (e as Error).message);
       }
     },
-    [finding, id],
+    [finding, id, scopeKey],
   );
 
-  if (!finding) {
+  const generateReport = React.useCallback(async () => {
+    if (!finding || finding.inherited || reportGenerating) return;
+    setReportGenerating(true);
+    try {
+      await api.generateFindingReport(id);
+      toast.success("已提交生成请求，报告 Agent 将补全步骤与详细报告");
+      // The reporter runs asynchronously. Refresh once after it has had a
+      // chance to persist the report, while keeping the button available if
+      // the run is delayed or interrupted.
+      window.setTimeout(() => void load(), 2000);
+    } catch (e) {
+      toast.error("提交生成请求失败：" + (e as Error).message);
+    } finally {
+      setReportGenerating(false);
+    }
+  }, [finding, id, load, reportGenerating]);
+
+  if (!finding || loadedScope !== scopeKey) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-10 text-center">
-        <p className="text-muted-foreground">{loaded ? `未找到发现 ${id}` : "加载中…"}</p>
-        {loaded && (
+        <p className="text-muted-foreground">{loaded && loadedScope === scopeKey ? `未找到发现 ${id}` : "加载中…"}</p>
+        {loaded && loadedScope === scopeKey && (
           <Button asChild variant="outline">
-            <Link href="/function/findings">
+            <Link href={backHref}>
               <ArrowLeftIcon /> 返回发现列表
             </Link>
           </Button>
@@ -128,16 +180,21 @@ function FindingDetailInner() {
     );
   }
 
-  const title = finding.name || finding.vulnclass || "未分类";
+  const structuredReproduction = usesStructuredReproduction(finding.report || "");
+  // Inherited viewing context is not an execution/analysis grant. Bind the
+  // read-only question to the finding's actual source task, checked by the server.
+  const analysisTaskId = finding.source_task_id || finding.task_id || "";
+  const canAnalyze = /^\d+$/.test(analysisTaskId) && Number.isSafeInteger(Number(analysisTaskId)) && Number(analysisTaskId) > 0;
 
   return (
-    <Tabs value={tab} onValueChange={setTab} className="flex flex-1 flex-col gap-0">
+    <>
+      <Tabs value={tab} onValueChange={setTab} className="flex flex-1 flex-col gap-0">
       {/* Sticky header */}
       <header className="sticky top-0 z-10 flex flex-col gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur lg:px-6">
         <div className="flex flex-wrap items-center gap-2">
           <SidebarTrigger className="-ml-1" />
           <Button asChild variant="ghost" size="icon" className="size-7">
-            <Link href="/function/findings">
+            <Link href={backHref}>
               <ArrowLeftIcon />
             </Link>
           </Button>
@@ -159,6 +216,17 @@ function FindingDetailInner() {
           <FindingVerificationBadge finding={finding} />
           <StatusBadge domain="severity" value={finding.severity} dot />
           <StatusBadge domain="finding" value={finding.status} dot />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setAutoChatOpen(true)}
+            disabled={!canAnalyze}
+            title={canAnalyze ? "只读分析当前任务关联的发现，不执行工具" : "缺少有效任务关联，发现分析暂不可用"}
+          >
+            <BotIcon data-icon="inline-start" />
+            询问 Auto Agent（只读）
+          </Button>
+          {!canAnalyze ? <span className="text-muted-foreground text-xs">无任务关联，分析入口不可用</span> : null}
           {finding.inherited && finding.source_task_id && (
             <Badge variant="outline">来源任务 #{finding.source_task_id} · 只读</Badge>
           )}
@@ -184,13 +252,16 @@ function FindingDetailInner() {
                   <p className="text-sm leading-relaxed whitespace-pre-wrap">{finding.summary || "（无摘要）"}</p>
                 </CardContent>
               </Card>
-              <FindingRetestPanel key={`retest:${id}`} findingId={id} readOnly={finding.inherited} onCompleted={load} />
               {finding.finding_id ? (
                 <FindingInlineHistory
                   key={`inline-history:${finding.finding_id}:${finding.evidence_version ?? 0}`}
                   findingId={finding.finding_id}
                 />
               ) : null}
+              {structuredReproduction ? (
+                <FindingReproductionPanel key={`reproduction:${scopeKey}`} finding={finding} contextTask={contextTaskId || undefined} />
+              ) : null}
+              {/* 结构化步骤是辅助视图，原始证据、流量管理和完整报告始终保留。 */}
               <Card>
                 <CardHeader>
                   <CardTitle className="text-sm">证据 / PoC</CardTitle>
@@ -216,7 +287,25 @@ function FindingDetailInner() {
               <Card>
                 <CardHeader className="flex-row items-center justify-between">
                   <CardTitle className="text-sm">详细报告</CardTitle>
-                  {finding.report && <CopyButton text={finding.report} successMessage="已复制详细报告" />}
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    {finding.report && <CopyButton text={finding.report} successMessage="已复制详细报告" />}
+                    {!finding.inherited ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void generateReport()}
+                        disabled={reportGenerating}
+                        title="由报告撰写 Agent 生成，不使用 Auto Agent"
+                      >
+                        {reportGenerating ? (
+                          <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                        ) : (
+                          <FileTextIcon data-icon="inline-start" />
+                        )}
+                        {finding.report ? "重新生成步骤与报告" : "生成步骤与报告"}
+                      </Button>
+                    ) : null}
+                  </div>
                 </CardHeader>
                 <CardContent>
                   {finding.report_stale ? (
@@ -234,42 +323,43 @@ function FindingDetailInner() {
             </div>
 
             {/* 右栏：状态区 */}
-            <Card className="h-fit lg:sticky lg:top-24">
-              <CardHeader>
-                <CardTitle className="text-sm">状态</CardTitle>
-              </CardHeader>
-              <CardContent className="divide-y">
-                {/* 漏洞 ID */}
-                <FieldRow label="漏洞 ID">
-                  <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
-                    #{finding.id}
-                  </code>
-                </FieldRow>
+            <div className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-24 lg:self-start">
+              <Card className="h-fit">
+                <CardHeader>
+                  <CardTitle className="text-sm">状态</CardTitle>
+                </CardHeader>
+                <CardContent className="divide-y">
+                  {/* 漏洞 ID */}
+                  <FieldRow label="漏洞 ID">
+                    <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+                      #{finding.id}
+                    </code>
+                  </FieldRow>
 
-                {/* 严重等级 */}
-                <FieldRow label="严重等级">
-                  {finding.inherited ? (
-                    <StatusBadge domain="severity" value={finding.severity} dot />
-                  ) : (
-                    <Select value={finding.severity} onValueChange={(v) => changeSeverity(v as Severity)}>
-                      <SelectTrigger size="sm" className="h-7 w-auto border-none px-1 shadow-none focus-visible:ring-0">
-                        <StatusBadge domain="severity" value={finding.severity} dot />
-                      </SelectTrigger>
-                      <SelectContent position="popper" align="end">
-                        <SelectGroup>
-                          {SEVERITIES.map((sv) => (
-                            <SelectItem key={sv} value={sv}>
-                              {statusMeta("severity", sv).label}
-                            </SelectItem>
-                          ))}
-                        </SelectGroup>
-                      </SelectContent>
-                    </Select>
-                  )}
-                </FieldRow>
+                  {/* 严重等级 */}
+                  <FieldRow label="严重等级">
+                    {finding.inherited ? (
+                      <StatusBadge domain="severity" value={finding.severity} dot />
+                    ) : (
+                      <Select value={finding.severity} onValueChange={(v) => changeSeverity(v as Severity)}>
+                        <SelectTrigger size="sm" className="h-7 w-auto border-none px-1 shadow-none focus-visible:ring-0">
+                          <StatusBadge domain="severity" value={finding.severity} dot />
+                        </SelectTrigger>
+                        <SelectContent position="popper" align="end">
+                          <SelectGroup>
+                            {SEVERITIES.map((sv) => (
+                              <SelectItem key={sv} value={sv}>
+                                {statusMeta("severity", sv).label}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                    )}
+                  </FieldRow>
 
                 <FieldRow label="验证状态">
-                  <FindingVerificationEditor finding={finding} onUpdated={setFinding} />
+                  <FindingVerificationEditor finding={finding} onUpdated={updateFinding} />
                 </FieldRow>
 
                 {/* 处理状态 */}
@@ -294,56 +384,63 @@ function FindingDetailInner() {
                   )}
                 </FieldRow>
 
-                {/* 漏洞类型 */}
-                <FieldRow label="漏洞类型">
-                  {finding.vulnclass ? (
-                    <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">{finding.vulnclass}</code>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )}
-                </FieldRow>
+                  {/* 漏洞类型 */}
+                  <FieldRow label="漏洞类型">
+                    {finding.vulnclass ? (
+                      <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">{finding.vulnclass}</code>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </FieldRow>
 
-                {/* 涉及资产 */}
-                <FieldRow label="涉及资产">
-                  {finding.assets && finding.assets.length > 0 ? (
-                    <div className="flex flex-wrap justify-end gap-1">
-                      {finding.assets.map((a) => (
-                        <code
-                          key={a.id}
-                          className="max-w-[16rem] truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
-                          title={`${a.type} · ${a.label}`}
-                        >
-                          {a.label}
-                        </code>
-                      ))}
-                    </div>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )}
-                </FieldRow>
+                  {/* 涉及资产 */}
+                  <FieldRow label="涉及资产">
+                    {finding.assets && finding.assets.length > 0 ? (
+                      <div className="flex flex-wrap justify-end gap-1">
+                        {finding.assets.map((a) => (
+                          <code
+                            key={a.id}
+                            className="max-w-[16rem] truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
+                            title={`${a.type} · ${a.label}`}
+                          >
+                            {a.label}
+                          </code>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </FieldRow>
 
-                {/* 所属任务 */}
-                <FieldRow label="所属任务">
-                  {finding.task_id ? (
-                    <Link
-                      href={`/function/tasks/detail?id=${finding.task_id}`}
-                      className="inline-flex max-w-[16rem] items-center gap-1 text-primary hover:underline"
-                      title={finding.task_description}
-                    >
-                      <span className="truncate">{finding.task_description || `#${finding.task_id}`}</span>
-                      <ArrowUpRightIcon className="size-3 shrink-0" />
-                    </Link>
-                  ) : (
-                    <span className="text-muted-foreground">—（任务已删除）</span>
-                  )}
-                </FieldRow>
+                  {/* 所属任务 */}
+                  <FieldRow label="所属任务">
+                    {finding.task_id ? (
+                      <Link
+                        href={`/function/tasks/detail?id=${finding.task_id}`}
+                        className="inline-flex max-w-[16rem] items-center gap-1 text-primary hover:underline"
+                        title={finding.task_description}
+                      >
+                        <span className="truncate">{finding.task_description || `#${finding.task_id}`}</span>
+                        <ArrowUpRightIcon className="size-3 shrink-0" />
+                      </Link>
+                    ) : (
+                      <span className="text-muted-foreground">—（任务已删除）</span>
+                    )}
+                  </FieldRow>
 
-                {/* 发现时间 */}
-                <FieldRow label="发现时间">
-                  <span className="tabular-nums">{fmtTime(finding.ts)}</span>
-                </FieldRow>
-              </CardContent>
-            </Card>
+                  {/* 发现时间 */}
+                  <FieldRow label="发现时间">
+                    <span className="tabular-nums">{fmtTime(finding.ts)}</span>
+                  </FieldRow>
+                </CardContent>
+              </Card>
+              <FindingRetestPanel
+                key={`retest:${id}`}
+                findingId={id}
+                readOnly={finding.inherited}
+                onCompleted={load}
+              />
+            </div>
           </div>
         </TabsContent>
 
@@ -352,7 +449,16 @@ function FindingDetailInner() {
           <FindingLineageView findingId={finding.id} />
         </TabsContent>
       </div>
-    </Tabs>
+      </Tabs>
+      <FindingAutoChat
+        key={`auto-chat:${scopeKey}`}
+        taskId={analysisTaskId}
+        findingId={finding.id}
+        findingTitle={title}
+        open={autoChatOpen}
+        onOpenChange={setAutoChatOpen}
+      />
+    </>
   );
 }
 

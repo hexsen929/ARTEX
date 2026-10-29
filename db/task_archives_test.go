@@ -132,7 +132,9 @@ func TestTaskArchiveDatabaseRoundTrip(t *testing.T) {
 	if err := d.EnsureLLMUsageTable(); err != nil {
 		t.Fatal(err)
 	}
-	task, err := d.CreateTaskWithOptions("archive database roundtrip", "restore exact graph", TaskCreateOptions{Name: "cold task"})
+	task, err := d.CreateTaskWithOptions("archive database roundtrip", "restore exact graph", TaskCreateOptions{
+		Name: "cold task", WorkerCount: 7,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,6 +170,11 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 		_, _ = d.Exec(`DELETE FROM companies WHERE id=$1`, companyID)
 	}()
 	if err := d.SetPaused(task.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	// Runtime accounting is data too: preserve the accumulated time in the
+	// package, never leave an open execution segment on a cold/restored task.
+	if _, err := d.Exec(`UPDATE tasks SET active_run_seconds=37 WHERE id=$1`, task.ID); err != nil {
 		t.Fatal(err)
 	}
 	assetID, err := d.Assets().UpsertRootDomain(UpsertRootDomainReq{Domain: fmt.Sprintf("archive-%d.example", task.ID), TaskID: task.ID})
@@ -297,7 +304,7 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if err != nil || live == nil {
 		t.Fatalf("restored task = %+v, %v", live, err)
 	}
-	if live.Name != "cold task" || live.Remark != remark || !live.Paused {
+	if live.Name != "cold task" || live.Remark != remark || live.WorkerCount != 7 || !live.Paused || live.ActiveRunSeconds != 37 || live.RunSegmentStartedAt != nil {
 		t.Fatalf("restored task metadata mismatch: %+v", live)
 	}
 	if err := d.QueryRow(`SELECT count(*) FROM exploration_nodes WHERE exploration_id=$1`, task.ExplorationID).Scan(&nodes); err != nil {

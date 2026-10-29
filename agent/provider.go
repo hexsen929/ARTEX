@@ -363,6 +363,7 @@ func (c Config) newProvider(client *http.Client, limiter *RequestLimiter) (llm.P
 	if err != nil {
 		return nil, err
 	}
+	provider = wrapResponsesErrors(provider, c)
 	if codexResponses {
 		provider = codexResponsesProvider{Provider: provider}
 	}
@@ -469,6 +470,7 @@ func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if err := llmguard.TakeHTTP(req.Context()); err != nil {
 		return nil, err
 	}
+	responsesAttempt := startResponsesErrorAttempt(req)
 	resp, err := t.base.RoundTrip(req)
 	if err != nil || resp == nil {
 		return resp, err
@@ -477,6 +479,7 @@ func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error
 	// 429 branch below reads through this wrapper, so its body lands in the
 	// capture before being replaced.
 	resp.Body = capt.TeeResponse(resp.StatusCode, resp.Body)
+	resp.Body = responsesAttempt.observe(resp.StatusCode, resp.Body)
 
 	if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode != http.StatusServiceUnavailable {
 		return resp, nil

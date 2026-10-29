@@ -64,8 +64,11 @@ type Task struct {
 	TimeoutSeconds       int                    `json:"timeout_seconds"`
 	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
 	CoverageEnabled      bool                   `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
+	WorkerCount          int                    `json:"worker_count"`           // 本任务 Worker 数;0=用全局默认
 	FirstRunAt           int64                  `json:"first_run_at,omitempty"`
 	DeadlineAt           int64                  `json:"deadline_at,omitempty"`
+	ActiveRunSeconds     int64                  `json:"active_run_seconds"`
+	RunSegmentStartedAt  int64                  `json:"run_segment_started_at,omitempty"`
 	Store                *pgdb.ExplorationStore `json:"-"`
 	Guard                *guard.Guard           `json:"-"`
 	notify               chan struct{}
@@ -84,21 +87,23 @@ type Task struct {
 // updateLifecycle instead of reading or writing the corresponding Task fields
 // directly after the task has been published by Manager.
 type taskLifecycleState struct {
-	Name          string
-	Remark        string
-	PinnedAt      int64
-	Status        string
-	Paused        bool
-	Queued        bool
-	QueuedAt      int64
-	QueueMode     string
-	CompletedAt   int64
-	FirstRunAt    int64
-	DeadlineAt    int64
-	SourceTaskIDs []int64
-	CompanyIDs    []int64
-	CategoryID    *int64
-	CategoryName  string
+	Name                string
+	Remark              string
+	PinnedAt            int64
+	Status              string
+	Paused              bool
+	Queued              bool
+	QueuedAt            int64
+	QueueMode           string
+	CompletedAt         int64
+	FirstRunAt          int64
+	DeadlineAt          int64
+	ActiveRunSeconds    int64
+	RunSegmentStartedAt int64
+	SourceTaskIDs       []int64
+	CompanyIDs          []int64
+	CategoryID          *int64
+	CategoryName        string
 }
 
 func (t *Task) lifecycleSnapshot() taskLifecycleState {
@@ -112,21 +117,23 @@ func (t *Task) lifecycleSnapshot() taskLifecycleState {
 
 func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 	return taskLifecycleState{
-		Name:          t.Name,
-		Remark:        t.Remark,
-		PinnedAt:      t.PinnedAt,
-		Status:        t.Status,
-		Paused:        t.Paused,
-		Queued:        t.Queued,
-		QueuedAt:      t.QueuedAt,
-		QueueMode:     t.QueueMode,
-		CompletedAt:   t.CompletedAt,
-		FirstRunAt:    t.FirstRunAt,
-		DeadlineAt:    t.DeadlineAt,
-		SourceTaskIDs: append([]int64(nil), t.SourceTaskIDs...),
-		CompanyIDs:    append([]int64(nil), t.CompanyIDs...),
-		CategoryID:    cloneInt64Ptr(t.CategoryID),
-		CategoryName:  t.CategoryName,
+		Name:                t.Name,
+		Remark:              t.Remark,
+		PinnedAt:            t.PinnedAt,
+		Status:              t.Status,
+		Paused:              t.Paused,
+		Queued:              t.Queued,
+		QueuedAt:            t.QueuedAt,
+		QueueMode:           t.QueueMode,
+		CompletedAt:         t.CompletedAt,
+		FirstRunAt:          t.FirstRunAt,
+		DeadlineAt:          t.DeadlineAt,
+		ActiveRunSeconds:    t.ActiveRunSeconds,
+		RunSegmentStartedAt: t.RunSegmentStartedAt,
+		SourceTaskIDs:       append([]int64(nil), t.SourceTaskIDs...),
+		CompanyIDs:          append([]int64(nil), t.CompanyIDs...),
+		CategoryID:          cloneInt64Ptr(t.CategoryID),
+		CategoryName:        t.CategoryName,
 	}
 }
 
@@ -148,6 +155,8 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.CompletedAt = state.CompletedAt
 	t.FirstRunAt = state.FirstRunAt
 	t.DeadlineAt = state.DeadlineAt
+	t.ActiveRunSeconds = state.ActiveRunSeconds
+	t.RunSegmentStartedAt = state.RunSegmentStartedAt
 	t.SourceTaskIDs = append(t.SourceTaskIDs[:0], state.SourceTaskIDs...)
 	t.CompanyIDs = append(t.CompanyIDs[:0], state.CompanyIDs...)
 	t.CategoryID = cloneInt64Ptr(state.CategoryID)
@@ -270,6 +279,9 @@ type Manager struct {
 // Settings keys the UI toggles at runtime.
 const (
 	settingTrafficCapture      = "traffic_capture"
+	settingBrowserScreenshot   = "browser_screenshot_enabled"
+	settingScreenshotTimestamp = "browser_screenshot_timestamp_enabled"
+	settingOpsecEnabled        = "opsec_enabled"
 	settingAgentTrafficBinding = "agent_traffic_binding"
 	settingWebSearchOn         = "web_search_enabled"
 	settingWebSearchBackend    = "web_search_backend"
@@ -279,9 +291,11 @@ const (
 	// settingGlobalProxy is the global egress proxy for all target traffic
 	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
 	// only routes the search backend) and the per-profile LLM proxy.
-	settingGlobalProxy = "global_proxy"
-	settingWorkers     = "workers"
-	settingLLMRecord   = "llm_record"
+	settingGlobalProxy  = "global_proxy"
+	settingShowEgressIP = "show_egress_ip"
+	settingWorkers      = "workers"
+	settingWorkerPools  = "worker_pools"
+	settingLLMRecord    = "llm_record"
 	// settingLLMRecordsRetentionDays 是 llm_records 的按天保留期:默认 30 天,
 	// 0 = 不清理。见 startLLMRecordsRetention 的每日清理。
 	settingLLMRecordsRetentionDays = "llm_records_retention_days"
@@ -317,6 +331,102 @@ const (
 	settingWebUAPool         = "web_ua_pool"
 )
 
+// WorkerPool binds a number of worker slots to one LLM profile. Profile IDs are
+// encoded as JSON strings to match the frontend LLMProfile API.
+type WorkerPool struct {
+	ProfileID int64 `json:"profile_id,string"`
+	Workers   int   `json:"workers"`
+}
+
+func (p *WorkerPool) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ProfileID json.RawMessage `json:"profile_id"`
+		Workers   int             `json:"workers"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var id int64
+	if err := json.Unmarshal(raw.ProfileID, &id); err != nil {
+		var text string
+		if err := json.Unmarshal(raw.ProfileID, &text); err != nil {
+			return fmt.Errorf("profile_id 必须是整数或数字字符串")
+		}
+		parsed, err := strconv.ParseInt(strings.TrimSpace(text), 10, 64)
+		if err != nil {
+			return fmt.Errorf("profile_id 必须是整数或数字字符串")
+		}
+		id = parsed
+	}
+	p.ProfileID, p.Workers = id, raw.Workers
+	return nil
+}
+
+// WorkerSlot is the concrete routing plan for one task run.
+type WorkerSlot struct {
+	Name      string
+	ProfileID int64 // zero means legacy task-router resolution
+}
+
+// ValidateWorkerPools validates pool shape without requiring a database. Pool
+// entries with duplicate profile IDs are rejected so each profile has one
+// unambiguous slot group in the saved order.
+func ValidateWorkerPools(pools []WorkerPool) error {
+	if len(pools) == 0 {
+		return nil
+	}
+	seen := make(map[int64]bool, len(pools))
+	total := 0
+	for _, pool := range pools {
+		if pool.ProfileID <= 0 {
+			return fmt.Errorf("worker_pools 中 profile_id 必须大于 0")
+		}
+		if pool.Workers <= 0 {
+			return fmt.Errorf("worker_pools 中 workers 必须大于 0")
+		}
+		if seen[pool.ProfileID] {
+			return fmt.Errorf("worker_pools 中 profile_id %d 重复", pool.ProfileID)
+		}
+		seen[pool.ProfileID] = true
+		if total > 50-pool.Workers {
+			return fmt.Errorf("worker_pools 的 Worker 总数必须在 1 到 50 之间")
+		}
+		total += pool.Workers
+	}
+	if total < 1 || total > 50 {
+		return fmt.Errorf("worker_pools 的 Worker 总数必须在 1 到 50 之间")
+	}
+	return nil
+}
+
+// ExpandWorkerSlots expands pools in their saved order; invalid or empty legacy
+// settings use the historical worker count (default 3).
+func ExpandWorkerSlots(pools []WorkerPool, legacy int) ([]WorkerSlot, error) {
+	if err := ValidateWorkerPools(pools); err != nil {
+		return nil, err
+	}
+	if len(pools) == 0 {
+		if legacy <= 0 {
+			legacy = defaultWorkers
+		}
+		slots := make([]WorkerSlot, legacy)
+		for i := range slots {
+			slots[i] = WorkerSlot{Name: fmt.Sprintf("work#%d", i+1)}
+		}
+		return slots, nil
+	}
+	slots := make([]WorkerSlot, 0)
+	for _, pool := range pools {
+		for i := 0; i < pool.Workers; i++ {
+			slots = append(slots, WorkerSlot{ProfileID: pool.ProfileID})
+		}
+	}
+	for i := range slots {
+		slots[i].Name = fmt.Sprintf("work#%d", i+1)
+	}
+	return slots, nil
+}
+
 // ConcurrencyLimit returns whether the simultaneous-running-task cap is enabled and
 // its limit (default 5 when enabled but unset). limit is always >=1 when enabled.
 func (m *Manager) ConcurrencyLimit() (enabled bool, limit int) {
@@ -344,24 +454,151 @@ func (m *Manager) SetConcurrency(enabled bool, limit int) error {
 	return m.pg.SetSetting(settingConcurrencyOn, strconv.FormatBool(enabled))
 }
 
-// Workers returns the configured concurrent work-agent count (default 3). Read
-// per-task at engine.Run, so a change applies to tasks started afterwards.
+// Workers is the compatibility/display getter. Execution and writes must use
+// WorkersChecked so an unreadable setting never creates a default worker group.
 func (m *Manager) Workers() int {
-	v, ok, err := m.pg.GetSetting(settingWorkers)
-	if err != nil || !ok {
+	count, err := m.WorkersChecked()
+	if err != nil {
 		return defaultWorkers
+	}
+	return count
+}
+
+// WorkersChecked defaults only when no legacy count was saved. A malformed or
+// unsupported saved count is an error, not permission to run different workers.
+func (m *Manager) WorkersChecked() (int, error) {
+	if m == nil || m.pg == nil {
+		return 0, errors.New("worker settings database unavailable")
+	}
+	v, ok, err := m.pg.GetSetting(settingWorkers)
+	if err != nil {
+		return 0, fmt.Errorf("read workers setting: %w", err)
+	}
+	if !ok {
+		return defaultWorkers, nil
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(v))
-	if err != nil || n <= 0 {
-		return defaultWorkers
+	if err != nil || n <= 0 || n > pgdb.MaxTaskWorkerCount {
+		return 0, fmt.Errorf("workers 必须是 1 到 %d 之间的整数", pgdb.MaxTaskWorkerCount)
 	}
-	return n
+	return n, nil
+}
+
+// WorkerPools is a compatibility/display getter only. Routing must use the
+// checked getter so unknown mode cannot be mistaken for an empty legacy pool.
+func (m *Manager) WorkerPools() []WorkerPool {
+	pools, err := m.WorkerPoolsChecked()
+	if err != nil {
+		return []WorkerPool{}
+	}
+	return pools
+}
+
+func (m *Manager) WorkerPoolsChecked() ([]WorkerPool, error) {
+	if m == nil || m.pg == nil {
+		return nil, errors.New("worker pool settings database unavailable")
+	}
+	v, ok, err := m.pg.GetSetting(settingWorkerPools)
+	if err != nil {
+		return nil, fmt.Errorf("read worker_pools setting: %w", err)
+	}
+	if !ok {
+		return []WorkerPool{}, nil
+	}
+	var pools []WorkerPool
+	if err := json.Unmarshal([]byte(v), &pools); err != nil {
+		return nil, fmt.Errorf("invalid worker_pools JSON: %w", err)
+	}
+	if pools == nil {
+		return nil, errors.New("worker_pools 必须是数组；仅 [] 明确表示使用旧版任务模型路由")
+	}
+	if err := ValidateWorkerPools(pools); err != nil {
+		return nil, fmt.Errorf("invalid worker_pools: %w", err)
+	}
+	return pools, nil
+}
+
+// WorkerSlotsForTaskChecked resolves exactly one explicit configuration mode.
+// A task count deliberately overrides global pools. Non-empty global pools do
+// not consult the unrelated legacy count. Only an absent/valid empty pool uses
+// the checked legacy count; failures never downgrade to the default model.
+func (m *Manager) WorkerSlotsForTaskChecked(t *Task) ([]WorkerSlot, error) {
+	if t != nil && t.WorkerCount != 0 {
+		return workerSlotsForTask(t, nil, defaultWorkers)
+	}
+	pools, err := m.WorkerPoolsChecked()
+	if err != nil {
+		return nil, err
+	}
+	if len(pools) > 0 {
+		return workerSlotsForTask(t, pools, defaultWorkers)
+	}
+	workers, err := m.WorkersChecked()
+	if err != nil {
+		return nil, err
+	}
+	return workerSlotsForTask(t, pools, workers)
+}
+
+// SetWorkerPools validates profile references at save time and atomically
+// synchronizes the legacy workers setting with the pool total. An empty slice
+// restores legacy mode; an optional legacy count is used when clearing pools.
+func (m *Manager) SetWorkerPools(pools []WorkerPool, legacyWorkers ...int) error {
+	if m == nil || m.pg == nil {
+		return errors.New("worker pool settings database unavailable")
+	}
+	if pools == nil {
+		pools = []WorkerPool{}
+	}
+	if err := ValidateWorkerPools(pools); err != nil {
+		return err
+	}
+	if len(pools) > 0 {
+		for _, pool := range pools {
+			profile, err := m.pg.ProfileByID(pool.ProfileID)
+			if err != nil {
+				return err
+			}
+			if profile == nil {
+				return fmt.Errorf("worker_pools 中 profile_id %d 不存在", pool.ProfileID)
+			}
+		}
+	}
+	b, err := json.Marshal(pools)
+	if err != nil {
+		return err
+	}
+	workerCount := 0
+	if len(pools) > 0 {
+		workerCount = 0
+		for _, pool := range pools {
+			workerCount += pool.Workers
+		}
+	} else if len(legacyWorkers) > 0 {
+		if legacyWorkers[0] <= 0 || legacyWorkers[0] > pgdb.MaxTaskWorkerCount {
+			return fmt.Errorf("workers 必须在 1 到 %d 之间", pgdb.MaxTaskWorkerCount)
+		}
+		workerCount = legacyWorkers[0]
+	} else {
+		var err error
+		workerCount, err = m.WorkersChecked()
+		if err != nil {
+			return err
+		}
+	}
+	return m.pg.SetSettingsAtomic(context.Background(), map[string]string{
+		settingWorkerPools: string(b),
+		settingWorkers:     strconv.Itoa(workerCount),
+	})
 }
 
 // SetWorkers persists the concurrent work-agent count. Values <=0 are rejected.
 func (m *Manager) SetWorkers(n int) error {
-	if n <= 0 {
-		return fmt.Errorf("workers 必须 >0")
+	if m == nil || m.pg == nil {
+		return errors.New("worker settings database unavailable")
+	}
+	if n <= 0 || n > pgdb.MaxTaskWorkerCount {
+		return fmt.Errorf("workers 必须在 1 到 %d 之间", pgdb.MaxTaskWorkerCount)
 	}
 	return m.pg.SetSetting(settingWorkers, strconv.Itoa(n))
 }
@@ -435,6 +672,13 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	pg, err := pgdb.Open(dsn)
 	if err != nil {
 		return nil, err
+	}
+	// A live segment cannot be trusted across a process restart: its end time
+	// could be deployment/crash downtime. Clear it before tasks are restored so
+	// the next engine admission starts a fresh segment at actual execution time.
+	if _, err := pg.ClearOpenTaskRunSegments(); err != nil {
+		_ = pg.Close()
+		return nil, fmt.Errorf("clear stale task run segments: %w", err)
 	}
 	if err := pg.RecoverFindingRetests(); err != nil {
 		pg.Close()
@@ -767,6 +1011,9 @@ func (m *Manager) syncBrowserMCPProxy() {
 	cfgPath := m.browserMCPProxyConfigPath()
 	args = stripManagedProxyConfig(args, cfgPath)
 	env := decodeStrMap(srv.Env)
+	// Proxy reconciliation never changes the administrator's MCP enabled flag.
+	// Enabling report screenshots is an explicit settings operation, not a
+	// reason to reactivate a browser disabled after that choice.
 	delete(env, "NODE_EXTRA_CA_CERTS")
 	if proxy != "" {
 		if u, perr := url.Parse(proxy); perr == nil && u.User != nil {
@@ -809,6 +1056,28 @@ func (m *Manager) syncBrowserMCPProxy() {
 	} else {
 		log.Printf("[mcp] browser MCP 已移除捕获代理配置")
 	}
+}
+
+// ensureBrowserMCPArgs is used only by explicit screenshot setup or new seeds.
+// It never relaxes browser sandbox/TLS checks or discards a user profile. Proxy
+// reconciliation does not call it, so an upgrade preserves custom launch args.
+func ensureBrowserMCPArgs(args []string, screenshotEnabled bool) []string {
+	out := append([]string(nil), args...)
+	has := func(want string) bool {
+		for _, arg := range out {
+			if arg == want || strings.HasPrefix(arg, want+"=") {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("--headless") {
+		out = append(out, "--headless")
+	}
+	if screenshotEnabled && !has("--isolated") && !has("--user-data-dir") {
+		out = append(out, "--isolated")
+	}
+	return out
 }
 
 // stripProxyArgs removes any --proxy-server/--proxy-bypass flags (both "--flag val"
@@ -1093,13 +1362,27 @@ func (m *Manager) Close() error {
 		m.closing = true
 		m.trafficOn = false
 		proxies, recorder, pg := m.taskProxy, m.traffic, m.pg
+		taskIDs := make([]string, 0, len(m.tasks))
+		for id := range m.tasks {
+			taskIDs = append(taskIDs, id)
+		}
 		m.mu.Unlock()
+		var errs []error
+		// Graceful shutdown has a known endpoint; settle this Manager's live
+		// segments before closing PG. Crash recovery still drops an unknown
+		// segment instead of counting deployment downtime as active runtime.
+		if pg != nil {
+			for _, id := range taskIDs {
+				if err := m.FinalizeTaskRunSegment(id); err != nil && !errors.Is(err, sql.ErrNoRows) {
+					errs = append(errs, fmt.Errorf("finalize task %s runtime: %w", id, err))
+				}
+			}
+		}
 		// Never hold the global lock while proxy teardown waits for a refresh
 		// that may call GlobalProxy() under the task-proxy lock.
 		if proxies != nil {
 			proxies.Close()
 		}
-		var errs []error
 		if recorder != nil {
 			errs = append(errs, recorder.Close())
 		}
@@ -1179,8 +1462,9 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		SourceTaskIDs:  append([]int64(nil), pt.SourceTaskIDs...),
 		CompanyIDs:     append([]int64(nil), pt.CompanyIDs...),
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
-		CoverageEnabled: pt.CoverageEnabled,
-		FirstRunAt:      unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
+		CoverageEnabled: pt.CoverageEnabled, WorkerCount: pt.WorkerCount,
+		FirstRunAt: unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
+		ActiveRunSeconds: pt.ActiveRunSeconds, RunSegmentStartedAt: unixOrZero(pt.RunSegmentStartedAt),
 		Store: store, Guard: g, notify: make(chan struct{}, 1),
 	}
 }
@@ -1461,13 +1745,16 @@ func (m *Manager) SetTaskPaused(id string, paused bool) error {
 	if err != nil {
 		return err
 	}
-	if err := m.pg.SetPaused(n, paused); err != nil {
+	active, started, err := m.pg.SetPausedRuntime(n, paused)
+	if err != nil {
 		return err
 	}
 	m.mu.Lock()
 	if t := m.tasks[id]; t != nil {
 		t.updateLifecycle(func(state *taskLifecycleState) {
 			state.Paused = paused
+			state.ActiveRunSeconds = active
+			state.RunSegmentStartedAt = unixOrZero(started)
 		})
 	}
 	m.mu.Unlock()
@@ -1503,7 +1790,8 @@ func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued b
 		mode = ""
 	}
 
-	var queuedAt, completedAt, firstRunAt, deadlineAt sql.NullTime
+	var queuedAt, completedAt, firstRunAt, deadlineAt, segmentStartedAt sql.NullTime
+	var activeRunSeconds int64
 	var committedMode string
 	err = m.pg.QueryRow(`UPDATE tasks
 	SET status=$2,
@@ -1532,9 +1820,11 @@ func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued b
 	        WHEN $6='timeout' AND $2 NOT IN ('done','failed','timeout') THEN NULL
 	        ELSE deadline_at
 	    END
+	    ,active_run_seconds=active_run_seconds + CASE WHEN ($3 OR $2 IN ('done','failed','timeout')) AND run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END
+	    ,run_segment_started_at=CASE WHEN $3 OR $2 IN ('done','failed','timeout') THEN NULL ELSE run_segment_started_at END
 	WHERE id=$1 AND deleted_at IS NULL AND status=$6
-	RETURNING queued_at, queue_mode, completed_at, first_run_at, deadline_at`, n, status, queued, mode, preservePosition, expectedStatus, manualUntil).
-		Scan(&queuedAt, &committedMode, &completedAt, &firstRunAt, &deadlineAt)
+	RETURNING queued_at, queue_mode, completed_at, first_run_at, deadline_at, active_run_seconds, run_segment_started_at`, n, status, queued, mode, preservePosition, expectedStatus, manualUntil).
+		Scan(&queuedAt, &committedMode, &completedAt, &firstRunAt, &deadlineAt, &activeRunSeconds, &segmentStartedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("task %s lifecycle changed before admission (expected status %q)", id, expectedStatus)
 	}
@@ -1565,6 +1855,11 @@ func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued b
 			if deadlineAt.Valid {
 				state.DeadlineAt = deadlineAt.Time.Unix()
 			}
+			state.ActiveRunSeconds = activeRunSeconds
+			state.RunSegmentStartedAt = 0
+			if segmentStartedAt.Valid {
+				state.RunSegmentStartedAt = segmentStartedAt.Time.Unix()
+			}
 		})
 	}
 	m.mu.Unlock()
@@ -1585,11 +1880,15 @@ func (m *Manager) ApplyTaskPauseOrigin(id string, scheduled bool) error {
 		return err
 	}
 	var mode string
+	var activeRunSeconds int64
+	var segmentStartedAt sql.NullTime
 	err = m.pg.QueryRow(`UPDATE tasks
-		SET paused=true, queued=false, queued_at=NULL, schedule_paused=$2, schedule_manual_until=NULL
+		SET paused=true, queued=false, queued_at=NULL, schedule_paused=$2, schedule_manual_until=NULL,
+		    active_run_seconds=active_run_seconds + CASE WHEN run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END,
+		    run_segment_started_at=NULL
 		WHERE id=$1 AND deleted_at IS NULL AND paused=false
 		  AND status NOT IN ('done','failed','timeout')
-		RETURNING COALESCE(queue_mode,'')`, n, scheduled).Scan(&mode)
+		RETURNING COALESCE(queue_mode,''), active_run_seconds, run_segment_started_at`, n, scheduled).Scan(&mode, &activeRunSeconds, &segmentStartedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("task %s is unavailable for pause", id)
 	}
@@ -1603,6 +1902,11 @@ func (m *Manager) ApplyTaskPauseOrigin(id string, scheduled bool) error {
 			state.Queued = false
 			state.QueuedAt = 0
 			state.QueueMode = mode
+			state.ActiveRunSeconds = activeRunSeconds
+			state.RunSegmentStartedAt = 0
+			if segmentStartedAt.Valid {
+				state.RunSegmentStartedAt = segmentStartedAt.Time.Unix()
+			}
 		})
 	}
 	m.mu.Unlock()
@@ -1621,16 +1925,20 @@ func (m *Manager) EnqueueTask(id, mode string) error {
 		return fmt.Errorf("invalid queue mode %q", mode)
 	}
 	var queuedAt time.Time
+	var activeRunSeconds int64
+	var segmentStartedAt sql.NullTime
 	var committedMode string
 	err = m.pg.QueryRow(`UPDATE tasks
 		SET queued=true,
 		    queued_at=CASE WHEN queued THEN COALESCE(queued_at, now()) ELSE now() END,
+		    active_run_seconds=active_run_seconds + CASE WHEN run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END,
+		    run_segment_started_at=NULL,
 		    queue_mode=CASE
 		        WHEN queue_mode='bootstrap' OR $2='bootstrap' THEN 'bootstrap'
 		        ELSE 'resume'
 		    END
 		WHERE id=$1 AND deleted_at IS NULL
-		RETURNING queued_at, queue_mode`, n, mode).Scan(&queuedAt, &committedMode)
+		RETURNING queued_at, queue_mode, active_run_seconds, run_segment_started_at`, n, mode).Scan(&queuedAt, &committedMode, &activeRunSeconds, &segmentStartedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("task %s is unavailable for enqueue", id)
 	}
@@ -1643,6 +1951,84 @@ func (m *Manager) EnqueueTask(id, mode string) error {
 			state.QueuedAt = queuedAt.UnixNano()
 			state.Queued = true
 			state.QueueMode = committedMode
+			state.ActiveRunSeconds = activeRunSeconds
+			state.RunSegmentStartedAt = 0
+			if segmentStartedAt.Valid {
+				state.RunSegmentStartedAt = segmentStartedAt.Time.Unix()
+			}
+		})
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+// StartTaskRunSegment records the start of actual execution, once the engine
+// has admitted a task and is about to run planner/worker work.
+func (m *Manager) StartTaskRunSegment(id string) error {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return err
+	}
+	m.mu.RLock()
+	if m.closing {
+		m.mu.RUnlock()
+		return errors.New("manager is closing")
+	}
+	if t := m.tasks[id]; t != nil && t.lifecycleSnapshot().RunSegmentStartedAt > 0 {
+		m.mu.RUnlock()
+		return nil
+	}
+	m.mu.RUnlock()
+	active, started, err := m.pg.StartTaskRunSegment(n)
+	if err != nil {
+		return err
+	}
+	if started != nil {
+		m.mirrorTaskRuntime(id, active, started)
+	}
+	return nil
+}
+
+// FinalizeTaskRunSegment is idempotent and is used by pause/terminal paths that
+// may race with a late engine cancellation.
+func (m *Manager) FinalizeTaskRunSegment(id string) error {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return err
+	}
+	active, started, err := m.pg.FinalizeTaskRunSegment(n)
+	if err != nil {
+		return err
+	}
+	m.mirrorTaskRuntime(id, active, started)
+	return nil
+}
+
+func (m *Manager) mirrorTaskRuntime(id string, active int64, started *time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if t := m.tasks[id]; t != nil {
+		t.updateLifecycle(func(state *taskLifecycleState) {
+			state.ActiveRunSeconds = active
+			state.RunSegmentStartedAt = unixOrZero(started)
+		})
+	}
+}
+
+func (m *Manager) syncTaskRuntime(id string, n int64) error {
+	pt, err := m.pg.GetTask(n)
+	if err != nil || pt == nil {
+		return err
+	}
+	m.mu.Lock()
+	if t := m.tasks[id]; t != nil {
+		t.updateLifecycle(func(state *taskLifecycleState) {
+			state.ActiveRunSeconds = pt.ActiveRunSeconds
+			state.RunSegmentStartedAt = unixOrZero(pt.RunSegmentStartedAt)
 		})
 	}
 	m.mu.Unlock()
@@ -1731,20 +2117,30 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 	if err != nil {
 		return false, err
 	}
-	won, err = m.pg.SetTerminalStatusGuarded(n, status)
+	active, started, won, err := m.pg.SetTerminalStatusGuardedRuntime(n, status)
 	if err != nil || !won {
 		return won, err
 	}
+	// Mirror the committed terminal transition before any optional hydration.
+	// This keeps the in-memory clock stopped even if GetTask later fails.
 	m.mu.Lock()
 	if t := m.tasks[id]; t != nil {
 		t.updateLifecycle(func(state *taskLifecycleState) {
 			state.Status = status
-			if state.CompletedAt == 0 {
-				state.CompletedAt = time.Now().Unix()
+			state.ActiveRunSeconds = active
+			state.RunSegmentStartedAt = unixOrZero(started)
+			if pgdb.IsTerminal(status) {
+				state.RunSegmentStartedAt = 0
+				if state.CompletedAt == 0 {
+					state.CompletedAt = time.Now().Unix()
+				}
 			}
 		})
 	}
 	m.mu.Unlock()
+	if err := m.syncTaskRuntime(id, n); err != nil {
+		return true, err
+	}
 	return true, nil
 }
 
@@ -1757,16 +2153,20 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 	if err != nil {
 		return err
 	}
-	if err := m.pg.SetStatus(n, status); err != nil {
+	active, started, err := m.pg.SetStatusRuntime(n, status)
+	if err != nil {
 		return err
 	}
+	// Mirror the successful UPDATE immediately. A later GetTask hydration is
+	// best-effort and must not reopen a terminal clock in memory.
 	m.mu.Lock()
 	if t := m.tasks[id]; t != nil {
 		t.updateLifecycle(func(state *taskLifecycleState) {
 			state.Status = status
-			// Mirror the DB's completed_at stamp on the live handle so the DTO shows
-			// the finish time without a reload (terminal -> stamp once; else clear).
+			state.ActiveRunSeconds = active
+			state.RunSegmentStartedAt = unixOrZero(started)
 			if pgdb.IsTerminal(status) {
+				state.RunSegmentStartedAt = 0
 				if state.CompletedAt == 0 {
 					state.CompletedAt = time.Now().Unix()
 				}
@@ -1776,6 +2176,9 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 		})
 	}
 	m.mu.Unlock()
+	if err := m.syncTaskRuntime(id, n); err != nil {
+		return err
+	}
 	return nil
 }
 

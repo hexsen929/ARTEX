@@ -5,6 +5,8 @@ package llmguard
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -23,6 +25,7 @@ const (
 	InvalidRequest   Kind = "invalid_request"
 	ProviderFailure  Kind = "provider_failure"
 	TransportFailure Kind = "transport_failure"
+	UnknownFailure   Kind = "unknown_failure"
 	RetryBudget      Kind = "retry_budget_exhausted"
 	CoolingDown      Kind = "cooling_down"
 )
@@ -32,6 +35,15 @@ var statusPattern = regexp.MustCompile(`(?i)(?:status(?:\s+code)?|http(?:\s+stat
 func Status(err error) int {
 	if err == nil {
 		return 0
+	}
+	// Structured adapter errors retain status without making callers parse a
+	// provider message. A successful HTTP 200 carrying a failed SSE event is not
+	// an error status; let its ErrorCode identify the failure instead.
+	var status interface{ HTTPStatus() int }
+	if errors.As(err, &status) {
+		if n := status.HTTPStatus(); n >= 400 && n <= 599 {
+			return n
+		}
 	}
 	m := statusPattern.FindStringSubmatch(err.Error())
 	if len(m) < 2 {
@@ -61,6 +73,11 @@ func Classify(err error) Kind {
 		return RetryBudget
 	case strings.Contains(s, "llm_cooling_down"):
 		return CoolingDown
+	}
+	if kind := structuredCodeKind(err); kind != "" {
+		return kind
+	}
+	switch {
 	case strings.Contains(s, "context length"), strings.Contains(s, "context_length"), strings.Contains(s, "maximum context"), strings.Contains(s, "too long"), Status(err) == 413:
 		return ContextLimit
 	case MissingModel(s):
@@ -82,14 +99,80 @@ func Classify(err error) Kind {
 	case n >= 400:
 		return InvalidRequest
 	}
-	return TransportFailure
+	if transportError(err, s) {
+		return TransportFailure
+	}
+	// An unrecognized provider event or adapter error is not evidence that the
+	// network failed. Keep the diagnosis neutral, including generic stream errors.
+	return UnknownFailure
 }
+
+// structuredCodeKind understands protocol-level errors that arrive after HTTP
+// headers, when there may be no failing HTTP status at all. The small interface
+// works through normal error wrapping without coupling providers to this package.
+func structuredCodeKind(err error) Kind {
+	var coded interface{ ErrorCode() string }
+	if !errors.As(err, &coded) {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(coded.ErrorCode())) {
+	case "invalid_api_key", "authentication_error", "permission_denied", "access_denied":
+		return Auth
+	case "insufficient_quota", "insufficient_user_quota", "billing_hard_limit_reached", "billing_not_active":
+		return Quota
+	case "model_not_found", "no_available_channel":
+		return ModelUnavailable
+	case "rate_limit_exceeded", "rate_limit_error":
+		return RateLimit
+	case "context_length_exceeded", "max_context_length_exceeded", "context_window_exceeded":
+		return ContextLimit
+	case "invalid_request", "invalid_request_error":
+		return InvalidRequest
+	case "server_error", "internal_server_error", "overloaded_error", "service_unavailable":
+		return ProviderFailure
+	}
+	return ""
+}
+
+func transportError(err error, message string) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		return true
+	}
+	// Some SDKs flatten network failures to strings. Match concrete transport
+	// signatures, not the generic phrase "stream error" used for API SSE failures.
+	if message == "eof" || strings.HasSuffix(message, ": eof") {
+		return true
+	}
+	for _, marker := range []string{
+		"unexpected eof", "dial tcp", "dial udp", "dial unix", "no such host",
+		"connection reset", "connection refused", "connection aborted", "broken pipe",
+		"network is unreachable", "temporary network error", "i/o timeout",
+		"tls handshake timeout", "client.timeout exceeded", "context deadline exceeded",
+		"server closed idle connection", "stream error: stream id", "http2: stream closed",
+		"internal_error; received from peer", "llm call_timeout:",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func Retryable(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return false
 	}
 	switch Classify(err) {
 	case RateLimit, ProviderFailure, TransportFailure:
+		return true
+	case UnknownFailure:
+		// Preserve the existing retry policy: unknown errors previously fell back
+		// to TransportFailure. Neutral diagnosis must not change retry counts or
+		// the caller's pre-commit-only replay window.
 		return true
 	}
 	return false

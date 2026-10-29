@@ -4,24 +4,26 @@ import * as React from "react";
 
 import Link from "next/link";
 
-import { ArrowDownIcon, ArrowUpIcon, ArrowUpRightIcon, ChevronRightIcon } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, ArrowUpRightIcon, ChevronRightIcon, SearchIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { FindingCaseList } from "@/components/finding-case-list";
 import { FindingVerificationBadge } from "@/components/finding-verification";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger } from "@/components/ui/select";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api } from "@/lib/api";
+import { type FindingSortField, filterAndSortFindings } from "@/lib/finding-severity";
 import { useStoredSortPreference } from "@/lib/sort-preference";
-import { statusMeta } from "@/lib/status";
-import type { Finding, FindingStatus } from "@/lib/types";
+import { SEVERITY_FILTER_OPTIONS, statusMeta } from "@/lib/status";
+import type { Finding, FindingStatus, Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type FindingSortField = "time";
-
-const FINDING_SORT_FIELDS: readonly FindingSortField[] = ["time"];
+const FINDING_SORT_FIELDS: readonly FindingSortField[] = ["time", "severity"];
 const FINDING_SORT_PREFERENCE_KEY = "artex_task_findings_sort";
 
 function findingLabel(finding: Finding): string {
@@ -115,11 +117,7 @@ function Row({
         </span>
         {f.finding_id && (
           <Link
-            href={
-              f.inherited
-                ? `/function/findings/detail?id=${f.finding_id}&context_task=${contextTaskId}`
-                : `/function/findings/detail?id=${f.finding_id}`
-            }
+            href={`/function/findings/detail?id=${f.finding_id}&context_task=${contextTaskId}`}
             className="text-muted-foreground hover:text-primary inline-flex shrink-0 items-center gap-0.5 text-xs"
             title="查看漏洞详情"
           >
@@ -142,6 +140,9 @@ function Row({
 
 export function FindingsTab({ taskId }: { taskId: string }) {
   const [findings, setFindings] = React.useState<Finding[]>([]);
+  const [severity, setSeverity] = React.useState<"all" | Severity>("all");
+  const [search, setSearch] = React.useState("");
+  const [query, setQuery] = React.useState("");
   const [sortPreference, setSortPreference] = useStoredSortPreference(
     FINDING_SORT_PREFERENCE_KEY,
     FINDING_SORT_FIELDS,
@@ -182,20 +183,100 @@ export function FindingsTab({ taskId }: { taskId: string }) {
     }
   }, []);
 
-  const items = findings
-    .filter((f) => f.task_id === taskId || f.inherited)
-    .sort((a, b) => {
-      const compared = Date.parse(a.ts) - Date.parse(b.ts);
-      if (compared !== 0) return sortPreference.direction === "asc" ? compared : -compared;
-      return b.id.localeCompare(a.id, undefined, { numeric: true });
-    });
+  // Discover inherited sources before filtering; finding-cases owns folder matching.
+  const taskFindings = findings.filter((f) => f.task_id === taskId || f.inherited);
+  const items = filterAndSortFindings(taskFindings, severity, sortPreference, query);
 
   return (
     <div className="flex flex-col gap-4">
-      <FindingCaseList query={{ task: taskId, sort: "time" }} />
+      <div className="flex flex-wrap items-center gap-3">
+        <ToggleGroup
+          type="single"
+          value={severity}
+          onValueChange={(value) => value && setSeverity(value as "all" | Severity)}
+          variant="outline"
+          size="sm"
+          spacing={0}
+        >
+          {SEVERITY_FILTER_OPTIONS.map(([val, label]) => (
+            <ToggleGroupItem key={val} value={val} aria-label={`按${label}等级筛选`}>
+              {label}
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
+        <Select
+          value={sortPreference.field}
+          onValueChange={(field) => {
+            if (field === "time" || field === "severity") {
+              setSortPreference((current) => ({ ...current, field }));
+            }
+          }}
+        >
+          <SelectTrigger size="sm" className="w-36" aria-label="发现排序方式">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="time">按时间排序</SelectItem>
+            <SelectItem value="severity">按严重度排序</SelectItem>
+          </SelectContent>
+        </Select>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          aria-label={`${sortPreference.field === "severity" ? "同严重度" : "全部"}发现时间当前${sortPreference.direction === "asc" ? "正序" : "倒序"}，点击切换排序方向`}
+          onClick={() =>
+            setSortPreference((current) => ({
+              ...current,
+              direction: current.direction === "asc" ? "desc" : "asc",
+            }))
+          }
+        >
+          {sortPreference.direction === "asc" ? (
+            <ArrowUpIcon aria-hidden="true" />
+          ) : (
+            <ArrowDownIcon aria-hidden="true" />
+          )}
+          {sortPreference.field === "severity" ? "同严重度：" : ""}
+          {sortPreference.direction === "asc" ? "最早优先" : "最新优先"}
+        </Button>
+        <form
+          className="flex w-full items-center gap-2 sm:w-auto"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setQuery(search.trim());
+          }}
+        >
+          <InputGroup className="flex-1 sm:w-72">
+            <InputGroupInput
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="检索漏洞内容"
+              aria-label="检索漏洞内容"
+            />
+            <InputGroupAddon>
+              <SearchIcon aria-hidden="true" />
+            </InputGroupAddon>
+          </InputGroup>
+          <Button type="submit" size="sm" aria-label="搜索">
+            搜索
+          </Button>
+        </form>
+      </div>
+      <FindingCaseList
+        query={{
+          task: taskId,
+          severity: severity === "all" ? undefined : severity,
+          query: query || undefined,
+          sort: sortPreference.field,
+          timeDirection: sortPreference.direction,
+        }}
+        contextTask={taskId}
+      />
       {[
         ...new Set(
-          items
+          taskFindings
             .filter((f) => f.inherited)
             .map((f) => f.source_task_id)
             .filter((id): id is string => !!id),
@@ -203,7 +284,17 @@ export function FindingsTab({ taskId }: { taskId: string }) {
       ].map((source) => (
         <div key={source}>
           <p className="mb-2 text-sm text-muted-foreground">继承任务 #{source} · 只读</p>
-          <FindingCaseList query={{ task: source, sort: "time" }} contextTask={taskId} readOnly />
+          <FindingCaseList
+            query={{
+              task: source,
+              severity: severity === "all" ? undefined : severity,
+              query: query || undefined,
+              sort: sortPreference.field,
+              timeDirection: sortPreference.direction,
+            }}
+            contextTask={taskId}
+            readOnly
+          />
         </div>
       ))}
       <details>
@@ -211,31 +302,27 @@ export function FindingsTab({ taskId }: { taskId: string }) {
         <Card className="overflow-hidden py-0">
           <CardContent className="px-0">
             <div className="flex items-center border-b px-4 py-2 text-xs text-muted-foreground">
-              <span className="min-w-0 flex-1">漏洞</span>
-              <button
-                type="button"
-                className="inline-flex items-center gap-1 outline-none focus-visible:underline"
-                aria-label={`发现时间当前${sortPreference.direction === "asc" ? "正序" : "倒序"}，点击切换排序方向`}
-                onClick={() =>
-                  setSortPreference((current) => ({
-                    field: "time",
-                    direction: current.direction === "asc" ? "desc" : "asc",
-                  }))
-                }
-              >
-                <span>发现时间</span>
+              <span className="min-w-0 flex-1">
+                漏洞（{sortPreference.field === "severity" ? "按严重度排序" : "按时间排序"}）
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span>{sortPreference.field === "severity" ? "同严重度发现时间" : "发现时间"}</span>
                 {sortPreference.direction === "asc" ? (
                   <ArrowUpIcon className="size-3.5" />
                 ) : (
                   <ArrowDownIcon className="size-3.5" />
                 )}
-              </button>
+              </span>
             </div>
             {items.map((f) => (
               <Row key={f.id} f={f} contextTaskId={taskId} onStatus={onStatus} />
             ))}
             {items.length === 0 && (
-              <p className="px-4 py-8 text-center text-sm text-muted-foreground">本任务及直接关联任务暂无确认发现。</p>
+              <p className="px-4 py-8 text-center text-sm text-muted-foreground">
+                {severity !== "all" || query
+                  ? "当前筛选与搜索条件下暂无原始上报。"
+                  : "本任务及直接关联任务暂无发现记录。"}
+              </p>
             )}
           </CardContent>
         </Card>
