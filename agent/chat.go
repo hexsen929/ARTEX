@@ -106,6 +106,9 @@ func chatWorkDirSpec(workDir string) string {
 // no per-key in-code default, so DefaultAssistantPrompt is the render fallback.
 func chatSystem(agentKey, dataDir, workDir string) string {
 	body := renderSystem(agentKey, DefaultAssistantPrompt, chatVars{DataDir: dataDir, Now: nowStr()})
+	if agentKey == "asset_mapper" {
+		return withAgentWorkGuidance(body, agentKey) + "\n\n【只读资产梳理边界】本轮只可查询已登记资产和企业，不执行命令、不读写文件、不访问外部网络、不加载 Skill 或 MCP。资料不足时说明缺失证据，不自行补做探测。"
+	}
 	return withAgentWorkGuidance(body, agentKey) + chatWorkDirSpec(workDir)
 }
 
@@ -169,7 +172,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		return "", fmt.Errorf("worker.intranet 是 worker 的任务提示词变体，请从任务运行，不支持独立对话执行")
 	}
 	proxyAddr, proxyCACert := c.proxyForChat(ctx)
-	restricted := agentKey == db.CredentialAgentKey || agentKey == "goals"
+	restricted := agentKey == db.CredentialAgentKey || agentKey == "goals" || agentKey == "asset_mapper"
 	// gate the global web-search opts by this agent's own flag.
 	ws := c.webSearch
 	if !webSearch {
@@ -185,7 +188,12 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	// Pure assistant: DefaultTools as the base; AugmentTools layers in the key's
 	// visible skills/MCP and lets the DB tools table filter/override. DefaultTools
 	// have no tools-table rows, so they always pass through.
-	base := actool.DefaultTools()
+	// Only the server's catalog may supply asset_mapper's two domain queries.
+	// Do not even construct an implicit SDK filesystem/shell base for that role.
+	base := []actool.CoreTool{}
+	if agentKey != "asset_mapper" {
+		base = actool.DefaultTools()
+	}
 	runInfo := RunInfoFrom(ctx)
 	runInfo.SessionID = sessionID
 	ctx = WithRunInfo(ctx, runInfo)

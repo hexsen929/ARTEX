@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import { VERIFICATION_STATES } from "@/components/finding-verification";
 import type { FindingVerification } from "@/lib/types";
 import { FindingCaseList } from "@/components/finding-case-list";
+import { FindingDateFilter, type FindingDateRange } from "@/components/finding-date-filter";
 import { FindingRetestDialog } from "@/components/finding-retest-dialog";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
@@ -44,7 +45,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
-import { statusMeta } from "@/lib/status";
+import { SEVERITY_FILTER_OPTIONS, statusMeta } from "@/lib/status";
 import type {
   ActiveFindingRetest,
   Finding,
@@ -145,6 +146,7 @@ export default function FindingsPage() {
   const [sort, setSort] = React.useState<"severity" | "time">("severity");
   const [search, setSearch] = React.useState("");
   const [query, setQuery] = React.useState("");
+  const [dateRange, setDateRange] = React.useState<FindingDateRange>({});
   const [expanded, setExpanded] = React.useState<string | null>(null);
   const [flat, setFlat] = React.useState<FlatFindingsState>(EMPTY_FLAT_STATE);
   const [flatPage, setFlatPage] = React.useState(1);
@@ -170,7 +172,17 @@ export default function FindingsPage() {
   const retestRefreshVersion = React.useRef(0);
   const [deepenDescription, setDeepenDescription] = React.useState("");
   const [deepening, setDeepening] = React.useState(false);
-  const filterFingerprint = JSON.stringify([severity, verification, status, vulnclass, task, sort, query]);
+  const filterFingerprint = JSON.stringify([
+    severity,
+    verification,
+    status,
+    vulnclass,
+    task,
+    sort,
+    query,
+    dateRange.from,
+    dateRange.to,
+  ]);
   const activeFilterFingerprint = React.useRef(filterFingerprint);
   activeFilterFingerprint.current = filterFingerprint;
 
@@ -317,6 +329,7 @@ export default function FindingsPage() {
           task,
           query,
           sort,
+          ...dateRange,
           assetScope: view === "asset" ? (assetScope ?? undefined) : undefined,
         },
         ids: [...selectedIds],
@@ -365,6 +378,7 @@ export default function FindingsPage() {
           task,
           query,
           sort,
+          ...dateRange,
           assetScope: activeAssetScope ?? undefined,
         },
         true,
@@ -384,6 +398,7 @@ export default function FindingsPage() {
     }
   }, [
     activeAssetScope,
+    dateRange,
     filterFingerprint,
     flatPage,
     flatPageSize,
@@ -404,7 +419,7 @@ export default function FindingsPage() {
     const request = ++assetTreeRequest.current;
     setAssetTree((current) => ({ ...current, loading: true }));
     try {
-      const result = await api.findingAssetTree({ severity, verification, status, vulnclass, task, query, sort });
+      const result = await api.findingAssetTree({ severity, verification, status, vulnclass, task, query, sort, ...dateRange });
       if (request !== assetTreeRequest.current || activeFilterFingerprint.current !== requestFilter) return;
       setAssetTree({
         nodes: result.nodes ?? [],
@@ -419,7 +434,7 @@ export default function FindingsPage() {
       setAssetTree((current) => ({ ...current, loading: false }));
       toast.error(`资产树加载失败：${(e as Error).message}`);
     }
-  }, [filterFingerprint, severity, verification, status, vulnclass, task, query, sort]);
+  }, [dateRange, filterFingerprint, severity, verification, status, vulnclass, task, query, sort]);
 
   const refreshGroups = React.useCallback(async () => {
     const requestFilter = filterFingerprint;
@@ -436,6 +451,7 @@ export default function FindingsPage() {
         task,
         query,
         sort,
+        ...dateRange,
       });
       if (request !== groupsRequest.current || activeFilterFingerprint.current !== requestFilter) return;
       setGroups(result.items);
@@ -444,7 +460,7 @@ export default function FindingsPage() {
     } catch {
       // Polling keeps the last successful snapshot visible.
     }
-  }, [filterFingerprint, page, pageSize, severity, verification, status, vulnclass, task, query, sort]);
+  }, [dateRange, filterFingerprint, page, pageSize, severity, verification, status, vulnclass, task, query, sort]);
 
   const loadGroup = React.useCallback(
     async (key: string, groupPage: number, groupPageSize: number) => {
@@ -476,6 +492,7 @@ export default function FindingsPage() {
             task: key,
             query,
             sort,
+            ...dateRange,
           },
           true,
         );
@@ -510,7 +527,7 @@ export default function FindingsPage() {
         }));
       }
     },
-    [filterFingerprint, severity, verification, status, vulnclass, query, sort],
+    [dateRange, filterFingerprint, severity, verification, status, vulnclass, query, sort],
   );
 
   React.useEffect(() => {
@@ -963,15 +980,7 @@ export default function FindingsPage() {
             size="sm"
             spacing={0}
           >
-            {(
-              [
-                ["all", "全部"],
-                ["critical", "严重"],
-                ["high", "高危"],
-                ["medium", "中危"],
-                ["low", "低危"],
-              ] as const
-            ).map(([val, label]) => (
+            {SEVERITY_FILTER_OPTIONS.map(([val, label]) => (
               <ToggleGroupItem key={val} value={val} aria-label={`按${label}等级筛选`}>
                 {label}
               </ToggleGroupItem>
@@ -1045,6 +1054,8 @@ export default function FindingsPage() {
               })}
             </SelectContent>
           </Select>
+
+          <FindingDateFilter value={dateRange} onChange={setDateRange} />
 
           <Select value={sort} onValueChange={(v) => setSort(v as "severity" | "time")}>
             <SelectTrigger size="sm" className="w-36">
@@ -1143,7 +1154,7 @@ export default function FindingsPage() {
         {view === "cases" && (
           <FindingCaseList
             onTotal={setCaseTotal}
-            query={{ severity, verification, status, vulnclass, task, query, sort }}
+            query={{ severity, verification, status, vulnclass, task, query, sort, ...dateRange }}
             selectedIds={selectedIds}
             onSelect={toggleSelected}
           />

@@ -137,6 +137,7 @@ import type {
   TaskCategory,
   TaskStatus,
 } from "@/lib/types";
+import { MAX_TASK_REMARK_RUNES, MAX_TASK_WORKER_COUNT, parseWorkerCountInput } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // fmtBytes renders a human file size for the upload manifest.
@@ -187,19 +188,15 @@ function fmtDuration(sec: number): string {
   return `${s}s`;
 }
 
-// taskDuration is the task's run duration in seconds: created → now while running,
-// created → completion for a finished task, else created → last activity. 0 when it
-// never ran (no activity yet).
+// taskDuration counts only active execution segments. A live segment ticks locally;
+// paused, queued, and terminal tasks stay fixed at their persisted active total.
 function taskDuration(task: Task, nowSec: number): number {
-  const start = task.created_unix ?? 0;
-  if (!start) return 0;
-  const end =
-    task.status === "running"
-      ? nowSec
-      : task.completed_unix && task.completed_unix > 0
-        ? task.completed_unix
-        : (task.last_activity_unix ?? 0);
-  return end > start ? end - start : 0;
+  const active = Math.max(0, Math.floor(task.active_run_seconds ?? 0));
+  const segmentStart = task.run_segment_started_unix ?? 0;
+  if (task.status === "running" && !task.paused && !task.queued && segmentStart > 0) {
+    return active + Math.max(0, Math.floor(nowSec - segmentStart));
+  }
+  return active;
 }
 
 // deleteDetails takes only the countable part of the result so callers can pass an
@@ -3104,6 +3101,7 @@ function CreateTaskSheet({
 }) {
   const [open, setOpen] = React.useState(false);
   const [name, setName] = React.useState("");
+  const [remark, setRemark] = React.useState("");
   const [categoryID, setCategoryID] = React.useState<number | undefined>(undefined);
   const [description, setDescription] = React.useState("");
   const [goal, setGoal] = React.useState("");
@@ -3118,6 +3116,7 @@ function CreateTaskSheet({
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
+  const [workerCount, setWorkerCount] = React.useState(""); // 本任务 Worker 数;空/0=用全局默认
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
   const [scheduleEnabled, setScheduleEnabled] = React.useState(false);
   const [schedule, setSchedule] = React.useState<ScheduleInput>({
@@ -3181,12 +3180,18 @@ function CreateTaskSheet({
       toast.error(`最多关联 ${MAX_SOURCE_TASKS} 个来源任务`);
       return;
     }
+    const workerCountNum = parseWorkerCountInput(workerCount);
+    if (workerCountNum == null) {
+      toast.error(`Worker 运行数量必须是 0-${MAX_TASK_WORKER_COUNT} 的整数`);
+      return;
+    }
     setCreating(true);
     try {
       const timeoutSec = Math.max(0, Math.floor(Number(timeoutMin) || 0)) * 60;
       const heartbeatSec = Math.max(10, Math.floor(Number(heartbeatMin) || 10)) * 60; // 下限 10min，与后端归一一致
       await api.createTask({
         name: name.trim(),
+        remark: remark.trim(),
         categoryId: categoryID,
         description: description.trim(),
         goal: goal.trim(),
@@ -3197,6 +3202,7 @@ function CreateTaskSheet({
         seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
         coverageEnabled,
+        workerCount: workerCountNum,
         schedule: scheduleEnabled ? { ...schedule, task_ids: [] } : undefined,
         interceptRules: interceptRules
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
@@ -3204,6 +3210,7 @@ function CreateTaskSheet({
       });
       toast.success("任务已创建");
       setName("");
+      setRemark("");
       setCategoryID(undefined);
       setDescription("");
       setGoal("");
@@ -3215,6 +3222,7 @@ function CreateTaskSheet({
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
       setCoverageEnabled(true);
+      setWorkerCount("");
       setInterceptRules([]);
       setScheduleEnabled(false);
       setSchedule({
@@ -3263,15 +3271,19 @@ function CreateTaskSheet({
             <TaskTemplateControls
               description={description}
               goal={goal}
+              remark={remark}
               categoryID={categoryID}
               interceptRules={interceptRules}
+              workerCount={workerCount}
               selectedTemplateID={selectedTemplateID}
               onSelectedTemplateIDChange={setSelectedTemplateID}
               onApply={(template) => {
                 setDescription(template.description);
                 setGoal(template.goal);
+                setRemark(template.remark ?? "");
                 setCategoryID(template.category_id ?? undefined);
                 setInterceptRules(template.intercept_rules ?? []);
+                setWorkerCount(template.worker_count ? String(template.worker_count) : "");
                 setUploadCount(0);
               }}
               portalContainer={sheetContentRef}
@@ -3283,6 +3295,17 @@ function CreateTaskSheet({
                 placeholder="给任务起个便于识别的名字，例如：Acme 官网渗透"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="remark">备注（可选）</Label>
+              <Textarea
+                id="remark"
+                className="min-h-20"
+                maxLength={MAX_TASK_REMARK_RUNES}
+                placeholder="补充说明、环境信息等，便于在任务列表识别"
+                value={remark}
+                onChange={(e) => setRemark(e.target.value)}
               />
             </div>
             <Field>
@@ -3507,7 +3530,7 @@ function CreateTaskSheet({
               <CollapsibleTrigger className="group flex w-full items-center gap-2 border-t pt-4 text-sm font-medium">
                 <ChevronRightIcon className="text-muted-foreground size-4 transition-transform group-data-[state=open]:rotate-90" />
                 高级设置
-                <span className="text-muted-foreground ml-auto text-xs font-normal">超时 · 心跳 · 首个意图</span>
+                <span className="text-muted-foreground ml-auto text-xs font-normal">超时 · 心跳 · Worker · 首个意图</span>
               </CollapsibleTrigger>
               <CollapsibleContent className="grid gap-5 pt-5">
                 <div className="grid gap-2">
@@ -3539,6 +3562,23 @@ function CreateTaskSheet({
                   <p className="text-muted-foreground text-xs">
                     距上轮规划结束/任务开始满该时长且期间无触发，自动触发一轮规划（兜底卡死 + 唤醒去监督在跑的
                     worker）。下限 10 分钟。
+                  </p>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="worker-count">Worker 运行数量（可选）</Label>
+                  <Input
+                    id="worker-count"
+                    type="number"
+                    min={0}
+                    max={MAX_TASK_WORKER_COUNT}
+                    className="w-40"
+                    placeholder="留空 = 全局默认"
+                    value={workerCount}
+                    onChange={(e) => setWorkerCount(e.target.value)}
+                  />
+                  <p className="text-muted-foreground text-xs">
+                    单独设置本任务并发运行的工作 Agent 数量；留空或 0 = 用全局默认（系统设置里的工作并发，默认
+                    3）。上限 50。
                   </p>
                 </div>
                 <div className="grid gap-2">

@@ -70,6 +70,13 @@ const verification: Record<string, StatusMeta> = {
   rejected: { label: "已排除", tone: "slate" },
   legacy: { label: "历史未复核", tone: "neutral" },
 };
+export const SEVERITY_FILTER_OPTIONS = [
+  ["all", "全部"],
+  ["critical", severity.critical.label],
+  ["high", severity.high.label],
+  ["medium", severity.medium.label],
+  ["low", severity.low.label],
+] as const;
 
 const finding: Record<string, StatusMeta> = {
   pending: { label: "待处理", tone: "amber" },

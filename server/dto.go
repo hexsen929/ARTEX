@@ -44,10 +44,13 @@ type TaskDTO struct {
 	Goal               string             `json:"goal"`
 	Status             string             `json:"status"` // created | running | paused | done | failed
 	CreatedAt          string             `json:"created_at"`
-	CreatedUnix        int64              `json:"created_unix"`       // created_at as unix seconds (for run-duration calc)
+	CreatedUnix        int64              `json:"created_unix"`
 	CompletedAt        string             `json:"completed_at"`       // RFC3339 finish time (done/failed); "" if unfinished
 	CompletedUnix      int64              `json:"completed_unix"`     // completed_at as unix seconds (0 if unfinished)
 	LastActivity       int64              `json:"last_activity_unix"` // unix seconds of the last activity (0 if none)
+	RunSeconds         int64              `json:"run_seconds"`
+	ActiveRunSeconds   int64              `json:"active_run_seconds"`
+	RunSegmentStarted  int64              `json:"run_segment_started_unix"`
 	Paused             bool               `json:"paused"`
 	Queued             bool               `json:"queued"`
 	Tokens             TokenTotalDTO      `json:"tokens"` // whole-task token consumption
@@ -64,6 +67,7 @@ type TaskDTO struct {
 	ArchiveBlockedBy   string             `json:"archive_blocked_by_task_id,omitempty"`
 	CompanyIDs         []int64            `json:"company_ids"`
 	CoverageEnabled    bool               `json:"coverage_enabled"` // 资产覆盖度功能开关(创建时定)
+	WorkerCount        int                `json:"worker_count"`     // 本任务 Worker 数;0=用全局默认
 }
 
 // FindingSeverityDTO 是任务列表里按严重度分档的漏洞计数（严重/高/中/低）。
@@ -106,6 +110,7 @@ func tokenTotalDTO(u db.TokenUsage) TokenTotalDTO {
 
 func taskDTO(t *Task, status string) TaskDTO {
 	lifecycle := t.lifecycleSnapshot()
+	runSeconds := taskRunSeconds(lifecycle.ActiveRunSeconds, lifecycle.RunSegmentStartedAt, time.Now().Unix(), status, lifecycle.Paused, lifecycle.Queued)
 	llmState := t.llmStateSnapshot()
 	sourceIDs := make([]string, 0, len(lifecycle.SourceTaskIDs))
 	for _, id := range lifecycle.SourceTaskIDs {
@@ -126,6 +131,9 @@ func taskDTO(t *Task, status string) TaskDTO {
 		Status:             status,
 		CreatedAt:          rfc3339(time.Unix(t.CreatedAt, 0)),
 		CreatedUnix:        t.CreatedAt,
+		RunSeconds:         runSeconds,
+		ActiveRunSeconds:   lifecycle.ActiveRunSeconds,
+		RunSegmentStarted:  lifecycle.RunSegmentStartedAt,
 		CompletedAt:        completedRFC(lifecycle.CompletedAt),
 		CompletedUnix:      lifecycle.CompletedAt,
 		Paused:             lifecycle.Paused,
@@ -138,6 +146,7 @@ func taskDTO(t *Task, status string) TaskDTO {
 		SourceTaskIDs:      sourceIDs,
 		CompanyIDs:         lifecycle.CompanyIDs,
 		CoverageEnabled:    t.CoverageEnabled,
+		WorkerCount:        t.WorkerCount,
 	}
 }
 

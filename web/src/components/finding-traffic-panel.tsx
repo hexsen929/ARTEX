@@ -2,9 +2,13 @@
 
 import * as React from "react";
 
+import { useRouter } from "next/navigation";
+
 import { ArrowDownIcon, ArrowUpIcon, PlusIcon } from "lucide-react";
 import { toast } from "sonner";
 
+import { headersFromReqHead, requestFromEvidence } from "@/components/repeater/repeater-http";
+import { seedFromEvidence } from "@/components/repeater/repeater-store";
 import { TrafficEvidenceViewer } from "@/components/traffic-evidence-viewer";
 import { TrafficPickerDialog } from "@/components/traffic-picker-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -49,6 +53,8 @@ export function FindingTrafficPanel({
   const [error, setError] = React.useState("");
   const [adding, setAdding] = React.useState(false);
   const [preview, setPreview] = React.useState<string | null>(null);
+  const router = useRouter();
+  const [repeaterBusy, setRepeaterBusy] = React.useState(false);
   const [editing, setEditing] = React.useState<FindingTrafficBinding | null>(null);
   const [role, setRole] = React.useState<TrafficEvidenceRole>("supporting");
   const [note, setNote] = React.useState("");
@@ -94,20 +100,58 @@ export function FindingTrafficPanel({
     void mutate(() => api.orderFindingTraffic(findingId, ids, data.version, contextTask));
   }
 
+  async function seedRepeater(bindingId: string) {
+    setRepeaterBusy(true);
+    try {
+      const detail = await api.findingTrafficDetail(findingId, bindingId, contextTask);
+      if (detail.request.binary) toast.info("请求体为二进制，已留空；完整正文请先下载");
+      else if (detail.request.truncated) toast.info("请求体为预览片段，完整正文请先下载");
+      seedFromEvidence(
+        requestFromEvidence(
+          {
+            method: detail.binding.snapshot.method || "GET",
+            url: detail.binding.snapshot.url || "",
+            headersText: headersFromReqHead(detail.binding.snapshot.req_head),
+            body: detail.request.binary ? "" : detail.request.content || "",
+          },
+          detail.binding.snapshot.req_head,
+        ),
+        { findingId, bindingId },
+      );
+      router.push("/function/repeater");
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setRepeaterBusy(false);
+    }
+  }
+
   return (
     <>
       <Card>
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <CardTitle>关联流量 {data ? `(${data.bindings.length})` : ""}</CardTitle>
-            {!readOnly ? (
-              <Button variant="outline" size="sm" disabled={!data || busy} onClick={() => setAdding(true)}>
-                <PlusIcon data-icon="inline-start" />
-                绑定流量
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  seedFromEvidence({ method: "GET", url: "", headersText: "", body: "" });
+                  router.push("/function/repeater");
+                }}
+              >
+                打开请求重发
               </Button>
-            ) : (
-              <Badge variant="outline">继承证据 · 只读</Badge>
-            )}
+              {!readOnly ? (
+                <Button variant="outline" size="sm" disabled={!data || busy} onClick={() => setAdding(true)}>
+                  <PlusIcon data-icon="inline-start" />
+                  绑定流量
+                </Button>
+              ) : (
+                <Badge variant="outline">继承证据 · 只读</Badge>
+              )}
+            </div>
           </div>
           <CardDescription>按复现顺序组织请求与响应。清理原始流量后，已绑定证据仍然保留。</CardDescription>
         </CardHeader>
@@ -141,23 +185,26 @@ export function FindingTrafficPanel({
                   <Badge variant="secondary">
                     {b.snapshot.method} · {b.snapshot.status}
                   </Badge>
-                  <span className="text-xs text-muted-foreground">证据 #{b.id}</span>
+                  <span className="text-muted-foreground text-xs">证据 #{b.id}</span>
                 </div>
                 <Button
                   variant="link"
-                  className="h-auto justify-start p-0 text-left whitespace-normal"
+                  className="h-auto justify-start whitespace-normal p-0 text-left"
                   onClick={() => setPreview(b.id)}
                 >
                   <span className="break-all font-mono text-xs">{b.snapshot.url}</span>
                 </Button>
-                {b.note ? <p className="text-sm whitespace-pre-wrap">{b.note}</p> : null}
+                {b.note ? <p className="whitespace-pre-wrap text-sm">{b.note}</p> : null}
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs text-muted-foreground">
+                  <span className="text-muted-foreground text-xs">
                     {new Date(b.snapshot.captured_at * 1000).toLocaleString("zh-CN")}
                   </span>
                   <div className="flex flex-wrap gap-1">
                     <Button variant="outline" size="sm" onClick={() => setPreview(b.id)}>
                       查看报文
+                    </Button>
+                    <Button variant="outline" size="sm" disabled={repeaterBusy} onClick={() => void seedRepeater(b.id)}>
+                      送入请求重发
                     </Button>
                     {!readOnly ? (
                       <>

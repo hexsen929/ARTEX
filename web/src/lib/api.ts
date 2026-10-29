@@ -42,6 +42,7 @@ import type {
   DeleteTaskOptions,
   DeleteTaskResult,
   Edge,
+  EgressReport,
   EvidenceBodyPreview,
   ExplorationNodePage,
   ExplorationNodeQuery,
@@ -61,6 +62,8 @@ import type {
   FindingsPage,
   FindingTraffic,
   FindingTrafficDetail,
+  RepeaterSendRequest,
+  RepeaterSendResponse,
   IntelligencePage,
   IntentAsset,
   InterceptApprovalFilter,
@@ -267,6 +270,9 @@ function findingFilterParams(q: Omit<FindingQuery, "page" | "pageSize">): URLSea
   if (q.task && q.task !== "all") p.set("task_id", q.task);
   if (q.query?.trim()) p.set("q", q.query.trim());
   if (q.sort) p.set("sort", q.sort);
+  if (q.timeDirection) p.set("time_direction", q.timeDirection);
+  if (q.from) p.set("from", q.from);
+  if (q.to) p.set("to", q.to);
   if (q.assetScope) p.set("asset_scope", q.assetScope);
   return p;
 }
@@ -331,6 +337,7 @@ export const api = {
   task: (id: string) => get<Task>(`/tasks/${encodeURIComponent(id)}`),
   createTask: (input: {
     name?: string;
+    remark?: string;
     categoryId?: number;
     description: string;
     goal: string;
@@ -341,11 +348,13 @@ export const api = {
     seedFirstIntent?: boolean;
     planHeartbeatSeconds?: number;
     coverageEnabled?: boolean;
+    workerCount?: number;
     interceptRules?: AssetInterceptRuleInput[];
     schedule?: ScheduleInput;
   }) =>
     post<Task>("/tasks", {
       name: input.name ?? "",
+      remark: input.remark ?? "",
       category_id: input.categoryId ?? null,
       description: input.description,
       goal: input.goal,
@@ -356,6 +365,7 @@ export const api = {
       seed_first_intent: input.seedFirstIntent ?? false,
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
+      worker_count: input.workerCount ?? 0, // 0 = 用全局默认 workers
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
       schedule: input.schedule ? schedulePayload(input.schedule) : undefined,
     }),
@@ -388,11 +398,11 @@ export const api = {
     }),
   taskTemplates: () => get<{ templates: TaskTemplate[] }>("/task-templates").then((r) => arr(r.templates)),
   createTaskTemplate: (
-    input: Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">,
+    input: Pick<TaskTemplate, "name" | "description" | "goal" | "remark" | "category_id" | "intercept_rules" | "worker_count">,
   ) => post<TaskTemplate>("/task-templates", input),
   updateTaskTemplate: (
     id: number,
-    input: Partial<Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">>,
+    input: Partial<Pick<TaskTemplate, "name" | "description" | "goal" | "remark" | "category_id" | "intercept_rules" | "worker_count">>,
   ) => patch<TaskTemplate>(`/task-templates/${id}`, input),
   deleteTaskTemplate: (id: number) => del<{ deleted: number }>(`/task-templates/${id}`),
   updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number) =>
@@ -474,6 +484,10 @@ export const api = {
     }>(`/tasks/${id}/coverage`),
   // 资产覆盖图：范围内全部资产 + 连接用的根域名/公司节点，含 tested/in_scope。
   taskCoverageGraph: (id: string) => get<CoverageGraphData>(`/tasks/${id}/coverage-graph`),
+  startTopologyMapping: (id: string) =>
+    post<{ status: string; agent_key: string; conversation_id: number }>(`/tasks/${id}/topology-mapping`, {}),
+  topologyMappingStatus: (id: string) =>
+    get<{ running: boolean; conversation_id?: number }>(`/tasks/${id}/topology-mapping/status`),
   // 全局 llm_usage 聚合（仪表盘新版 token 视图）：按 profile 总量 + 按天分桶。
   usageStats: (days = 365) => get<UsageStats>(`/tokens/usage?days=${days}`),
   // ---- 目标管理（总览）----
@@ -663,9 +677,9 @@ export const api = {
     get<FindingCaseDetail>(
       `/exploration/finding-cases/${id}${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
     ),
-  findingCaseMembers: (id: string, page = 1, contextTask?: string) =>
+  findingCaseMembers: (id: string, page = 1, contextTask?: string, pageSize = 20) =>
     get<FindingsPage>(
-      `/exploration/finding-cases/${id}/members?page=${page}&limit=20${contextTask ? `&context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      `/exploration/finding-cases/${id}/members?page=${page}&limit=${pageSize}${contextTask ? `&context_task=${encodeURIComponent(contextTask)}` : ""}`,
     ),
   removeFindingCaseMember: (id: string, fid: string, reason: string) =>
     http<{ ok: boolean }>(`/exploration/finding-cases/${id}/members/${fid}`, {
@@ -676,8 +690,11 @@ export const api = {
     get<FindingCaseSuggestion[]>(
       `/exploration/finding-case-suggestions${task ? `?task_id=${encodeURIComponent(task)}` : ""}`,
     ),
-  resolveFindingCaseSuggestion: (id: string, accept: boolean) =>
-    post<{ case_id: string }>(`/exploration/finding-case-suggestions/${id}`, { accept }),
+  resolveFindingCaseSuggestion: (id: string, accept: boolean, excludeIds?: string[]) =>
+    post<{ case_id: string }>(`/exploration/finding-case-suggestions/${id}`, {
+      accept,
+      ...(excludeIds && excludeIds.length > 0 ? { exclude_ids: excludeIds } : {}),
+    }),
   reviewFindingCases: (ids: string[]) =>
     post<{ runs: { conversation_id: number; task_id: string }[] }>("/exploration/finding-case-review", {
       finding_ids: ids,
@@ -733,6 +750,11 @@ export const api = {
   findingInlineHistory: (findingId: string, signal?: AbortSignal) =>
     http<{ events: FindingInlineMergeEvent[] }>(`/findings/${encodeURIComponent(findingId)}/inline-history`, { signal })
       .then((r) => arr(r.events)),
+  generateFindingReport: (id: string) =>
+    post<{ queued: boolean; agent_key: "reporter"; finding_id: number; finding_node_id: number }>(
+      `/exploration/findings/${encodeURIComponent(id)}/generate-report`,
+      {},
+    ),
   findingTraffic: (id: string, contextTask?: string) =>
     get<FindingTraffic>(
       `/exploration/findings/${id}/traffic${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
@@ -767,6 +789,7 @@ export const api = {
     get<FindingTrafficDetail>(
       `/exploration/findings/${id}/traffic/${bindingId}${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
     ),
+  repeaterSend: (req: RepeaterSendRequest) => post<RepeaterSendResponse>("/repeater/send", req),
   findingTrafficBody: (
     id: string,
     bindingId: string,
@@ -922,6 +945,7 @@ export const api = {
     method = "",
     q = "",
     opts: {
+      taskId?: string;
       body?: string;
       path?: string;
       status?: string;
@@ -933,6 +957,7 @@ export const api = {
   ) =>
     get<TrafficResp>(
       `/traffic?page=${page}&size=${size}` +
+        (opts.taskId ? `&task_id=${encodeURIComponent(opts.taskId)}` : "") +
         (host ? `&host=${encodeURIComponent(host)}` : "") +
         (method && method !== "all" ? `&method=${encodeURIComponent(method)}` : "") +
         (q ? `&q=${encodeURIComponent(q)}` : "") +
@@ -945,7 +970,8 @@ export const api = {
         (opts.order ? `&order=${encodeURIComponent(opts.order)}` : ""),
     ),
   trafficExchange: (id: string) => get<TrafficDetail>(`/traffic/exchange?id=${encodeURIComponent(id)}`),
-  trafficHosts: () => get<{ hosts: TrafficHost[] }>(`/traffic/hosts`),
+  trafficHosts: (taskId?: string) =>
+    get<{ hosts: TrafficHost[] }>(`/traffic/hosts${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
   trafficDeleteHost: (host: string) => del<{ deleted: number }>(`/traffic?host=${encodeURIComponent(host)}`),
   trafficDeleteHosts: (hosts: string[]) => del<{ deleted: number }>(`/traffic/hosts`, { hosts }),
   // Purges every exchange and compacts the index; `reclaimed` is the bytes of
@@ -977,6 +1003,10 @@ export const api = {
     brave_search_api_key?: string;
     tavily_search_api_key?: string;
   }) => post<{ ok: boolean; error?: string; count?: number; backend?: string }>(`/settings/web-search/test`, patch),
+
+  // global_proxy 传空 = 测直连；probe_url 可覆盖默认探测地址（隔离网用）。
+  testEgressProxy: (patch: { global_proxy?: string; probe_url?: string }) =>
+    post<EgressReport>(`/settings/proxy/test`, patch),
 
   // ---- 漏洞 IM 推送 ----
   // 渠道是多实例资源（同一类型可配多个机器人、各有过滤规则），因此独立成组，

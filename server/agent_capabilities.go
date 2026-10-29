@@ -36,6 +36,11 @@ func bindingCapabilities(key string) agentBindingCapabilities {
 		c.RuntimeConfigMode = "llm_only"
 		c.AllowedToolKeys = []string{"set_goals", "set_constraints", "add_task_scope"}
 		c.Note = "只使用目标与约束工具，并可读取已授权 Skill 指导；不开放 Bash、MCP 或依赖执行能力。"
+	case "asset_mapper":
+		c.ToolBindingMode, c.MCPBindingMode, c.SkillBindingMode = "limited", "unsupported", "unsupported"
+		c.RuntimeConfigMode = "llm_only"
+		c.AllowedToolKeys = []string{"list_assets", "list_companies"}
+		c.Note = "只查询已登记资产与企业；不装配 Bash、文件读写、联网、MCP 或 Skill，超出边界的工具绑定会阻止本轮执行。"
 	default:
 		c.Note = "显示已启用的直接绑定；默认 SDK 工具、运行时开关及延迟开放状态另行决定实际能力。"
 	}

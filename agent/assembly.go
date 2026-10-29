@@ -55,6 +55,9 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 		// Skill/MCP/host dependencies for legacy misconfigured grants.
 		return []actool.CoreTool{}, DeferredInfo{}, func() {}
 	}
+	if agentKey == "asset_mapper" {
+		return augmentAssetMapperTools(ctx, base)
+	}
 	var (
 		def     DeferredInfo
 		cleanup = func() {}
@@ -123,6 +126,52 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 		out = []actool.CoreTool{}
 	}
 	return out, def, cleanup
+}
+
+// The topology assistant is a read-only catalog consumer, not a general chat
+// execution identity. This ceiling applies even to manually edited legacy
+// bindings or a caller supplying SDK defaults. Its assembler deliberately skips
+// ToolAugment, so Skill/MCP/host dependencies and their metadata are never read.
+func augmentAssetMapperTools(ctx context.Context, base []actool.CoreTool) ([]actool.CoreTool, DeferredInfo, func()) {
+	cleanup := func() {}
+	fail := func(err error) ([]actool.CoreTool, DeferredInfo, func()) {
+		return []actool.CoreTool{}, DeferredInfo{AssemblyError: err}, cleanup
+	}
+	validate := func(tools []actool.CoreTool) error {
+		if err := toolAssemblyError(tools); err != nil {
+			return err
+		}
+		for _, tool := range tools {
+			if tool == nil {
+				return fmt.Errorf("资产梳理只读工具元数据无效，本轮未执行")
+			}
+			if !IsAssetMapperToolAllowed(tool.Name()) || !tool.IsReadOnly(nil) {
+				return fmt.Errorf("资产梳理仅支持只读 list_assets/list_companies；工具 %q 超出角色能力，本轮未执行", tool.Name())
+			}
+		}
+		return nil
+	}
+	if err := validate(base); err != nil {
+		return fail(err)
+	}
+	out := append([]actool.CoreTool{}, base...)
+	if ToolResolve != nil {
+		out = ToolResolve(ctx, "asset_mapper", out)
+	}
+	if err := validate(out); err != nil {
+		return fail(err)
+	}
+	permitted := make([]actool.CoreTool, 0, len(out))
+	for _, tool := range out {
+		permitted = append(permitted, guardPanic(tool))
+	}
+	return permitted, DeferredInfo{}, cleanup
+}
+
+// IsAssetMapperToolAllowed is shared by the server catalog and the runner's
+// final hard boundary; a binding alone cannot grant anything beyond these reads.
+func IsAssetMapperToolAllowed(name string) bool {
+	return name == "list_assets" || name == "list_companies"
 }
 
 // IsGoalsToolAllowed is the hard capability ceiling for goal decomposition.

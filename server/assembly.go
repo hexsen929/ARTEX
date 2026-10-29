@@ -36,7 +36,9 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 		if err != nil || a == nil || !a.Enabled {
 			return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("执行角色 %s 不可用，未装配工具", agentKey)}, nil
 		}
-		if agentKey == db.CredentialAgentKey {
+		if agentKey == db.CredentialAgentKey || agentKey == "asset_mapper" {
+			// Data-only/asset-read-only roles do not initialize legacy Skill,
+			// MCP, browser, host-network or interactive execution dependencies.
 			return []actool.CoreTool{}, agent.DeferredInfo{}, nil
 		}
 		var extra []actool.CoreTool
@@ -237,6 +239,9 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 					closers = append(closers, cl)
 				}
 				for _, t := range ts {
+					// Existing explicit MCP grants remain authoritative, including
+					// screenshot tools. The reporter screenshot setting controls its
+					// optional report workflow, not other roles' saved browser grants.
 					t = meterTool(t, pg, t.Name(), a.Key, agent.RunInfoFrom(ctx))
 					extra = append(extra, t)
 					allNames = append(allNames, t.Name())
@@ -333,6 +338,12 @@ func idSet(ids []int64) map[int64]bool {
 // user edits survive restarts. Runs after seedBuiltins has created the agent rows.
 func seedPrompts(pg *db.DB) {
 	for key, tmpl := range agent.BuiltinPromptSeeds() {
+		if key == "asset_mapper" {
+			// Its first role/prompt/read-tool defaults are one atomic creation.
+			// An existing same-key role, including an empty custom prompt, stays
+			// untouched on restart or upgrade.
+			continue
+		}
 		a, err := pg.GetAgentByKey(key)
 		if err != nil || a == nil {
 			log.Printf("[prompts] seed %s 跳过: agent 不存在 (%v)", key, err)
@@ -365,9 +376,34 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 	// Seed the built-in domain tools (first-insert only; DO NOTHING preserves edits).
 	// No startup prune: rows we didn't seed are left alone so future user-defined
 	// custom tools (system=false, added via the UI) survive restarts.
-	for _, s := range agent.BuiltinToolSeeds() {
+	seeds := agent.BuiltinToolSeeds()
+	var mapperReaders []db.Tool
+	for _, s := range seeds {
+		if !agent.IsAssetMapperToolAllowed(s.Key) {
+			continue
+		}
+		schema, err := json.Marshal(s.Schema)
+		if err != nil {
+			log.Printf("[tools] 资产梳理默认只读工具元数据无效: %v", err)
+			continue
+		}
+		mapperReaders = append(mapperReaders, db.Tool{Key: s.Key, System: true, Description: s.Desc, Schema: schema, Agents: s.Agents, Enabled: true, Kind: "builtin"})
+	}
+	if _, err := pg.SeedAssetMapperIfMissing(agent.BuiltinPromptSeeds()["asset_mapper"], mapperReaders); err != nil {
+		log.Printf("[tools] 资产梳理首次初始化失败，未补写已有角色配置: %v", err)
+	}
+	for _, s := range seeds {
 		schema, _ := json.Marshal(s.Schema)
-		agents, _ := json.Marshal(s.Agents)
+		// Only the atomic first-creation helper may grant mapper defaults.
+		// Otherwise a missing tools row could re-grant an existing role that
+		// deliberately has no selected tools, even though its helper is a no-op.
+		defaults := make([]string, 0, len(s.Agents))
+		for _, key := range s.Agents {
+			if key != "asset_mapper" {
+				defaults = append(defaults, key)
+			}
+		}
+		agents, _ := json.Marshal(defaults)
 		if err := pg.SeedTool(s.Key, s.Desc, schema, agents); err != nil {
 			log.Printf("[tools] seed %s 失败: %v", s.Key, err)
 		}
@@ -394,6 +430,12 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		if agentKey == db.CredentialAgentKey {
 			return []actool.CoreTool{}
 		}
+		if agentKey == "asset_mapper" {
+			a, err := pg.GetAgentByKey(agentKey)
+			if err != nil || a == nil || !a.Enabled {
+				return agent.ToolAssemblyFailure(fmt.Errorf("资产梳理角色不可用，未装配工具"))
+			}
+		}
 		rows, err := pg.ListTools()
 		if err != nil {
 			log.Printf("[tools] 读取工具表失败，本轮工具装配已停止")
@@ -410,6 +452,26 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 				_ = json.Unmarshal(row.Schema, &schema)
 			}
 			return meterTool(agent.DecorateTool(t, row.Description, schema), pg, row.Key, agentKey, runInfo)
+		}
+		if agentKey == "asset_mapper" {
+			// The mapper is a read-only database view, not an execution role.
+			// Saved bindings may narrow the two readers, but cannot turn a
+			// shell/custom/host tool into a supported mapper capability.
+			out := []actool.CoreTool{}
+			for _, row := range rows {
+				if !row.Enabled || !contains(row.Agents, agentKey) {
+					continue
+				}
+				if !row.System || row.Kind != "builtin" || !agent.IsAssetMapperToolAllowed(row.Key) {
+					return agent.ToolAssemblyFailure(fmt.Errorf("资产梳理存在不支持的工具绑定，未装配工具"))
+				}
+				reader := domainReg[row.Key]
+				if reader == nil {
+					return agent.ToolAssemblyFailure(fmt.Errorf("资产梳理只读工具不可用，未装配工具"))
+				}
+				out = append(out, resolve(reader, row))
+			}
+			return out
 		}
 		out := tools[:0:0]
 		for _, t := range tools {

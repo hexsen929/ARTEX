@@ -2,6 +2,8 @@
 
 本 fork 在 `85cc3d9`（RuoJi6 更新与本地定制、Norma 0.4.3）基础上，移植 `panda0x123/artex-ymh@48adc7f` 的已实现功能。来源项目基于更早的 ARTEX 分支，本次不是降级替换，也不引入其原有发布源或发布密钥。
 
+后续上游同步：RuoJi6/ARTEX 已合并至 [`1f6028d`](https://github.com/RuoJi6/ARTEX/commit/1f6028d10a1ba214537ee782ae6860a866ee3cc3)。保留本 fork 的证据验证、凭据管理、任务资源隔离、授权及 Responses 诊断修复；多模型 Worker 池等新功能需在设置中显式配置，未配置时沿用既有行为。此处的源码同步不代表已经替换某台部署机器。
+
 ## 已实现功能范围
 
 | 子系统 | 移植内容 | 部署与验证边界 |
