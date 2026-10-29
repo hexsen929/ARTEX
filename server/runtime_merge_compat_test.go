@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,9 +50,18 @@ func TestRuntimeMergeLegacyAndPinnedWorkersKeepCheckedTaskProxy(t *testing.T) {
 	proxyFailure := errors.New("fixture task route unavailable")
 	m.taskProxyInitErr = proxyFailure
 	id, _ := strconv.ParseInt(task.ID, 10, 64)
+	if task.Guard == nil {
+		t.Fatal("fixture task lost its configured guard")
+	}
+	// Match Engine.runIntent: the task guard exposes the HookRunner registry,
+	// wrapped by steerHooks rather than passing the Guard configuration itself.
+	hooks := steerHooks{
+		inner: task.Guard.Hooks(), drain: func() (string, bool) { return "", false },
+		nudges: &atomic.Int64{}, limit: s.engine.emptyTurnNudgeLimit(), label: "runtime merge fixture",
+	}
 	for name, worker := range map[string]*agent.Worker{"legacy": legacy, "pinned": pinned} {
 		t.Run(name, func(t *testing.T) {
-			reason, _, err := worker.Execute(t.Context(), "work#1", id, nil, task.Store, nil, task.Guard, nil, nil, nil)
+			reason, _, err := worker.Execute(t.Context(), "work#1", id, nil, task.Store, nil, hooks, nil, nil, nil)
 			if reason != harness.ReasonHookStopped || !errors.Is(err, proxyFailure) || !strings.Contains(err.Error(), "任务代理未就绪") {
 				t.Fatalf("worker did not stop before model/tool execution on task route failure: %s %v", reason, err)
 			}

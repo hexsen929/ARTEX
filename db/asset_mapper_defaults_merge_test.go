@@ -22,6 +22,9 @@ func mapperDefaultsFixtureDB(t *testing.T) (*DB, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Close() })
+	if role, err := d.GetAgentByKey("asset_mapper"); err != nil || role != nil {
+		t.Fatal("DB.Open created an asset mapper before atomic catalog initialization", err)
+	}
 	return d, dsn
 }
 

@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -116,10 +118,6 @@ func TestUpstreamMergeFindingSuggestionsSameAnchorsDifferentSets(t *testing.T) {
 func upstreamMergeFixtureDSN(t *testing.T) string {
 	t.Helper()
 	dsn := testDSN(t)
-	cfg, err := pgx.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
 	admin, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -136,8 +134,69 @@ func upstreamMergeFixtureDSN(t *testing.T) string {
 		}
 		admin.Close()
 	})
-	cfg.Database = name
-	return cfg.ConnString()
+	fixtureDSN, err := upstreamMergeDatabaseDSN(dsn, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Config.ConnString() returns pgx's ORIGINAL connection string; assigning
+	// Config.Database then calling ConnString silently reuses the package DB.
+	// Verify identity before any Open/schema/fixture writes can touch a database.
+	probe, err := sql.Open("pgx", fixtureDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Close()
+	var connected string
+	if err := probe.QueryRowContext(t.Context(), `SELECT current_database()`).Scan(&connected); err != nil {
+		t.Fatal(err)
+	}
+	if connected != name {
+		t.Fatalf("migration fixture connected to %q instead of its isolated database %q", connected, name)
+	}
+	return fixtureDSN
+}
+
+func upstreamMergeDatabaseDSN(dsn, database string) (string, error) {
+	if _, err := pgx.ParseConfig(dsn); err != nil {
+		return "", err
+	}
+	u, err := url.Parse(dsn)
+	if err == nil && (u.Scheme == "postgres" || u.Scheme == "postgresql") {
+		u.Path, u.RawPath = "/"+database, ""
+		query := u.Query()
+		query.Del("dbname") // an explicit query override must not defeat the new path
+		u.RawQuery = query.Encode()
+		return u.String(), nil
+	}
+	// libpq keyword DSNs accept a final dbname override. Escape the value rather
+	// than reconstructing credentials/TLS/runtime options from parsed fields.
+	value := strings.ReplaceAll(strings.ReplaceAll(database, `\`, `\\`), `'`, `\'`)
+	return dsn + " dbname='" + value + "'", nil
+}
+
+func TestUpstreamMergeFixtureDSNTargetsNewDatabase(t *testing.T) {
+	for _, original := range []string{
+		"postgres://fixture:fixture-pass@127.0.0.1:5432/package_db?sslmode=disable&application_name=merge-fixture",
+		"postgresql://fixture@127.0.0.1:5432/package_db?sslmode=disable",
+		"postgres://fixture@127.0.0.1:5432/package_db?sslmode=disable&dbname=another_package_db",
+		"host=127.0.0.1 port=5432 user=fixture password=fixture-pass dbname=package_db sslmode=disable application_name=merge-fixture",
+	} {
+		before, err := pgx.ParseConfig(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dsn, err := upstreamMergeDatabaseDSN(original, "isolated_merge_fixture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := pgx.ParseConfig(dsn)
+		if err != nil || after.Database != "isolated_merge_fixture" {
+			t.Fatalf("fixture DSN did not select its own database: %v", err)
+		}
+		if after.Host != before.Host || after.Port != before.Port || after.User != before.User || after.Password != before.Password || !reflect.DeepEqual(after.RuntimeParams, before.RuntimeParams) || (after.TLSConfig == nil) != (before.TLSConfig == nil) {
+			t.Fatal("fixture database override changed connection credentials or options")
+		}
+	}
 }
 
 func TestUpstreamMergeLegacyPairMigrationReopenIsIdempotent(t *testing.T) {

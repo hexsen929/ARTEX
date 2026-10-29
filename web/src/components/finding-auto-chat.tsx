@@ -30,6 +30,17 @@ export function FindingAutoChat({
     ? `/api/tasks/${encodeURIComponent(taskId ?? "")}/chat?agent=auto&finding_id=${encodeURIComponent(findingId)}`
     : null;
   const side = useSideQuestions(parent);
+  const openValue = React.useRef(open);
+  openValue.current = open;
+  const setWorkspaceOpen = React.useCallback((update: React.SetStateAction<boolean>) => {
+    // The shared workspace accepts a React Dispatch, including functional
+    // updates. Resolve against the latest controlled value, then synchronize
+    // both state owners without putting external callbacks in a state updater.
+    const next = typeof update === "function" ? update(openValue.current) : update;
+    openValue.current = next;
+    side.setOpen(next && !!parent);
+    onOpenChange(next);
+  }, [onOpenChange, parent, side.setOpen]);
   React.useEffect(() => {
     side.setOpen(open && !!parent);
   }, [open, parent, side.setOpen]);
@@ -48,7 +59,7 @@ export function FindingAutoChat({
   }
   return (
     <SideQuestionWorkspace
-      side={{ ...side, open, setOpen: onOpenChange }}
+      side={{ ...side, open, setOpen: setWorkspaceOpen }}
       mode="floating"
       label={`任务 #${taskId} · 共享任务旁路历史（清空影响共享问答）· Auto 只读分析 · 发现 #${findingId} · ${safeTitle}`}
       placeholder="仅分析已保存的发现与任务证据，不执行工具…"
