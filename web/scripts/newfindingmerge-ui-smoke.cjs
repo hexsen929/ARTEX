@@ -162,8 +162,12 @@ async function main() {
   assertFilters("/api/exploration/findings/asset-tree", from);
   assertFilters("/api/exploration/finding-cases", from);
   await page.getByRole("tab", { name: "按漏洞", exact: true }).click();
-  await page.getByText("UI_FIXTURE_UNVERIFIED", { exact: true }).first().waitFor();
+  // The case view uses FindingCaseMemberRow: its visible report link deliberately
+  // includes the stable report ID. Flat/group tables render the name separately.
+  await page.getByRole("link", { name: "#501 UI_FIXTURE_UNVERIFIED", exact: true }).waitFor();
+  assert.equal(await page.getByRole("link", { name: "#502 UI_FIXTURE_CONFIRMED", exact: true }).count(), 0);
   assertFilters("/api/exploration/finding-cases", from);
+  assert.equal(last("/api/exploration/finding-cases").query.asset_scope, undefined);
   console.log("PASS asset and case views keep verification/date filters");
   await page.goto(origin + "/function/findings/detail/?id=501", { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "更新验证", exact: true }).waitFor();
@@ -216,7 +220,20 @@ async function main() {
   assert.deepEqual([...external], [], "Fixture attempted an external connection");
   await context.close();
 }
-main().catch((error) => { console.error(error); process.exitCode = 1; }).finally(async () => {
+main().catch(async (error) => {
+  console.error(error);
+  // This server contains only synthetic fixtures. Keep failures diagnosable in
+  // CI without running a real service or requesting live task/credential data.
+  console.error("Recent synthetic API queries:", JSON.stringify(requests.slice(-12)));
+  const page = browser?.contexts()[0]?.pages()[0];
+  if (page && !page.isClosed()) {
+    try {
+      console.error("Fixture route:", page.url());
+      console.error("Fixture visible text:", (await page.locator("body").innerText()).slice(0, 6000));
+    } catch { /* The original failure remains authoritative if the page closed. */ }
+  }
+  process.exitCode = 1;
+}).finally(async () => {
   if (browser) await browser.close();
   await new Promise((resolve) => server.close(resolve));
 });

@@ -1,9 +1,9 @@
 package server
 
 import (
-	"bytes"
 	"database/sql"
 	"net/http"
+	"reflect"
 	"testing"
 
 	"github.com/Autumn-27/artex/config"
@@ -48,8 +48,8 @@ func TestMergeScreenshotOptInDoesNotEnableDisabledMCPOrMutateOtherSettings(t *te
 	}
 	servers, _ := s.m.pg.ListMCP()
 	for _, after := range servers {
-		if after.ID == browser.ID && (after.Enabled || !bytes.Equal(after.Args, browser.Args)) {
-			t.Fatal("screenshot opt-in rewrote administrator MCP settings")
+		if after.ID == browser.ID && (after.Enabled || !reflect.DeepEqual(decodeStrSlice(after.Args), decodeStrSlice(browser.Args))) {
+			t.Fatalf("screenshot opt-in rewrote administrator MCP settings: enabled=%v args=%s", after.Enabled, after.Args)
 		}
 	}
 }
@@ -75,7 +75,7 @@ func TestMergeScreenshotOptInOnlyChangesReporterGrant(t *testing.T) {
 		if priorErr == sql.ErrNoRows {
 			_, _ = s.m.pg.Exec(`DELETE FROM agent_visibility WHERE agent_id=$1 AND resource_kind='mcp' AND resource_id=$2 AND mcp_tool_name=''`, reporter.ID, browser.ID)
 		} else {
-			_ = s.m.pg.ToggleVisibility(reporter.ID, "mcp", browser.ID, prior)
+			_, _ = s.m.pg.Exec(`INSERT INTO agent_visibility(agent_id,resource_kind,resource_id,mcp_tool_name,enabled) VALUES($1,'mcp',$2,'',$3) ON CONFLICT(agent_id,resource_kind,resource_id,mcp_tool_name) DO UPDATE SET enabled=EXCLUDED.enabled`, reporter.ID, browser.ID, prior)
 		}
 	})
 	otherGrants := func() string {
@@ -91,7 +91,7 @@ func TestMergeScreenshotOptInOnlyChangesReporterGrant(t *testing.T) {
 			t.Fatal(err)
 		}
 		var granted bool
-		if err := s.m.pg.QueryRow(`SELECT enabled FROM agent_visibility WHERE agent_id=$1 AND resource_kind='mcp' AND resource_id=$2 AND mcp_tool_name=''`, reporter.ID, browser.ID).Scan(&granted); err != nil || granted != enabled {
+		if err := s.m.pg.QueryRow(`SELECT EXISTS(SELECT 1 FROM agent_visibility WHERE agent_id=$1 AND resource_kind='mcp' AND resource_id=$2 AND mcp_tool_name='' AND enabled)`, reporter.ID, browser.ID).Scan(&granted); err != nil || granted != enabled {
 			t.Fatalf("reporter grant=%v err=%v want=%v", granted, err, enabled)
 		}
 		if otherGrants() != beforeOther {
@@ -100,8 +100,8 @@ func TestMergeScreenshotOptInOnlyChangesReporterGrant(t *testing.T) {
 	}
 	servers, _ := s.m.pg.ListMCP()
 	for _, after := range servers {
-		if after.ID == browser.ID && (!after.Enabled || !bytes.Equal(after.Args, browser.Args)) {
-			t.Fatal("reporter grant toggle changed MCP configuration")
+		if after.ID == browser.ID && (!after.Enabled || !reflect.DeepEqual(decodeStrSlice(after.Args), decodeStrSlice(browser.Args))) {
+			t.Fatalf("reporter grant toggle changed MCP configuration: enabled=%v args=%s", after.Enabled, after.Args)
 		}
 	}
 	for _, key := range []string{"worker_pools", "opsec_enabled", "show_egress_ip", db.SettingFindingInlineMerge, db.SettingCredentialAgent} {

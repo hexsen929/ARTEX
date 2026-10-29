@@ -12,7 +12,7 @@ import (
 
 func TestMergeScreenshotSettingDoesNotNarrowExplicitMCPGrant(t *testing.T) {
 	pg := openIntranetTestDB(t)
-	key := "merge-browser-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	key := "merge_browser_" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	a, err := pg.CreateAgent(key, "Browser merge fixture", "fixture")
 	if err != nil {
 		t.Fatal(err)
