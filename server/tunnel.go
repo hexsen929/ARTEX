@@ -89,7 +89,7 @@ func (s *Server) roeCheckHost(ctx context.Context, host string) (string, error) 
 	if ri.TaskID <= 0 || s.m.pg == nil || host == "" {
 		return "", nil
 	}
-	mode, _, settingErr := s.m.pg.GetSetting(settingRoEEnforcement)
+	mode, settingErr := readRoEEnforcementSetting(s.m.pg)
 	if settingErr != nil {
 		return "", fmt.Errorf("读取任务范围策略失败: %w", settingErr)
 	}
@@ -108,12 +108,12 @@ func (s *Server) roeCheckHost(ctx context.Context, host string) (string, error) 
 		return "", nil
 	}
 	msg := fmt.Sprintf("RoE 授权范围检查：隧道目标 %s 不在本任务(task %d)已登记范围内。"+
-		"如需放行：把目标加入任务范围(add_task_scope)，或在系统设置把 roe_enforcement 改为 warn/off。",
+		"请核对目标及真实授权；仅在确认授权后登记任务范围，本提示不会自动扩大范围。",
 		host, ri.TaskID)
 	if strings.EqualFold(strings.TrimSpace(mode), "strict") {
-		return "", fmt.Errorf("%s", msg)
+		return "", fmt.Errorf("%s 当前模式 strict，此操作未执行。", msg)
 	}
-	return "⚠ " + msg, nil
+	return "⚠ " + msg + " 当前模式 warn，仅告警放行；其他检查仍然生效。", nil
 }
 
 // sessionVerifyAddr 取立足点会话的 webshell host:port 作为 socks 决定性验证目标

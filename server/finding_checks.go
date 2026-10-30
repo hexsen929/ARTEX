@@ -25,10 +25,11 @@ import (
 // off 时自动派发跳过(水位照常前进,不回放),手动单条验证(POST checks)不受影响。
 const settingFindingVerifyMode = "finding_verify_mode"
 
-// findingVerifyAutoEnabled reports whether the auto-dispatch path is on. Only the
-// explicit "off" disables it — a missing/unknown value keeps the auto default.
+// findingVerifyAutoEnabled accepts only a known explicit automatic mode. The
+// database reader supplies "auto" for an absent setting; malformed stored values
+// must not silently enable networked automatic work.
 func findingVerifyAutoEnabled(mode string) bool {
-	return mode != "off"
+	return mode == "auto"
 }
 
 // Automatic work requires both switches: the global mode and the editable
@@ -48,12 +49,15 @@ func (s *Server) automaticFindingVerificationEnabled() (bool, error) {
 	var mode string
 	var agentEnabled, triggerEnabled bool
 	err := s.m.pg.QueryRowContext(ctx, `SELECT
-COALESCE((SELECT value FROM settings WHERE key=$1),''),
+COALESCE((SELECT value FROM settings WHERE key=$1),'auto'),
 EXISTS(SELECT 1 FROM agents WHERE key=$2 AND enabled),
 EXISTS(SELECT 1 FROM agent_triggers WHERE agent_key=$2 AND enabled AND on_finding)`,
 		settingFindingVerifyMode, db.FindingVerifierAgentKey).Scan(&mode, &agentEnabled, &triggerEnabled)
 	if err != nil {
 		return false, err
+	}
+	if mode != "auto" && mode != "off" {
+		return false, errors.New("自动复核模式设置无效，未派发新自动任务；请显式保存 auto 或 off")
 	}
 	return findingVerifyAutoEnabled(mode) && agentEnabled && triggerEnabled, nil
 }
@@ -208,7 +212,7 @@ func (s *Server) requestFindingCheck(findingID int64, kind string) (*db.FindingC
 		return nil, false, errors.New("漏洞验证 Agent 不存在或未启用，请在 Agent 管理中配置 verifier")
 	}
 	if s.resolveChatAgent(&db.Conversation{AgentKey: a.Key}) == nil {
-		return nil, false, errors.New(s.chatUnavailableReason())
+		return nil, false, errors.New(s.chatUnavailableReason(&db.Conversation{AgentKey: a.Key}))
 	}
 	if s.ctx.Err() != nil {
 		return nil, false, errors.New("服务正在停止")

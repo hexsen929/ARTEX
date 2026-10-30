@@ -159,7 +159,7 @@ func (s *Server) sessionRoECheck(ctx context.Context, rawURL string) (string, er
 	if err != nil || u.Hostname() == "" {
 		return "", nil // 提取不出目标 = 无目标,不拦截（与 guard RoE 保守取向一致）
 	}
-	mode, _, settingErr := s.m.pg.GetSetting(settingRoEEnforcement)
+	mode, settingErr := readRoEEnforcementSetting(s.m.pg)
 	if settingErr != nil {
 		return "", fmt.Errorf("读取任务范围策略失败: %w", settingErr)
 	}
@@ -177,13 +177,13 @@ func (s *Server) sessionRoECheck(ctx context.Context, rawURL string) (string, er
 	if verdict != guard.ScopeOut {
 		return "", nil
 	}
-	msg := fmt.Sprintf("RoE 授权范围检查：webshell 目标 %s 不在本任务(task %d)已登记范围内。"+
-		"如需放行：把目标加入任务范围(add_task_scope)，或在系统设置把 roe_enforcement 改为 warn/off。",
+	msg := fmt.Sprintf("RoE 授权范围检查：会话目标 %s 不在本任务(task %d)已登记范围内。"+
+		"请核对目标及真实授权；仅在确认授权后登记任务范围，本提示不会自动扩大范围。",
 		u.Hostname(), ri.TaskID)
 	if strings.EqualFold(strings.TrimSpace(mode), "strict") {
-		return "", fmt.Errorf("%s", msg)
+		return "", fmt.Errorf("%s 当前模式 strict，此操作未执行。", msg)
 	}
-	return "⚠ " + msg, nil // warn：告警放行
+	return "⚠ " + msg + " 当前模式 warn，仅告警放行；其他检查仍然生效。", nil
 }
 
 // --- host 工具（默认绑 worker;seed 进 tools 表，按 agent 过滤） ---

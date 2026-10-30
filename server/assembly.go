@@ -57,6 +57,15 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 Skill 角色 %s 失败", skillAgentKey)}, nil
 			}
 		}
+		// An unknown installation catalog must not turn a never-initialized
+		// built-in role into a silently empty authorization choice. Explicit old
+		// selections (including false/empty choices) are retained by the DB check.
+		for _, role := range []*db.Agent{skillAgent, a} {
+			configured, configErr := pg.BuiltinSkillDefaultsConfigured(role.ID, role.Key)
+			if configErr != nil || !configured {
+				return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("角色 %s 的默认 Skill 授权尚未完成初始化或读取失败；请检查 Skill 根目录，本轮未装配工具", role.Key)}, nil
+			}
+		}
 		names, skillErr := pg.AgentSkillNames(skillAgent.ID)
 		if skillErr != nil {
 			return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 Skill 角色 %s 的授权失败，未装配工具", skillAgentKey)}, nil

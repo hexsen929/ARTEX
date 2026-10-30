@@ -46,7 +46,7 @@ func TestRoEStrictBlocksOutOfScope(t *testing.T) {
 		t.Fatal("strict 模式下范围外目标应被拦截")
 	}
 	if !strings.Contains(msg, "evil.com") || !strings.Contains(msg, "roe_enforcement") {
-		t.Errorf("拦截消息应写明 host 与关闭/降级方式, got: %s", msg)
+		t.Errorf("拦截消息应写明 host 与当前检查设置, got: %s", msg)
 	}
 }
 

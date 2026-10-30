@@ -36,6 +36,26 @@ func (s *Server) callbackHostForTunnel(adapter string) (string, error) {
 }
 
 func (s *Server) writeSettingsPayload(w http.ResponseWriter) {
+	roeMode, roeErr := readRoEEnforcementSetting(s.m.pg)
+	if roeErr != nil {
+		writeErr(w, http.StatusInternalServerError, roeErr.Error())
+		return
+	}
+	verifyMode, verifyErr := readFindingVerifyModeSetting(s.m.pg)
+	if verifyErr != nil {
+		writeErr(w, http.StatusInternalServerError, verifyErr.Error())
+		return
+	}
+	retentionDays, retentionErr := readLLMRecordsRetentionSetting(s.m.pg)
+	if retentionErr != nil {
+		writeErr(w, http.StatusInternalServerError, retentionErr.Error())
+		return
+	}
+	notify, notifyErr := readNotifyGlobalSettings(s.m.pg)
+	if notifyErr != nil {
+		writeErr(w, http.StatusInternalServerError, notifyErr.Error())
+		return
+	}
 	pools, poolErr := s.m.WorkerPoolsChecked()
 	if poolErr != nil {
 		writeErr(w, http.StatusInternalServerError, "Worker 模型池读取失败；保留已有配置，请先修复设置")
@@ -59,6 +79,12 @@ func (s *Server) writeSettingsPayload(w http.ResponseWriter) {
 		return
 	}
 	payload := s.settingsPayload()
+	payload["roe_enforcement"] = roeMode
+	payload["finding_verify_mode"] = verifyMode
+	payload["llm_records_retention_days"] = retentionDays
+	payload["notify_enabled"] = notify.Enabled
+	payload["notify_public_base_url"] = notify.PublicBaseURL
+	payload["notify_digest_interval_min"] = notify.DigestMinutes
 	payload["worker_pools"] = pools
 	payload["workers"] = workers
 	payload["callback_addr"] = callback.Address

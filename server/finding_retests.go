@@ -109,7 +109,7 @@ func (s *Server) startFindingRetest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if s.resolveChatAgent(&db.Conversation{AgentKey: a.Key}) == nil {
-		writeErr(w, 503, s.chatUnavailableReason())
+		writeErr(w, 503, s.chatUnavailableReason(&db.Conversation{AgentKey: a.Key}))
 		return
 	}
 	if s.ctx.Err() != nil {

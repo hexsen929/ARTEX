@@ -43,6 +43,19 @@ import type { Agent, Tool } from "@/lib/types";
 // only usable when capture is on. Keep in sync with traffic.SeedToolMetas.
 const TRAFFIC_TOOL_KEYS = new Set(["traffic_search", "traffic_get"]);
 
+function useToolEditorLifetime() {
+  const lifetime = React.useRef({ active: true, generation: 0 });
+  React.useEffect(() => {
+    lifetime.current.active = true;
+    lifetime.current.generation++;
+    return () => {
+      lifetime.current.active = false;
+      lifetime.current.generation++;
+    };
+  }, []);
+  return lifetime;
+}
+
 // paramRows flattens schema.properties into an ordered row list for editing.
 // name/type/required are read-only (welded to the Go handler); description/default
 // are editable. Non-scalar params (array/object) can't carry an editable default.
@@ -165,6 +178,11 @@ function ToolEditor({
   const [enabled, setEnabled] = React.useState(tool.enabled);
   const [rows, setRows] = React.useState<ParamRow[]>(() => toRows(tool.schema));
   const [saving, setSaving] = React.useState(false);
+  const lifetime = useToolEditorLifetime();
+  const mutationBusy = React.useRef(false);
+  const draftSignature = JSON.stringify({ description, bound, enabled, rows });
+  const latestDraft = React.useRef(draftSignature);
+  latestDraft.current = draftSignature;
 
   const setRow = (i: number, patch: Partial<ParamRow>) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
@@ -172,7 +190,10 @@ function ToolEditor({
     setBound((b) => (b.includes(k) ? b.filter((x) => x !== k) : [...b, k]));
 
   async function save() {
-    if (!bindingsReady) return;
+    if (!bindingsReady || mutationBusy.current) return;
+    mutationBusy.current = true;
+    const generation = lifetime.current.generation;
+    const submitted = draftSignature;
     setSaving(true);
     try {
       await api.saveTool(tool.key, {
@@ -181,23 +202,36 @@ function ToolEditor({
         agents: bound,
         enabled,
       });
-      toast.success(`已保存工具「${tool.key}」`);
       onSaved();
-      onClose();
+      if (lifetime.current.active && generation === lifetime.current.generation) {
+        toast.success(`已保存工具「${tool.key}」`);
+        if (latestDraft.current === submitted) onClose();
+      }
     } catch (e) {
-      toast.error("保存失败：" + (e as Error).message);
+      if (lifetime.current.active && generation === lifetime.current.generation) toast.error("保存失败：" + (e as Error).message);
     } finally {
-      setSaving(false);
+      mutationBusy.current = false;
+      if (lifetime.current.active && generation === lifetime.current.generation) setSaving(false);
     }
   }
   async function reset() {
+    if (mutationBusy.current) return;
+    mutationBusy.current = true;
+    const generation = lifetime.current.generation;
+    const submitted = draftSignature;
+    setSaving(true);
     try {
       await api.resetTool(tool.key);
-      toast.success(`已恢复「${tool.key}」为代码默认`);
       onSaved();
-      onClose();
+      if (lifetime.current.active && generation === lifetime.current.generation) {
+        toast.success(`已恢复「${tool.key}」为代码默认`);
+        if (latestDraft.current === submitted) onClose();
+      }
     } catch (e) {
-      toast.error("恢复失败：" + (e as Error).message);
+      if (lifetime.current.active && generation === lifetime.current.generation) toast.error("恢复失败：" + (e as Error).message);
+    } finally {
+      mutationBusy.current = false;
+      if (lifetime.current.active && generation === lifetime.current.generation) setSaving(false);
     }
   }
 
@@ -556,8 +590,8 @@ export default function ToolsPage() {
         agents={agents}
         bindingsReady={resourcesReady}
         onClose={() => setCustomEdit(null)}
-        onSaved={() => {
-          setCustomEdit(null);
+        onSaved={(closeEditor = true) => {
+          if (closeEditor) setCustomEdit(null);
           reload();
         }}
       />
@@ -590,7 +624,7 @@ function CustomToolDialog({
   agents: Agent[];
   bindingsReady: boolean;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (closeEditor?: boolean) => void;
 }) {
   const isNew = edit === "new";
   const tool = edit && edit !== "new" ? edit : null;
@@ -608,6 +642,18 @@ function CustomToolDialog({
   const [paramsText, setParamsText] = React.useState("");
   const [testing, setTesting] = React.useState(false);
   const [testResult, setTestResult] = React.useState<{ output: string; is_error: boolean } | null>(null);
+  const lifetime = useToolEditorLifetime();
+  const mutationBusy = React.useRef(false);
+  const testRequest = React.useRef(0);
+  const testBusy = React.useRef(false);
+  const draftSignature = JSON.stringify({ key, description, kind, ex, schemaText, bound, deferred, enabled });
+  const testSignature = JSON.stringify({ kind, ex, paramsText });
+  const latestDraft = React.useRef(draftSignature);
+  const latestTest = React.useRef(testSignature);
+  latestDraft.current = draftSignature;
+  latestTest.current = testSignature;
+
+  React.useEffect(() => { setTestResult(null); }, [testSignature]);
 
   // (re)load form state when opening.
   React.useEffect(() => {
@@ -656,7 +702,7 @@ function CustomToolDialog({
   }
 
   async function save() {
-    if (!bindingsReady) return;
+    if (!bindingsReady || mutationBusy.current) return;
     if (isNew && !/^[a-z][a-z0-9_]*$/.test(key.trim())) {
       toast.error("key 需小写字母开头，仅含小写字母/数字/下划线");
       return;
@@ -675,32 +721,47 @@ function CustomToolDialog({
         return;
       }
     }
+    mutationBusy.current = true;
+    const generation = lifetime.current.generation;
+    const submitted = draftSignature;
     setSaving(true);
     const payload = { description, schema: kind === "shell" ? {} : schema, agents: bound, enabled, kind, exec: buildExec(), deferred: kind === "shell" ? false : deferred };
     try {
       if (isNew) await api.createCustomTool({ key: key.trim(), ...payload });
       else await api.updateCustomTool(tool!.key, payload);
-      toast.success(isNew ? "已创建自定义工具" : "已保存");
-      onSaved();
+      const current = lifetime.current.active && generation === lifetime.current.generation;
+      if (current) toast.success(isNew ? `已创建自定义工具「${key.trim()}」` : `已保存工具「${tool!.key}」`);
+      // Refresh persisted data even when this old editor has closed, but never
+      // close a newly opened tool or discard edits made after submission.
+      onSaved(current && latestDraft.current === submitted);
     } catch (e) {
-      toast.error("保存失败：" + (e as Error).message);
+      if (lifetime.current.active && generation === lifetime.current.generation) toast.error("保存失败：" + (e as Error).message);
     } finally {
-      setSaving(false);
+      mutationBusy.current = false;
+      if (lifetime.current.active && generation === lifetime.current.generation) setSaving(false);
     }
   }
   async function del() {
-    if (!tool) return;
+    if (!tool || mutationBusy.current) return;
+    mutationBusy.current = true;
+    const generation = lifetime.current.generation;
+    setSaving(true);
     try {
       await api.deleteCustomTool(tool.key);
-      toast.success("已删除");
-      onSaved();
+      const current = lifetime.current.active && generation === lifetime.current.generation;
+      if (current) toast.success(`已删除工具「${tool.key}」`);
+      onSaved(current);
     } catch (e) {
-      toast.error("删除失败：" + (e as Error).message);
+      if (lifetime.current.active && generation === lifetime.current.generation) toast.error("删除失败：" + (e as Error).message);
+    } finally {
+      mutationBusy.current = false;
+      if (lifetime.current.active && generation === lifetime.current.generation) setSaving(false);
     }
   }
-  // runTest dry-runs the CURRENT form (unsaved) with the sample params, so a
-  // template/script/request can be debugged before saving.
+  // Executes exactly once using the submitted unsaved specification. Closing or
+  // changing the editor suppresses stale UI results; it never replays execution.
   async function runTest() {
+    if (testBusy.current) return;
     let params: Record<string, unknown> = {};
     if (paramsText.trim()) {
       try { params = JSON.parse(paramsText); } catch { toast.error("测试参数 JSON 格式错误"); return; }
@@ -708,15 +769,20 @@ function CustomToolDialog({
     if (kind === "http" && ex.headers.trim()) {
       try { JSON.parse(ex.headers); } catch { toast.error("headers JSON 格式错误"); return; }
     }
+    const generation = lifetime.current.generation;
+    const request = ++testRequest.current;
+    const submitted = testSignature;
+    testBusy.current = true;
     setTesting(true);
     setTestResult(null);
     try {
       const r = await api.testCustomTool({ kind, exec: buildExec(), params });
-      setTestResult(r);
+      if (lifetime.current.active && generation === lifetime.current.generation && request === testRequest.current && submitted === latestTest.current) setTestResult(r);
     } catch (e) {
-      setTestResult({ output: (e as Error).message, is_error: true });
+      if (lifetime.current.active && generation === lifetime.current.generation && request === testRequest.current && submitted === latestTest.current) setTestResult({ output: (e as Error).message, is_error: true });
     } finally {
-      setTesting(false);
+      testBusy.current = false;
+      if (lifetime.current.active && generation === lifetime.current.generation && request === testRequest.current) setTesting(false);
     }
   }
 
@@ -724,6 +790,7 @@ function CustomToolDialog({
     <Sheet open={!!edit} onOpenChange={(o) => !o && onClose()}>
       <SheetContent
         side="right"
+        data-testid="custom-tool-editor"
         className="flex flex-col gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-3xl"
       >
         <SheetHeader className="px-4">
@@ -739,7 +806,7 @@ function CustomToolDialog({
           </div>
           <div className="grid gap-1.5">
             <Label className="text-xs">描述(发给模型)</Label>
-            <Textarea rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
+            <Textarea aria-label="自定义工具描述" rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
           </div>
 
           <div className="grid gap-1.5">
@@ -761,7 +828,7 @@ function CustomToolDialog({
           {kind === "command" && (
             <div className="grid gap-1.5">
               <Label className="text-xs">命令模板（占位符 {"{param}"}，如 nmap -p {"{ports}"} {"{target}"}）</Label>
-              <Textarea className="font-mono text-xs" rows={2} value={ex.command}
+              <Textarea aria-label="自定义工具命令模板" className="font-mono text-xs" rows={2} value={ex.command}
                 onChange={(e) => setEx({ ...ex, command: e.target.value })} />
             </div>
           )}
@@ -857,7 +924,8 @@ function CustomToolDialog({
           {kind !== "shell" && (
             <div className="grid gap-1.5 rounded-md border p-3">
               <Label className="text-xs font-medium">测试运行（用当前表单，不会保存）</Label>
-              <Textarea className="font-mono text-xs" rows={2} value={paramsText}
+              <p className="text-muted-foreground text-xs">会实际执行一次。修改表单或切换编辑器后不展示旧结果，也不会自动重试。</p>
+              <Textarea aria-label="自定义工具测试参数" className="font-mono text-xs" rows={2} value={paramsText}
                 placeholder={'示例参数 JSON，如 {"target":"example.com"}'}
                 onChange={(e) => setParamsText(e.target.value)} />
               <div>
@@ -867,6 +935,7 @@ function CustomToolDialog({
               </div>
               {testResult && (
                 <pre
+                  data-testid="custom-tool-test-result"
                   className={
                     "max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 font-mono text-xs " +
                     (testResult.is_error ? "text-destructive" : "")
@@ -885,7 +954,7 @@ function CustomToolDialog({
             <SaveIcon /> {isNew ? "创建" : "保存"}
           </Button>
           {!isNew && (
-            <Button size="sm" variant="outline" className="text-destructive" onClick={del}>
+            <Button size="sm" variant="outline" className="text-destructive" onClick={del} disabled={saving}>
               <Trash2Icon /> 删除
             </Button>
           )}

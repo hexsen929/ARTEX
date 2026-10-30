@@ -138,7 +138,11 @@ export default function DashboardPage() {
   const [pending, setPending] = React.useState<InterceptPending[]>([]);
   const [activity, setActivity] = React.useState<Activity[]>([]);
   const [tokens, setTokens] = React.useState<TokenTotal | null>(null);
-  const [convTokens, setConvTokens] = React.useState<ConvTokenSummary[]>([]);
+  const [convTokens, setConvTokens] = React.useState<ConvTokenSummary[] | null>(null);
+  const [convTokenError, setConvTokenError] = React.useState<string | null>(null);
+  const [taskTokensKnown, setTaskTokensKnown] = React.useState(false);
+  const [taskTokenError, setTaskTokenError] = React.useState<string | null>(null);
+  const [usageError, setUsageError] = React.useState<string | null>(null);
   const [usageStats, setUsageStats] = React.useState<UsageStats | null>(null);
   const [assetCounts, setAssetCounts] = React.useState<Record<string, number>>({});
   const [traffic, setTraffic] = React.useState<TrafficExchange[]>([]);
@@ -160,13 +164,15 @@ export default function DashboardPage() {
       try {
         const tr = await api.tasks();
         if (!alive) return;
+        setTaskTokensKnown(true);
+        setTaskTokenError(null);
         const nextSignature = JSON.stringify(tr.tasks);
         if (nextSignature !== signature) {
           signature = nextSignature;
           setTasks(tr.tasks);
         }
-      } catch {
-        /* transient errors — next poll retries */
+      } catch (error) {
+        if (alive) setTaskTokenError((error as Error).message);
       } finally {
         loading = false;
       }
@@ -187,14 +193,13 @@ export default function DashboardPage() {
       if (loading) return;
       loading = true;
       try {
-        const [findings, stats, settings, pending, activity, tokens, conversationTokens] = await Promise.all([
+        const [findings, stats, settings, pending, activity, tokens] = await Promise.all([
           api.findings(),
           api.stats(),
           api.settings(),
           api.interceptPending(),
           api.activity(undefined, { limit: 30 }),
           api.tokenStats(),
-          api.conversationTokens(),
         ]);
         if (!alive) return;
         setFindings(findings);
@@ -203,7 +208,6 @@ export default function DashboardPage() {
         setPending(pending);
         setActivity(activity.items);
         setTokens(tokens.total ?? null);
-        setConvTokens(conversationTokens);
       } catch {
         // Preserve stale data and retry on the next interval.
       } finally {
@@ -218,12 +222,48 @@ export default function DashboardPage() {
     };
   }, []);
 
+  // A failed statistics source is unknown/stale, not a successful empty list.
+  // Poll it independently so unrelated dashboard panels continue to refresh.
+  React.useEffect(() => {
+    let alive = true, loading = false;
+    const load = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        const result = await api.conversationTokens();
+        if (alive) { setConvTokens(result); setConvTokenError(null); }
+      } catch (error) {
+        if (alive) setConvTokenError((error as Error).message);
+      } finally { loading = false; }
+    };
+    void load();
+    const timer = setInterval(load, 5000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
+
+  React.useEffect(() => {
+    let alive = true, loading = false;
+    const load = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        const result = await api.usageStats(365);
+        if (!result || (result.by_profile !== null && !Array.isArray(result.by_profile)) || (result.daily !== null && !Array.isArray(result.daily))) throw new Error("用量统计响应不完整");
+        if (alive) { setUsageStats({ ...result, by_profile: result.by_profile ?? [], daily: result.daily ?? [] }); setUsageError(null); }
+      } catch (error) { if (alive) setUsageError((error as Error).message); }
+      finally { loading = false; }
+    };
+    void load();
+    const timer = setInterval(load, 15000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
+
   // slow poll: traffic, assets, system-static (every 15s)
   React.useEffect(() => {
     let alive = true;
     const load = async () => {
       try {
-        const [traf, counts, agentList, mcpList, skillList, toolList, profileList, usage] = await Promise.all([
+        const [traf, counts, agentList, mcpList, skillList, toolList, profileList] = await Promise.all([
           api.traffic(0, 50),
           api.assetCounts(),
           api.agents(),
@@ -231,7 +271,6 @@ export default function DashboardPage() {
           api.skills(),
           api.tools(),
           api.llmProfiles(),
-          api.usageStats(365),
         ]);
         if (!alive) return;
         setTraffic(traf.exchanges ?? []);
@@ -241,7 +280,6 @@ export default function DashboardPage() {
         setSkills(skillList);
         setTools(toolList);
         setLLMProfiles(profileList);
-        setUsageStats(usage);
       } catch {
         /* transient errors */
       }
@@ -330,6 +368,8 @@ export default function DashboardPage() {
 
   // 数据源开关：旧版 = activity（task.tokens + 会话），新版 = llm_usage 计量账本。
   const [tokenVersion, setTokenVersion] = React.useState<"old" | "new">("old");
+  const tokenDisplayAvailable = tokenVersion === "old" ? taskTokensKnown && convTokens !== null : usageStats !== null;
+  const tokenDisplayError = tokenVersion === "old" ? [taskTokenError, convTokenError].filter(Boolean).join("；") : usageError;
   // selected profile tab: "all" = 全部; number = specific profile id
   const [tokenTab, setTokenTab] = React.useState<number | null | "all">("all");
   // day range for the daily bar chart
@@ -367,7 +407,7 @@ export default function DashboardPage() {
         true,
       );
     }
-    for (const c of convTokens) {
+    for (const c of convTokens ?? []) {
       fold(
         c.llm_profile_id ?? defaultProfileId,
         c.input_tokens,
@@ -442,7 +482,7 @@ export default function DashboardPage() {
         t.tokens?.cache_read_tokens ?? 0,
       );
     }
-    for (const c of convTokens) {
+    for (const c of convTokens ?? []) {
       if (tokenTab !== "all" && (c.llm_profile_id ?? defaultProfileId) !== tokenTab) continue;
       fold(c.created_at.slice(0, 10), c.input_tokens, c.output_tokens, c.cache_read_tokens);
     }
@@ -570,24 +610,23 @@ export default function DashboardPage() {
         </Card>
 
         {/* LLM 用量 */}
-        <Card className="gap-1">
+        <Card className="gap-1" data-testid="dashboard-token-summary">
           <CardHeader className="pb-0">
             <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
               <ZapIcon className="size-3" /> Token 用量
             </div>
             <div className="text-2xl font-semibold tabular-nums">
-              {fmtTokens(displayedTokens.input + displayedTokens.output) || "—"}
+              {tokenDisplayAvailable ? fmtTokens(displayedTokens.input + displayedTokens.output) : "未知"}
             </div>
           </CardHeader>
           <CardContent className="text-[10px] text-muted-foreground">
-            入 {fmtTokens(displayedTokens.input)}（含缓存 {fmtTokens(displayedTokens.cacheRead)}）· 出{" "}
-            {fmtTokens(displayedTokens.output)}
+            {tokenDisplayAvailable ? <>入 {fmtTokens(displayedTokens.input)}（含缓存 {fmtTokens(displayedTokens.cacheRead)}）· 出 {fmtTokens(displayedTokens.output)}{tokenDisplayError ? " · 上次成功值" : ""}</> : "统计尚未取得，不以零代替"}
           </CardContent>
         </Card>
       </div>
 
       {/* ── Row 2: LLM Token 消耗 ── */}
-      <Card className="p-4">
+      <Card className="p-4" data-testid="dashboard-token-usage">
         {/* Header */}
         <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-1.5 text-xs font-semibold">
@@ -675,15 +714,16 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        {tokenDisplayError && <p role="alert" className="mb-3 text-xs text-destructive">用量读取失败：{tokenDisplayError}。{tokenDisplayAvailable ? "保留上次成功数据，数值可能已过期。" : "当前用量未知，不表示零消耗。"}</p>}
         {/* Body: metrics left + bar chart right */}
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[220px_1fr]">
+        {!tokenDisplayAvailable ? <div className="flex min-h-[200px] items-center justify-center rounded-lg border text-sm text-muted-foreground">用量尚未取得，请等待重试；不将读取失败记为零。</div> : <div className="grid grid-cols-1 gap-6 lg:grid-cols-[220px_1fr]">
           {/* Left: key metrics */}
           <div className="flex flex-col gap-4">
             {/* Total */}
             <div>
               <div className="text-[10px] text-muted-foreground">合计 (输入+输出)</div>
               <div className="mt-0.5 text-3xl font-bold tabular-nums tracking-tight">
-                {fmtTokens(displayedTokens.input + displayedTokens.output) || "—"}
+                {tokenDisplayAvailable ? fmtTokens(displayedTokens.input + displayedTokens.output) : "未知"}
               </div>
               <div className="mt-0.5 text-[10px] text-muted-foreground">{displayedTokens.taskCount} 个任务</div>
             </div>
@@ -841,7 +881,7 @@ export default function DashboardPage() {
               </ChartContainer>
             )}
           </div>
-        </div>
+        </div>}
       </Card>
 
       {/* ── Row 3: 活动流 | 发现 ── */}

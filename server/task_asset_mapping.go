@@ -1,13 +1,51 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 )
+
+const topologyMappingAssociationKind = "topology_mapping_task"
+
+// This native record is written only by the task handler, not inferred from a
+// model's answer or the conversation's editable title. No new execution grant
+// is attached to it; asset_mapper remains a database-only read role.
+func appendTopologyMappingAssociation(pg *db.DB, conversationID, taskID int64) error {
+	_, err := pg.AppendConvActivity(conversationID, db.Activity{
+		Worker: "system", Kind: topologyMappingAssociationKind,
+		Summary: fmt.Sprintf("只读拓扑梳理 · 任务 #%d", taskID), Detail: strconv.FormatInt(taskID, 10),
+	})
+	return err
+}
+
+type topologyMappingState struct {
+	Running        bool   `json:"running"`
+	ConversationID int64  `json:"conversation_id,omitempty"`
+	Status         string `json:"status"` // none | running | finished | failed | interrupted
+	FinishedAt     string `json:"finished_at,omitempty"`
+	Association    string `json:"association,omitempty"` // native | legacy_title (unverified historical candidate)
+}
+
+func topologyMappingOutcome(running bool, lastUser, lastResult, lastFailure int64, resultFailed bool) string {
+	if running {
+		return "running"
+	}
+	if lastFailure > lastUser && lastFailure >= lastResult || lastResult > lastUser && resultFailed {
+		return "failed"
+	}
+	if lastResult > lastUser {
+		// A terminal row does not prove that the two reports are complete or
+		// correct. Keep the neutral state and let the user inspect the record.
+		return "finished"
+	}
+	return "interrupted"
+}
 
 // taskAssetMapping starts a visible topology-mapping conversation for the task.
 // The asset relationship graph remains sourced directly from the database and
@@ -19,12 +57,17 @@ func (s *Server) taskAssetMapping(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "task not found")
 		return
 	}
-	if s.m.pg == nil || s.chatAgentRef() == nil {
+	if s.m.pg == nil {
 		writeErr(w, http.StatusServiceUnavailable, s.chatUnavailableReason())
 		return
 	}
 	if agentInfo, err := s.m.pg.GetAgentByKey("asset_mapper"); err != nil || agentInfo == nil || !agentInfo.Enabled {
 		writeErr(w, http.StatusServiceUnavailable, "网络拓扑梳理 Agent 未启用")
+		return
+	}
+	mappingConversation := &db.Conversation{AgentKey: "asset_mapper"}
+	if s.resolveChatAgent(mappingConversation) == nil {
+		writeErr(w, http.StatusServiceUnavailable, s.chatUnavailableReason(mappingConversation))
 		return
 	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
@@ -84,9 +127,15 @@ func (s *Server) taskAssetMapping(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "创建拓扑梳理会话失败")
 		return
 	}
+	if err := appendTopologyMappingAssociation(s.m.pg, conversation.ID, taskID); err != nil {
+		_ = s.m.pg.DeleteConversation(conversation.ID) // no run has been started
+		writeErr(w, http.StatusInternalServerError, "保存拓扑梳理任务关联失败")
+		return
+	}
 	if _, err := s.m.pg.AppendConvActivity(conversation.ID, db.Activity{
 		Worker: "asset_mapper", Kind: "user", Summary: title, Detail: message,
 	}); err != nil {
+		_ = s.m.pg.DeleteConversation(conversation.ID) // no run has been started
 		writeErr(w, http.StatusInternalServerError, "写入拓扑梳理会话失败")
 		return
 	}
@@ -106,28 +155,42 @@ func (s *Server) taskAssetMappingStatus(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusNotFound, "task not found")
 		return
 	}
-	conversations, err := s.m.pg.ListConversations()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	title := fmt.Sprintf("资产与网络梳理 · 任务 #%s", t.ID)
 	legacyTitle := fmt.Sprintf("资产梳理 · 任务 #%s", t.ID)
-	for _, conversation := range conversations {
-		if conversation.AgentKey != "asset_mapper" || (conversation.Title != title && conversation.Title != legacyTitle) {
-			continue
-		}
-		busyKey := s.convBusyKey(conversation.ID)
-		s.chatMu.Lock()
-		running := s.chatBusy[busyKey]
-		s.chatMu.Unlock()
-		// A completed conversation is historical evidence, not an active run.
-		// Keep looking so a newer run is not hidden by an older one, and avoid
-		// making the client poll a completed conversation after page reload.
-		if running {
-			writeJSON(w, http.StatusOK, map[string]any{"running": true, "conversation_id": conversation.ID})
-			return
-		}
+	var id, lastUser, lastResult, lastFailure int64
+	var resultFailed bool
+	var nativeAssociation bool
+	var terminalAt time.Time
+	err := s.m.pg.QueryRowContext(r.Context(), `SELECT c.id,
+ EXISTS(SELECT 1 FROM conversation_activities a WHERE a.conversation_id=c.id AND a.kind=$1 AND a.worker='system' AND a.detail=$2),
+ COALESCE((SELECT max(a.id) FROM conversation_activities a WHERE a.conversation_id=c.id AND a.kind='user'),0),
+ COALESCE((SELECT a.id FROM conversation_activities a WHERE a.conversation_id=c.id AND a.kind='result' ORDER BY a.id DESC LIMIT 1),0),
+ COALESCE((SELECT a.is_error FROM conversation_activities a WHERE a.conversation_id=c.id AND a.kind='result' ORDER BY a.id DESC LIMIT 1),false),
+ COALESCE((SELECT max(a.id) FROM conversation_activities a WHERE a.conversation_id=c.id AND a.is_error AND a.kind IN ('result','text')),0),
+ COALESCE((SELECT a.created_at FROM conversation_activities a WHERE a.conversation_id=c.id AND a.kind IN ('result','text') ORDER BY a.id DESC LIMIT 1),c.updated_at)
+FROM conversations c
+WHERE c.agent_key='asset_mapper' AND (
+ EXISTS(SELECT 1 FROM conversation_activities a WHERE a.conversation_id=c.id AND a.kind=$1 AND a.worker='system' AND a.detail=$2)
+ OR (c.title IN ($3,$4) AND NOT EXISTS(SELECT 1 FROM conversation_activities a WHERE a.conversation_id=c.id AND a.kind=$1)))
+ORDER BY c.created_at DESC,c.id DESC LIMIT 1`, topologyMappingAssociationKind, t.ID, title, legacyTitle).Scan(&id, &nativeAssociation, &lastUser, &lastResult, &resultFailed, &lastFailure, &terminalAt)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusOK, topologyMappingState{Status: "none"})
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"running": false})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "拓扑梳理状态读取失败")
+		return
+	}
+	s.chatMu.Lock()
+	running := s.chatBusy[s.convBusyKey(id)]
+	s.chatMu.Unlock()
+	state := topologyMappingState{Running: running, ConversationID: id, Status: topologyMappingOutcome(running, lastUser, lastResult, lastFailure, resultFailed)}
+	state.Association = "legacy_title"
+	if nativeAssociation {
+		state.Association = "native"
+	}
+	if !running && (lastResult > lastUser || lastFailure > lastUser) {
+		state.FinishedAt = terminalAt.Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, state)
 }

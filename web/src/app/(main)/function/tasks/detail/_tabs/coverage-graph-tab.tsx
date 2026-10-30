@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import type { Graph as G6Graph } from "@antv/g6";
 import {
   AppWindow,
@@ -28,6 +29,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { api } from "@/lib/api";
+import { topologyMappingLabel, type TopologyMappingStatus } from "@/lib/topology-mapping";
 import type { CoverageAssetRef, CoverageAssetRefs, CoverageGraphEdge, CoverageGraphNode } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -654,9 +656,13 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
   const [selectedFoldId, setSelectedFoldId] = React.useState<string | null>(null);
   const [activePath, setActivePath] = React.useState<string[]>([]);
   const [loading, setLoading] = React.useState(true);
-  const [mapping, setMapping] = React.useState(false);
-  const [mappingConversationId, setMappingConversationId] = React.useState<number | null>(null);
-  const [networkReportAt, setNetworkReportAt] = React.useState<Date | null>(null);
+  const [mappingState, setMappingState] = React.useState<TopologyMappingStatus>({ running: false, status: "none" });
+  const [mappingStarting, setMappingStarting] = React.useState(false);
+  const [mappingError, setMappingError] = React.useState<string | null>(null);
+  const mappingTaskRef = React.useRef(taskId);
+  mappingTaskRef.current = taskId;
+  const mappingSequence = React.useRef(0);
+  const mapping = mappingStarting || (mappingState.association === "native" && mappingState.running);
   const [lastSyncedAt, setLastSyncedAt] = React.useState<Date | null>(null);
   const [viewMode, setViewMode] = React.useState<CoverageViewMode>("asset");
   const [panelCollapsed, setPanelCollapsed] = React.useState(false);
@@ -721,32 +727,35 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
   }, [taskId, coverageEnabled]);
 
   const remapNetwork = React.useCallback(async () => {
-    setMapping(true);
-    setNetworkReportAt(null);
+    const selectedTask = taskId;
+    const sequence = ++mappingSequence.current;
+    setMappingStarting(true);
+    setMappingError(null);
     try {
       const run = await api.startTopologyMapping(taskId);
-      setMappingConversationId(run.conversation_id);
-    } catch {
-      setMapping(false);
+      if (selectedTask !== mappingTaskRef.current || sequence !== mappingSequence.current) return;
+      if (!Number.isSafeInteger(run.conversation_id) || run.conversation_id <= 0) throw new Error("梳理响应未返回有效会话");
+      setMappingState({ running: true, status: "running", conversation_id: run.conversation_id, association: "native" });
+    } catch (error) {
+      if (selectedTask === mappingTaskRef.current && sequence === mappingSequence.current) setMappingError((error as Error).message);
+    } finally {
+      if (selectedTask === mappingTaskRef.current && sequence === mappingSequence.current) setMappingStarting(false);
     }
   }, [taskId]);
 
   React.useEffect(() => {
-    if (!mappingConversationId) return;
+    if (!mappingState.running) return;
     let cancelled = false;
+    const selectedTask = taskId;
+    const sequence = mappingSequence.current;
     const poll = async () => {
       try {
-        const state = await api.conversationMessages(mappingConversationId, 0);
-        if (cancelled) return;
-        if (!state.running) {
-          setMapping(false);
-          setMappingConversationId(null);
-          // The asset relationship graph is read directly from the asset store;
-          // completing the network report must not rebuild or replace it.
-          setNetworkReportAt(new Date());
-        }
-      } catch {
-        // Keep the spinner while the conversation endpoint is temporarily unavailable.
+        const state = await api.topologyMappingStatus(selectedTask);
+        if (cancelled || selectedTask !== mappingTaskRef.current || sequence !== mappingSequence.current) return;
+        setMappingState(state);
+        setMappingError(null);
+      } catch (error) {
+        if (!cancelled && selectedTask === mappingTaskRef.current && sequence === mappingSequence.current) setMappingError((error as Error).message);
       }
     };
     void poll();
@@ -755,7 +764,7 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [mappingConversationId]);
+  }, [mappingState.running, mappingState.conversation_id, taskId]);
 
   React.useEffect(() => {
     fetchGraph();
@@ -763,15 +772,19 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
 
   React.useEffect(() => {
     let cancelled = false;
+    const selectedTask = taskId;
+    const sequence = ++mappingSequence.current;
+    setMappingState({ running: false, status: "none" });
+    setMappingStarting(false);
+    setMappingError(null);
     api
       .topologyMappingStatus(taskId)
       .then((status) => {
-        if (cancelled) return;
-        setMapping(status.running);
-        setMappingConversationId(status.conversation_id ?? null);
+        if (cancelled || selectedTask !== mappingTaskRef.current || sequence !== mappingSequence.current) return;
+        setMappingState(status);
       })
-      .catch(() => {
-        /* status is best effort; the graph remains usable */
+      .catch((error) => {
+        if (!cancelled && selectedTask === mappingTaskRef.current && sequence === mappingSequence.current) setMappingError((error as Error).message);
       });
     setActivePath([]);
     setSelectedAsset(null);
@@ -1030,9 +1043,9 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
                 {viewMode === "network"
                   ? mapping
                     ? "正在梳理网络拓扑，并生成两份结果…"
-                    : networkReportAt
-                      ? `最近梳理 ${networkReportAt.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`
-                      : "网络拓扑等待梳理"
+                    : mappingState.association === "legacy_title"
+                      ? "历史标题候选，任务归属未核实"
+                      : `${topologyMappingLabel(mappingState.status)}${mappingState.finished_at ? ` · ${new Date(mappingState.finished_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}` : ""}`
                   : loading
                     ? "正在读取资产库关系…"
                     : lastSyncedAt
@@ -1065,10 +1078,17 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
               <span className="hidden sm:inline">重置视图</span>
             </Button>
             {viewMode === "network" && (
+              <>
+              {mappingState.conversation_id && (
+                <Button asChild variant="ghost" size="sm" className="h-7 gap-1.5 px-2">
+                  <Link href={`/chat?c=${mappingState.conversation_id}`}>{mappingState.association === "legacy_title" ? "查看历史候选会话" : "查看梳理会话"}</Link>
+                </Button>
+              )}
               <Button variant="outline" size="sm" className="h-7 gap-1.5 px-2" onClick={() => void remapNetwork()} disabled={mapping} title="重新梳理网络拓扑">
                 <RefreshCw className={cn("size-3.5", (loading || mapping) && "animate-spin")} />
                 <span className="hidden sm:inline">{mapping ? "正在梳理网络…" : "梳理网络拓扑"}</span>
               </Button>
+              </>
             )}
           </div>}
           {panelCollapsed && <Button variant="ghost" size="sm" className="h-7 gap-1 px-2" onClick={() => setPanelCollapsed(false)} title="展开面板">
@@ -1076,6 +1096,8 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
             <span className="hidden sm:inline">展开</span>
           </Button>}
         </div>
+        {viewMode === "network" && mappingError && <p role="alert" className="px-3 py-2 text-xs text-destructive">拓扑梳理状态不可用：{mappingError}。已有图与会话记录未删除。</p>}
+        {viewMode === "network" && mappingState.association === "legacy_title" && <p className="px-3 py-2 text-xs text-muted-foreground">历史标题候选，任务归属未核实；仅供查阅，不用于任务范围、模型选择或执行授权。</p>}
         {!panelCollapsed && <>
         <div className="bg-muted/60 flex items-center gap-1 rounded-md p-1">
           <Button

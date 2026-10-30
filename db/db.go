@@ -299,9 +299,10 @@ ON CONFLICT (name) DO NOTHING`,
 	// NOTE: the placeholder ScopeSentry data-source MCP (empty URL + empty X-API-Key,
 	// disabled) is seeded directly in schema.sql §F so a raw `psql < schema.sql` init
 	// also gets it. schema.sql is Exec'd on every startup, so it stays idempotent.
-	if err := d.seedBuiltinSkillVisibility(); err != nil {
-		return fmt.Errorf("seed skill visibility: %w", err)
-	}
+	// Skill defaults depend on the configured installation directory. Opening a
+	// database has no filesystem catalog, so the server initializes them only
+	// after inspecting the actual loadable Skills. Do not grant missing names or
+	// mark an unknown/failed catalog as an explicit empty selection here.
 	if err := d.seedDefaultInterceptRules(); err != nil {
 		return fmt.Errorf("seed intercept rules: %w", err)
 	}
@@ -361,7 +362,7 @@ ON CONFLICT DO NOTHING`, r.kind, r.pattern, r.note); err != nil {
 	return d.SetSetting("asset_intercept_default_rules_v1", "done")
 }
 
-// builtinSkillVisibility maps a shipped skill's directory name → the built-in
+// builtinSkillVisibility maps a known default skill's directory name → the built-in
 // agent keys that should see it by default. The skill FILES themselves live on the
 // filesystem (SkillDir, loaded by norma at runtime); DB only carries this visibility
 // binding. Skills omitted here (e.g. scopesentry) ship invisible by
@@ -385,13 +386,6 @@ var builtinSkillVisibility = map[string][]string{
 	"bool-sqli-admin-takeover": {"pentest"},
 	"ctf-web":                  {"pentest"},
 	"ctf-ai-ml":                {"pentest"},
-}
-
-// seedBuiltinSkillVisibility is the DB-open half of default initialization.
-// Server startup repeats it after creating auxiliary agents; the per-agent
-// initialization marker preserves explicit choices, including an empty list.
-func (d *DB) seedBuiltinSkillVisibility() error {
-	return d.SeedBuiltinSkillVisibility()
 }
 
 // seedDefaultInterceptRules inserts built-in safety intercept rules once on

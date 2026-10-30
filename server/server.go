@@ -288,8 +288,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// Reporter, retester and verifier are created after the DB's built-in
 		// rows. Give new installations their default Skills on this startup,
 		// while per-Agent initialization markers preserve all existing choices.
-		if err := m.pg.SeedBuiltinSkillVisibility(); err != nil {
-			log.Printf("[skills] seed auxiliary Agent defaults: %v", err)
+		if err := seedInstalledBuiltinSkillVisibility(m.pg, s.skillDir); err != nil {
+			log.Printf("[skills] seed installed Agent defaults: %v", err)
 		}
 		go s.evidenceStore().RunGC(s.ctx)
 		s.seedPythonInterpreter() // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
@@ -623,9 +623,8 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 
 // effectiveProfileForAgent resolves the LLM profile id an agent should run on, by
 // precedence: agent binding (agents.llm_profile_id) → pin (task/conversation) → nil
-// (caller falls back to the global active profile). A binding to a deleted profile
-// can't happen (FK ON DELETE SET NULL); an otherwise-invalid one is dropped downstream
-// by loadProfileConfig, letting the caller fall back.
+// (caller may use the global active profile). A selected but unusable profile
+// must be surfaced by the caller rather than silently replaced by another route.
 func (s *Server) effectiveProfileForAgent(agentKey string, pinID *int64) *int64 {
 	if s.m.pg != nil && agentKey != "" {
 		if a, _ := s.m.pg.GetAgentByKey(agentKey); a != nil && a.LLMProfileID != nil {
@@ -635,27 +634,61 @@ func (s *Server) effectiveProfileForAgent(agentKey string, pinID *int64) *int64 
 	return pinID
 }
 
+// chatProfileSelection reads the same binding priority while retaining lookup
+// errors. An unknown binding is not evidence that the global route was selected.
+func (s *Server) chatProfileSelection(c *db.Conversation) (*int64, error) {
+	if c == nil {
+		return nil, errors.New("会话信息不可用")
+	}
+	if c.AgentKey != "" {
+		if s.m == nil || s.m.pg == nil {
+			return nil, errors.New("会话的 Agent 模型绑定尚不可读取")
+		}
+		a, err := s.m.pg.GetAgentByKey(c.AgentKey)
+		if err != nil {
+			return nil, errors.New("会话的 Agent 模型绑定读取失败，未改用全局模型")
+		}
+		if a == nil {
+			return nil, errors.New("会话的 Agent 已不存在，未改用全局模型")
+		}
+		if a.LLMProfileID != nil {
+			return a.LLMProfileID, nil
+		}
+	}
+	return c.LLMProfileID, nil
+}
+
 // resolveChatAgent picks the ChatAgent for one conversation: the agent's own
-// binding or this conversation's chosen profile first, the global active config
-// only as a fallback. Both the send precheck and the background runner MUST use
+// binding or this conversation's chosen profile is authoritative. The global
+// active configuration is used only when neither was explicitly selected.
+// Runtime failover for a valid bound provider remains governed by poolForBinding.
+// Both the send precheck and the background runner MUST use
 // this — resolving differently in the two paths is how a conversation that had
 // picked a valid profile still got rejected with "LLM 未配置" when no global
 // config was active.
 func (s *Server) resolveChatAgent(c *db.Conversation) *agent.ChatAgent {
-	ca := s.chatAgentRef()
-	if eff := s.effectiveProfileForAgent(c.AgentKey, c.LLMProfileID); eff != nil {
-		if pa := s.chatAgentForProfile(*eff); pa != nil {
-			ca = pa
-		}
+	eff, err := s.chatProfileSelection(c)
+	if err != nil {
+		return nil
 	}
-	return ca
+	if eff != nil {
+		return s.chatAgentForProfile(*eff)
+	}
+	return s.chatAgentRef()
 }
 
 // chatUnavailableReason explains why no ChatAgent could be resolved, so the user
 // knows whether to add a config, activate one, or pick one for this conversation
 // — rather than a flat "not configured" that hides which of those it is.
-func (s *Server) chatUnavailableReason() string {
-	if s.m.pg != nil {
+func (s *Server) chatUnavailableReason(conversations ...*db.Conversation) string {
+	if len(conversations) > 0 {
+		if selected, err := s.chatProfileSelection(conversations[0]); err != nil {
+			return err.Error()
+		} else if selected != nil {
+			return fmt.Sprintf("所选 LLM 配置 #%d 不可用：请检查该配置、密钥及指令文件；未改用全局模型", *selected)
+		}
+	}
+	if s.m != nil && s.m.pg != nil {
 		if profiles, err := s.m.pg.ListProfiles(); err == nil && len(profiles) == 0 {
 			return "尚未配置 LLM：请到 系统 → LLM 配置 添加一个配置"
 		}
@@ -1007,6 +1040,8 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
+	mux.HandleFunc("GET /api/settings/runtime-controls/{key}", s.getRuntimeControl)
+	mux.HandleFunc("PUT /api/settings/runtime-controls/{key}", s.putRuntimeControl)
 	// 漏洞 IM 推送。渠道是「多实例 + 各自过滤规则」的资源，因此独立成一组
 	// REST 接口，而不是塞进扁平的 /api/settings 键值里。
 	mux.HandleFunc("GET /api/notify/meta", s.notifyMeta)
@@ -3850,18 +3885,21 @@ func (s *Server) pgDetectPython(w http.ResponseWriter, r *http.Request) {
 // off, agents get no proxy config, no traffic tools, and no proxy prompt content.
 func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		TrafficCapture      *bool `json:"traffic_capture"`
-		BrowserScreenshot   *bool `json:"browser_screenshot_enabled"`
-		ScreenshotTimestamp *bool `json:"browser_screenshot_timestamp_enabled"`
-		OpsecEnabled        *bool `json:"opsec_enabled"`
-		AgentTrafficBinding *bool `json:"agent_traffic_binding"`
-		TaskIntelligence    *bool `json:"task_intelligence_enabled"`
-		TaskAutoTitle       *bool `json:"task_auto_title_enabled"`
-		ChatAutoTitle       *bool `json:"chat_auto_title_enabled"`
-		CredentialAgent     *bool `json:"credential_agent_enabled"`
-		CredentialTraffic   *bool `json:"credential_traffic_binding"`
-		FindingInlineMerge  *bool `json:"finding_inline_merge_enabled"`
-		LLMRecord           *bool `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
+		TrafficCapture      *bool           `json:"traffic_capture"`
+		BrowserScreenshot   *bool           `json:"browser_screenshot_enabled"`
+		ScreenshotTimestamp *bool           `json:"browser_screenshot_timestamp_enabled"`
+		OpsecEnabled        *bool           `json:"opsec_enabled"`
+		RoEEnforcement      json.RawMessage `json:"roe_enforcement"`
+		FindingVerifyMode   json.RawMessage `json:"finding_verify_mode"`
+		LLMRetentionDays    json.RawMessage `json:"llm_records_retention_days"`
+		AgentTrafficBinding *bool           `json:"agent_traffic_binding"`
+		TaskIntelligence    *bool           `json:"task_intelligence_enabled"`
+		TaskAutoTitle       *bool           `json:"task_auto_title_enabled"`
+		ChatAutoTitle       *bool           `json:"chat_auto_title_enabled"`
+		CredentialAgent     *bool           `json:"credential_agent_enabled"`
+		CredentialTraffic   *bool           `json:"credential_traffic_binding"`
+		FindingInlineMerge  *bool           `json:"finding_inline_merge_enabled"`
+		LLMRecord           *bool           `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear.
 		WebSearchEnabled *bool         `json:"web_search_enabled"`
@@ -3897,6 +3935,21 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	roeUpdate, err := parseRoEEnforcementUpdate(req.RoEEnforcement)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	verifyUpdate, err := parseFindingVerifyModeUpdate(req.FindingVerifyMode)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	retentionUpdate, err := parseLLMRecordsRetentionUpdate(req.LLMRetentionDays)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	callbackValue, status, err := s.prepareCallbackUpdate(req.CallbackAddr)
 	if err != nil {
 		writeErr(w, status, err.Error())
@@ -3908,6 +3961,53 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		// administrator-managed launch arguments.
 		if _, _, err := s.reporterBrowserScreenshotIDs(true); err != nil {
 			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+	}
+	if roeUpdate != nil || verifyUpdate != nil || retentionUpdate != nil {
+		// Check the resulting policy snapshot without guessing values for other
+		// malformed controls. A damaged selected field is repairable by explicitly
+		// replacing it; multiple damaged controls require one explicit batch.
+		if roeUpdate == nil {
+			if _, err := readRoEEnforcementSetting(s.m.pg); err != nil {
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		if verifyUpdate == nil {
+			if _, err := readFindingVerifyModeSetting(s.m.pg); err != nil {
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		if retentionUpdate == nil {
+			if _, err := readLLMRecordsRetentionSetting(s.m.pg); err != nil {
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		if req.NotifyEnabled == nil && req.NotifyBaseURL == nil && req.NotifyDigestMins == nil {
+			if _, err := readNotifyGlobalSettings(s.m.pg); err != nil {
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		// A policy-only PUT still returns the complete settings DTO. Check its
+		// fallible dependencies before changing policy, rather than applying a
+		// new mode and then returning an unreadable/unknown settings snapshot.
+		pools, poolErr := s.m.WorkerPoolsChecked()
+		if poolErr != nil {
+			writeErr(w, http.StatusInternalServerError, "Worker 模型池读取失败；运行控制设置未修改")
+			return
+		}
+		if len(pools) == 0 {
+			if _, err := s.m.WorkersChecked(); err != nil {
+				writeErr(w, http.StatusInternalServerError, "Worker 并发设置读取失败；运行控制设置未修改")
+				return
+			}
+		}
+		if callback, err := s.callbackAddress(); err != nil && callback.Source == "" {
+			writeErr(w, http.StatusInternalServerError, "回连设置读取失败；运行控制设置未修改")
 			return
 		}
 	}
@@ -4158,6 +4258,23 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+	policyUpdates := map[string]string{}
+	if roeUpdate != nil {
+		// Write policy only after every other requested validation/update has
+		// succeeded. This setting is read on each interaction; no agent rebuild
+		// or service restart is needed, and omitted updates keep the old value.
+		policyUpdates[settingRoEEnforcement] = *roeUpdate
+	}
+	if verifyUpdate != nil {
+		policyUpdates[settingFindingVerifyMode] = *verifyUpdate
+	}
+	if retentionUpdate != nil {
+		policyUpdates[settingLLMRecordsRetentionDays] = strconv.Itoa(*retentionUpdate)
+	}
+	if err := s.m.pg.SetSettingsAtomic(r.Context(), policyUpdates); err != nil {
+		writeErr(w, http.StatusInternalServerError, "运行控制设置保存失败，未提交本次策略变更")
+		return
 	}
 	s.writeSettingsPayload(w)
 }

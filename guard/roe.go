@@ -110,7 +110,7 @@ func (g *Guard) checkRoE(ctx context.Context, ev hook.Event, cmd string) (hook.R
 		// 部分目标出了已登记范围、部分无规则可依 —— 按 Out 处理已有的违规即可。
 		log.Printf("[guard][roe] task %d 部分目标无范围规则可依: %v", taskID, hosts)
 	}
-	reason := roeMessage(out, rules)
+	reason := roeMessage(mode, out, rules)
 	if mode == "strict" {
 		return g.roeAsk(ctx, ev, reason)
 	}
@@ -140,8 +140,8 @@ func (g *Guard) roeAsk(ctx context.Context, ev hook.Event, reason string) (hook.
 }
 
 // roeMessage builds the human/agent-facing justification for an out-of-scope
-// verdict: 命中的 host、登记的范围规则、如何关闭/降级。
-func roeMessage(out []string, rules []ScopeRule) string {
+// verdict: 命中的 host、登记的范围规则与当前模式，不建议关闭检查。
+func roeMessage(mode string, out []string, rules []ScopeRule) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "RoE 授权范围检查:目标 %s 不在本任务已登记范围内", strings.Join(out, ", "))
 	if len(rules) > 0 {
@@ -151,7 +151,12 @@ func roeMessage(out []string, rules []ScopeRule) string {
 		}
 		fmt.Fprintf(&sb, "（登记范围: %s）", strings.Join(parts, ", "))
 	}
-	sb.WriteString("。如需放行:把目标加入任务范围(add_task_scope),或在系统设置把 roe_enforcement 改为 warn(仅告警)/off(关闭)。")
+	if mode == "strict" {
+		sb.WriteString("。当前 roe_enforcement=strict，范围外操作需人工审批；其它 deny 规则不因此豁免。")
+	} else {
+		sb.WriteString("。当前 roe_enforcement=warn，本次范围检查仅告警；其它拦截与审批规则仍照常检查。")
+	}
+	sb.WriteString("请先核对目标识别和授权范围；确属已授权目标但登记遗漏时，再通过任务范围管理(add_task_scope)补齐。更改检查模式不等于获得授权。")
 	return sb.String()
 }
 

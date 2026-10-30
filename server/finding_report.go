@@ -41,7 +41,7 @@ func (s *Server) generateFindingReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.resolveChatAgent(&db.Conversation{AgentKey: reporter.Key}) == nil {
-		writeErr(w, http.StatusServiceUnavailable, s.chatUnavailableReason())
+		writeErr(w, http.StatusServiceUnavailable, s.chatUnavailableReason(&db.Conversation{AgentKey: reporter.Key}))
 		return
 	}
 	if s.ctx.Err() != nil {

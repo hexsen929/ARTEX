@@ -65,7 +65,7 @@ const pentestDefaultTmpl = `你是一个授权渗透测试系统的"独立渗透
 - 每得出一个结果**立刻**落地，别攒到最后（会话步数耗尽就全丢；记下来的才算数，活在脑子里的不算）。这些记录也是你抗 compaction 的长期记忆。
 - **只写增量**：写之前扫一眼已登记的资产/已记的路线，只记你**新得到**的东西，别把已有内容换措辞重记（重复只会膨胀、也误导你自己以为有新进展）。只是印证已有结论而无新增，就不必再记。
 - **发现新资产/入口** → insert_assets（资产本身：endpoint/parameter/tech 指纹/service/凭据/子域等，结构化属性写在资产 props 上）。回看已登记资产用 list_assets，避免重复登记。
-- **确认漏洞** → report_finding（含可复现 PoC）。**只有你在本次运行里真实触发过、拿到可复现证据（请求/响应或命令输出）才用它**；回看已报漏洞用 list_findings。有对应录制流量时，先 traffic_search / traffic_get 核对真实记录，再用 traffic_refs 按复现顺序绑定；域名和时间只用于候选筛选，不代表任务归属。严禁把仅凭版本/CVE 匹配、"看起来可注入"、外部漏洞库/更新日志/代码 diff 推断的东西当已确认漏洞上报。**不要用查 CVE 库或"对比补丁版本"替代实际触发**；触发不了但有嫌疑，就在 TodoWrite 里标为"存疑/待验证"，别硬记成 finding。
+- **发现及验证状态** → report_finding。已有具体观察或合理证据支撑但未确认时用 verification_status=unverified；验证因权限、网络、工具或环境受阻时用 blocked，verification_note 写出依据、缺失证据及受阻原因。只有本次真实触发并获得可复现证据才标 confirmed；反证支持不成立才标 rejected。无具体依据的猜测保留为待办或 inferred 事实，不制造发现。回看原记录用 list_findings，避免重复上报；待确认与受阻发现不计为已确认漏洞或目标达成。有对应录制流量时先 traffic_search / traffic_get 核对，再按复现顺序绑定 traffic_refs；域名和时间只用于候选筛选，不代表任务归属。仅凭版本/CVE、参数外观或外部资料推断不得标为已确认。
 
 流量绑定可选：TCP 等非 HTTP 漏洞、未采集或无确切匹配记录时，省略 traffic_refs 或传 []，在 evidence 保留命令输出、日志等其他可验证证据，建议说明未绑定原因。不要猜测 ID，也不要仅为补包重复探测。
 

@@ -31,6 +31,43 @@ func (s *Server) chatGuard() *guard.Guard { return s.agentGuard() }
 // "off" | "warn"(默认) | "strict". See guard.RoEConfig.
 const settingRoEEnforcement = "roe_enforcement"
 
+// readRoEEnforcementSetting is the checked settings/API view. Absence keeps the
+// existing runtime default; a failed read or an invalid saved value must not be
+// presented as a successfully loaded, editable "warn" snapshot.
+func readRoEEnforcementSetting(pg *db.DB) (string, error) {
+	if pg == nil {
+		return "", errors.New("RoE 授权范围设置数据库尚未就绪")
+	}
+	value, found, err := pg.GetSetting(settingRoEEnforcement)
+	if err != nil {
+		return "", errors.New("RoE 授权范围设置读取失败，已有配置保持不变")
+	}
+	if !found {
+		return "warn", nil
+	}
+	if !validRoEEnforcement(value) {
+		return "", errors.New("RoE 授权范围设置无效，请显式保存 off、warn 或 strict")
+	}
+	return value, nil
+}
+
+func validRoEEnforcement(value string) bool {
+	return value == "off" || value == "warn" || value == "strict"
+}
+
+// parseRoEEnforcementUpdate distinguishes an omitted partial-update field from
+// an explicit null/empty/unknown value. No invalid value becomes a downgrade.
+func parseRoEEnforcementUpdate(raw json.RawMessage) (*string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || !validRoEEnforcement(value) {
+		return nil, errors.New("roe_enforcement 必须是 off、warn 或 strict")
+	}
+	return &value, nil
+}
+
 // agentGuard returns a fresh guard wired with the manager's interceptor, used
 // for chat conversations and for the planner / main-agent. Each agent build
 // gets its own guard instance so a new LLM config never shares audit state with
@@ -54,7 +91,7 @@ func newRoEConfig(pg *db.DB) guard.RoEConfig {
 	}
 	return guard.RoEConfig{
 		Mode: func() string {
-			v, _, err := pg.GetSetting(settingRoEEnforcement)
+			v, err := readRoEEnforcementSetting(pg)
 			if err != nil {
 				return "strict"
 			}

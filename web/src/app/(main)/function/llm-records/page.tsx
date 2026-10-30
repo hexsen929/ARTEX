@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/alert-dialog";
 
 import { Card } from "@/components/ui/card";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -126,29 +127,45 @@ export default function LLMRecordsPage() {
   const [records, setRecords] = React.useState<LLMRecordItem[]>([]);
   const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(false);
+  const [listError, setListError] = React.useState<string | null>(null);
+  const [loadedListKey, setLoadedListKey] = React.useState<string | null>(null);
 
   // Recording on/off toggle (settings.llm_record; default off). When off the
   // backend records nothing.
-  const [recEnabled, setRecEnabled] = React.useState(false);
+  const [recEnabled, setRecEnabled] = React.useState<boolean | null>(null);
+  const [recLoading, setRecLoading] = React.useState(true);
+  const [recError, setRecError] = React.useState<string | null>(null);
+  const recordingSequence = React.useRef(0);
+  const mounted = React.useRef(true);
+  React.useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; recordingSequence.current++; };
+  }, []);
   const [recBusy, setRecBusy] = React.useState(false);
 
   // Inline detail panel (Burp-style split, not a dialog)
   const [selected, setSelected] = React.useState<LLMRecordItem | null>(null);
   const [detail, setDetail] = React.useState<LLMRecordDetail | null>(null);
   const [detailLoading, setDetailLoading] = React.useState(false);
+  const [detailError, setDetailError] = React.useState<string | null>(null);
+  const detailSequence = React.useRef(0);
+  const selectedId = React.useRef(selected?.id);
+  selectedId.current = selected?.id;
+  // Never render a previous provider's payload under a newly selected row.
+  const selectedDetail = detail?.id === selected?.id ? detail : null;
   // 归一化视图 / HTTP 原文视图。原文是排查 provider 侧问题的唯一依据：归一化视图
   // 不含工具 schema，响应里也没有 tool_use 块。
   const [rawView, setRawView] = React.useState(false);
 
-  const hasRaw = !!(detail?.raw_request || detail?.raw_response);
+  const hasRaw = !!(selectedDetail?.raw_request || selectedDetail?.raw_response);
   // 开关保持用户选择，但切到一条无原文的旧记录时自动落回解析视图，而不是显示空白。
   const showRaw = rawView && hasRaw;
   // 原文请求体是 JSON，pretty-print 只改排版不改语义，便于阅读；原文响应是 SSE
   // 帧，tryFormatJSON 解析失败会原样返回，故两边共用一个函数即可。
   const reqText = showRaw
-    ? detail?.raw_request && tryFormatJSON(detail.raw_request)
-    : detail?.request_body && tryFormatJSON(detail.request_body);
-  const respText = showRaw ? detail?.raw_response : detail?.response_body && tryFormatJSON(detail.response_body);
+    ? selectedDetail?.raw_request && tryFormatJSON(selectedDetail.raw_request)
+    : selectedDetail?.request_body && tryFormatJSON(selectedDetail.request_body);
+  const respText = showRaw ? selectedDetail?.raw_response : selectedDetail?.response_body && tryFormatJSON(selectedDetail.response_body);
 
   // Per-task delete (task picker + confirm dialog)
   const [tasks, setTasks] = React.useState<LLMTask[]>([]);
@@ -156,31 +173,49 @@ export default function LLMRecordsPage() {
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
   const [reloadTick, setReloadTick] = React.useState(0); // manual refetch trigger
+  const [tasksKnown, setTasksKnown] = React.useState(false);
+  const [tasksError, setTasksError] = React.useState<string | null>(null);
+  const [deleteError, setDeleteError] = React.useState<string | null>(null);
+  const queryKey = JSON.stringify([page, size, sessionQ, model, pickedTask]);
+  const queryKeyRef = React.useRef(queryKey);
+  queryKeyRef.current = queryKey;
+  const visibleRecords = loadedListKey === queryKey ? records : [];
+  const currentListKnown = loadedListKey === queryKey;
 
-  // Load recording toggle state on mount.
+  // Unknown recording state is not the same as a disabled recorder.
   React.useEffect(() => {
     let alive = true;
-    api
-      .settings()
-      .then((s) => {
-        if (alive) setRecEnabled(!!s.llm_record);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, []);
+    const sequence = ++recordingSequence.current;
+    setRecLoading(true);
+    api.settings().then((settings) => {
+      if (typeof settings.llm_record !== "boolean") throw new Error("录制状态响应不完整");
+      if (alive && sequence === recordingSequence.current) {
+        setRecEnabled(settings.llm_record);
+        setRecError(null);
+      }
+    }).catch((error) => {
+      if (alive && sequence === recordingSequence.current) setRecError((error as Error).message);
+    }).finally(() => {
+      if (alive && sequence === recordingSequence.current) setRecLoading(false);
+    });
+    return () => { alive = false; };
+  }, [reloadTick]);
 
   const toggleRecording = async (on: boolean) => {
+    if (recEnabled === null || recLoading || recError || recBusy) return;
+    const sequence = ++recordingSequence.current;
     setRecBusy(true);
-    setRecEnabled(on); // optimistic
     try {
-      const s = await api.setSettings({ llm_record: on });
-      setRecEnabled(!!s.llm_record);
-    } catch {
-      setRecEnabled(!on); // revert on failure
+      const settings = await api.setSettings({ llm_record: on });
+      if (typeof settings.llm_record !== "boolean") throw new Error("保存响应缺少录制状态，请刷新核对");
+      if (mounted.current && sequence === recordingSequence.current) {
+        setRecEnabled(settings.llm_record);
+        setRecError(null);
+      }
+    } catch (error) {
+      if (mounted.current && sequence === recordingSequence.current) setRecError((error as Error).message);
     } finally {
-      setRecBusy(false);
+      if (mounted.current && sequence === recordingSequence.current) setRecBusy(false);
     }
   };
 
@@ -195,79 +230,74 @@ export default function LLMRecordsPage() {
     setPage(0);
   }, [sessionQ, model, size, pickedTask]);
 
-  // Load list.
+  // Keep last successful data, but never label another filter's data as current.
   React.useEffect(() => {
     let alive = true;
+    const requestedKey = queryKey;
     setLoading(true);
-    api
-      .llmRecords({
-        model: model || undefined,
-        session: sessionQ || undefined,
-        task: pickedTask || undefined,
-        page,
-        size,
-      })
-      .then((r) => {
-        if (!alive) return;
-        setRecords(r.records ?? []);
-        setTotal(r.total ?? 0);
-      })
-      .catch(() => {})
-      .finally(() => alive && setLoading(false));
-    api
-      .llmTasks()
-      .then((r) => {
-        if (alive) setTasks(r.tasks ?? []);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [page, size, sessionQ, model, pickedTask, reloadTick]);
+    api.llmRecords({ model: model || undefined, session: sessionQ || undefined,
+      task: pickedTask || undefined, page, size }).then((response) => {
+      if (!Array.isArray(response.records) || !Number.isFinite(response.total) || response.total < 0) throw new Error("调用记录响应不完整");
+      if (!alive || requestedKey !== queryKeyRef.current) return;
+      setRecords(response.records);
+      setTotal(response.total);
+      setLoadedListKey(requestedKey);
+      setListError(null);
+    }).catch((error) => {
+      if (alive && requestedKey === queryKeyRef.current) setListError((error as Error).message);
+    }).finally(() => {
+      if (alive && requestedKey === queryKeyRef.current) setLoading(false);
+    });
+    return () => { alive = false; };
+  }, [page, size, sessionQ, model, pickedTask, reloadTick, queryKey]);
 
-  // Delete every LLM record for the picked task, then refetch.
+  React.useEffect(() => {
+    let alive = true;
+    api.llmTasks().then((response) => {
+      if (!Array.isArray(response.tasks)) throw new Error("任务记录列表响应不完整");
+      if (alive) { setTasks(response.tasks); setTasksKnown(true); setTasksError(null); }
+    }).catch((error) => { if (alive) setTasksError((error as Error).message); });
+    return () => { alive = false; };
+  }, [reloadTick]);
+
   const confirmDelete = () => {
+    if (!pickedTask || !tasksKnown || tasksError || deleting) return;
+    const requestedTask = pickedTask;
     setDeleting(true);
-    api
-      .llmRecordsDeleteTask(pickedTask)
-      .then(() => {
-        setDeleteOpen(false);
-        setSelected(null);
-        setDetail(null);
-        setPickedTask("");
-        setPage(0);
-        setReloadTick((t) => t + 1);
-      })
-      .catch(() => {})
-      .finally(() => setDeleting(false));
+    setDeleteError(null);
+    api.llmRecordsDeleteTask(requestedTask).then(() => {
+      if (!mounted.current) return;
+      setDeleteOpen(false);
+      setSelected((current) => current?.task_id === requestedTask ? null : current);
+      setPickedTask((current) => current === requestedTask ? "" : current);
+      setPage(0);
+      setReloadTick((tick) => tick + 1);
+    }).catch((error) => { if (mounted.current) setDeleteError((error as Error).message); })
+      .finally(() => { if (mounted.current) setDeleting(false); });
   };
 
-  // Lazy-load full request/response when a row is selected.
   React.useEffect(() => {
-    if (!selected) {
-      setDetail(null);
-      return;
-    }
+    const sequence = ++detailSequence.current;
+    if (!selected) { setDetail(null); setDetailError(null); setDetailLoading(false); return; }
+    const id = selected.id;
     let alive = true;
     setDetailLoading(true);
     setDetail(null);
-    api
-      .llmRecordDetail(selected.id)
-      .then((d) => {
-        if (alive) setDetail(d);
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (alive) setDetailLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [selected]);
+    setDetailError(null);
+    api.llmRecordDetail(id).then((response) => {
+      if (!response || response.id !== id || typeof response.request_body !== "string" || typeof response.response_body !== "string") throw new Error("调用详情响应不完整");
+      if (alive && sequence === detailSequence.current && selectedId.current === id) setDetail(response);
+    }).catch((error) => {
+      if (alive && sequence === detailSequence.current && selectedId.current === id) setDetailError((error as Error).message);
+    }).finally(() => {
+      if (alive && sequence === detailSequence.current && selectedId.current === id) setDetailLoading(false);
+    });
+    return () => { alive = false; };
+  }, [selected, reloadTick]);
 
   const totalPages = Math.max(1, Math.ceil(total / size));
   const rangeStart = total === 0 ? 0 : page * size + 1;
-  const rangeEnd = page * size + records.length;
+  const rangeEnd = page * size + visibleRecords.length;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
@@ -276,10 +306,16 @@ export default function LLMRecordsPage() {
         <div className="flex items-center gap-2">
           <RadioIcon className="h-5 w-5 text-muted-foreground" />
           <h1 className="text-xl font-semibold tracking-tight">LLM 录制</h1>
-          <Badge variant="secondary">{total}</Badge>
+          <Badge variant="secondary">{currentListKnown ? total : "未知"}</Badge>
         </div>
       </div>
 
+      {(recError || listError || tasksError || deleteError) && <Alert role="alert"><AlertDescription className="space-y-1">
+        {recError && <p>录制状态读取或保存失败：{recError}。未自动切换开关，请刷新核对。</p>}
+        {listError && <p>调用记录加载失败：{listError}。{currentListKnown ? "下方保留上次成功结果，可能已过期。" : "当前筛选结果未知，不表示没有记录。"}</p>}
+        {tasksError && <p>任务记录列表读取失败：{tasksError}。暂停删除操作。</p>}
+        {deleteError && <p>删除失败：{deleteError}。</p>}
+      </AlertDescription></Alert>}
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative max-w-sm flex-1">
@@ -292,7 +328,7 @@ export default function LLMRecordsPage() {
           />
         </div>
         <Input placeholder="Model" className="h-8 w-48" value={model} onChange={(e) => setModel(e.target.value)} />
-        <Select value={pickedTask} onValueChange={setPickedTask}>
+        <Select value={pickedTask} onValueChange={setPickedTask} disabled={!tasksKnown || !!tasksError || deleting}>
           <SelectTrigger size="sm" className="w-56">
             <SelectValue placeholder="选择任务…" />
           </SelectTrigger>
@@ -315,7 +351,7 @@ export default function LLMRecordsPage() {
           variant="destructive"
           size="sm"
           className="h-8"
-          disabled={!pickedTask || deleting}
+          disabled={!pickedTask || !tasksKnown || !!tasksError || deleting}
           title={pickedTask ? undefined : "先在上方选择任务"}
           onClick={() => setDeleteOpen(true)}
         >
@@ -340,9 +376,9 @@ export default function LLMRecordsPage() {
           <Switch
             id="llm-rec-toggle"
             size="sm"
-            checked={recEnabled}
+            checked={recEnabled === true}
             onCheckedChange={toggleRecording}
-            disabled={recBusy}
+            disabled={recBusy || recLoading || !!recError || recEnabled === null}
           />
           <label
             htmlFor="llm-rec-toggle"
@@ -351,19 +387,20 @@ export default function LLMRecordsPage() {
               recEnabled ? "text-foreground" : "text-muted-foreground",
             )}
           >
-            {recEnabled ? "录制中" : "已关闭"}
+            {recLoading ? "读取中…" : recError || recEnabled === null ? "状态未知" : recEnabled ? "录制中" : "已关闭"}
           </label>
         </div>
 
+        <Button size="sm" variant="outline" disabled={recBusy || deleting} onClick={() => setReloadTick((tick) => tick + 1)}>刷新记录与状态</Button>
         <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
           <span className="tabular-nums">
-            {rangeStart}–{rangeEnd} / {total}
+            {currentListKnown ? `${rangeStart}–${rangeEnd} / ${total}` : "数量未知"}
           </span>
           <Button
             variant="outline"
             size="icon"
             className="size-8"
-            disabled={page <= 0}
+            disabled={page <= 0 || deleting || loading}
             onClick={() => setPage((p) => Math.max(0, p - 1))}
           >
             <ChevronLeftIcon />
@@ -375,7 +412,7 @@ export default function LLMRecordsPage() {
             variant="outline"
             size="icon"
             className="size-8"
-            disabled={page + 1 >= totalPages}
+            disabled={!currentListKnown || page + 1 >= totalPages || deleting || loading}
             onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
           >
             <ChevronRightIcon />
@@ -401,20 +438,20 @@ export default function LLMRecordsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {loading && records.length === 0 ? (
+                {loading && visibleRecords.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={8} className="py-12 text-center">
                       <Loader2Icon className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
                     </TableCell>
                   </TableRow>
-                ) : records.length === 0 ? (
+                ) : visibleRecords.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={8} className="py-12 text-center text-sm text-muted-foreground">
-                      暂无 LLM 调用记录
+                      {listError ? "当前记录读取失败，请重试" : currentListKnown ? "暂无 LLM 调用记录" : "尚未取得当前记录"}
                     </TableCell>
                   </TableRow>
                 ) : (
-                  records.map((rec) => (
+                  visibleRecords.map((rec) => (
                     <TableRow
                       key={rec.id}
                       className={cn("cursor-pointer", selected?.id === rec.id && "bg-accent hover:bg-accent")}
@@ -503,7 +540,7 @@ export default function LLMRecordsPage() {
                 size="sm"
                 className="ml-auto h-7 shrink-0 text-xs"
                 disabled={!hasRaw}
-                title={hasRaw ? "查看与 provider 实际收发的 HTTP 原文" : "该记录录制于此功能上线前，无原文"}
+                title={detailError ? "详情读取失败，请刷新重试" : !selectedDetail ? "详情尚未载入" : hasRaw ? "查看与 provider 实际收发的 HTTP 原文" : "该记录未保存 HTTP 原文"}
                 onClick={() => setRawView((v) => !v)}
               >
                 原文
@@ -512,6 +549,7 @@ export default function LLMRecordsPage() {
                 <XIcon />
               </Button>
             </div>
+            {detailError && <p role="alert" className="border-b p-3 text-xs text-destructive">详情读取失败：{detailError}。未将错误显示为空响应。</p>}
             {/* Request / Response split */}
             <div className="grid min-h-0 flex-1 grid-cols-2 divide-x">
               <div className="flex min-h-0 min-w-0 flex-col">
@@ -525,7 +563,7 @@ export default function LLMRecordsPage() {
                       <Loader2Icon className="size-3.5 animate-spin" />
                       加载…
                     </div>
-                  ) : (
+                  ) : detailError ? <p className="p-3 text-xs text-muted-foreground">详情不可用，请刷新重试。</p> : (
                     <pre className="p-3 font-mono text-xs break-all whitespace-pre-wrap">
                       <HttpPacketSyntax raw={reqText || ""} lineNumbers={false} emptyFallback="（空）" />
                     </pre>
@@ -543,7 +581,7 @@ export default function LLMRecordsPage() {
                       <Loader2Icon className="size-3.5 animate-spin" />
                       加载…
                     </div>
-                  ) : (
+                  ) : detailError ? <p className="p-3 text-xs text-muted-foreground">详情不可用，请刷新重试。</p> : (
                     <pre
                       className={cn(
                         "p-3 font-mono text-xs break-all whitespace-pre-wrap",
@@ -568,6 +606,7 @@ export default function LLMRecordsPage() {
               将永久删除该任务的所有 LLM 调用记录（含请求/响应原文），此操作不可撤销。
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {deleteError && <p role="alert" className="text-sm text-destructive">删除失败：{deleteError}</p>}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
             <AlertDialogAction

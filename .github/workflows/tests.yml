@@ -116,6 +116,8 @@ jobs:
           go test -race ./agent -run 'Test(TaskAssociatedVerifierSideCapture|SideCaptureParent)' -count=1 -timeout=3m
           go test -race ./agent ./llmguard -run 'Test(ResponsesError|StructuredProviderError|StructuredStatus|OnlyConcreteTransport|CancellationWinsOverStructured)' -count=1 -timeout=3m
           go test -race ./server -run 'Test(RuntimeMerge|MergeScreenshot|MergeAutoTitle|MergeFindingSide)' -count=1 -timeout=3m
+          go test -race ./guard -run 'Test(Extract|RoE)' -count=1 -timeout=3m
+          go test -race ./server -run 'Test(ChatProfileWiring|TaskAgentBindingWiring|RuntimeControlRoutes|RoESettings|InstalledSkillDefaultsStartup|SkillDefaultsPending|NotifierSettingsWiring)' -count=1 -timeout=5m
 
   # Run frontend checks independently: backend compilation failures must not
   # hide TypeScript or UI regressions during a cross-cutting source port.
@@ -158,6 +160,30 @@ jobs:
           ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
         run: node scripts/newfindingmerge-ui-smoke.cjs
+        working-directory: web
+      - name: Runtime policy settings browser regressions
+        env:
+          ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
+        run: node scripts/roe-settings-ui-smoke.cjs
+        working-directory: web
+      - name: Notification and tool editor browser regressions
+        env:
+          ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
+        run: node scripts/notification-tool-ui-wiring-smoke.cjs
+        working-directory: web
+      - name: Module status and recording browser regressions
+        env:
+          ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
+        run: node scripts/routes-status-wiring-smoke.cjs
+        working-directory: web
+      - name: Update lifecycle browser regressions
+        env:
+          ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
+        run: node scripts/update-lifecycle-ui-smoke.cjs
         working-directory: web
       - uses: actions/upload-artifact@v4
         if: always()

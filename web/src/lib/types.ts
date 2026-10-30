@@ -998,10 +998,17 @@ export interface TrafficHost {
 }
 
 // ---- App settings (runtime toggles) ----
+export type RoEEnforcement = "off" | "warn" | "strict";
+export type FindingVerifyMode = "auto" | "off";
+export type RuntimeControlKey = "roe_enforcement" | "llm_records_retention_days" | "finding_verify_mode";
+
 export interface Settings {
+  roe_enforcement: RoEEnforcement; // 授权范围核验；未保存时后端返回 warn，不与 OPSEC/自动审批混用。
+  llm_records_retention_days: number; // 完整调用记录保留天数，0不清理，未保存时30；0..106751。
+  finding_verify_mode: FindingVerifyMode; // 新自动验证派发总开关；仍需Agent、触发器和任务状态条件。
   finding_inline_merge_enabled?: boolean; // 默认关闭；仅控制同入口候选原地聚合，不替代 cases 归并
   traffic_capture: boolean;
-  /** 是否向可见 Agent 暴露浏览器 MCP 的截图工具。默认关闭。 */
+  /** 报告角色的自动截图与显式浏览器授权开关；不移除其他角色已有截图授权。默认关闭。 */
   browser_screenshot_enabled?: boolean;
   /** 是否在报告截图右上角显示截图保存时间。默认关闭。 */
   browser_screenshot_timestamp_enabled?: boolean;

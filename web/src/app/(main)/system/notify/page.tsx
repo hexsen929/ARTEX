@@ -16,6 +16,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { assertNotificationMeta, notificationDigestMinutes, readNotificationSettings } from "@/lib/notification-ui-state";
 import type { NotificationChannel, NotificationFilter, NotificationMeta } from "@/lib/types";
 
 import {
@@ -50,22 +51,61 @@ export default function NotifyPage() {
   const [globalSaving, setGlobalSaving] = React.useState(false);
   const [baseURL, setBaseURL] = React.useState("");
   const [digestMin, setDigestMin] = React.useState("");
+  const [metaLoading, setMetaLoading] = React.useState(true);
+  const [metaKnown, setMetaKnown] = React.useState(false);
+  const [metaError, setMetaError] = React.useState("");
+  const [globalDirty, setGlobalDirty] = React.useState(false);
+  const mounted = React.useRef(true);
+  const requests = React.useRef({ meta: 0, channels: 0 });
+  const globalDraft = React.useRef({ version: 0, dirty: false });
+  const globalOperation = React.useRef(false);
+  const editorGeneration = React.useRef(0);
+
+  React.useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      requests.current.meta++;
+      requests.current.channels++;
+      editorGeneration.current++;
+    };
+  }, []);
 
   const load = React.useCallback(() => {
-    api
-      .notifyMeta()
-      .then((m) => {
-        setMeta(m);
-        setBaseURL(m.public_base_url);
-        setDigestMin(m.digest_interval_min);
-      })
-      .catch((e) => toast.error("读取推送配置失败：" + (e as Error).message));
+    if (!mounted.current) return;
+    // A channel refresh must not replace a user's unsaved global draft. An old
+    // GET must not undo a newer acknowledged global save/toggle either.
+    if (!globalOperation.current) {
+      const request = ++requests.current.meta;
+      const draftVersion = globalDraft.current.version;
+      setMetaLoading(true);
+      api.notifyMeta().then((m) => {
+        if (!mounted.current || request !== requests.current.meta) return;
+        assertNotificationMeta(m);
+        setMeta(m); setMetaKnown(true); setMetaError("");
+        if (!globalDraft.current.dirty && draftVersion === globalDraft.current.version) {
+          setBaseURL(m.public_base_url);
+          setDigestMin(String(notificationDigestMinutes(m.digest_interval_min, m.defaults.digest_interval_min)));
+        }
+      }).catch((e) => {
+        if (!mounted.current || request !== requests.current.meta) return;
+        setMetaKnown(false);
+        setMetaError("读取推送配置失败：" + (e as Error).message);
+      }).finally(() => {
+        if (mounted.current && request === requests.current.meta) setMetaLoading(false);
+      });
+    }
     // 渠道列表加载失败要报出来：静默失败会显示成「一个渠道都没有」，
     // 用户会以为配置丢了，比直接报错更让人慌。
+    const channelsRequest = ++requests.current.channels;
     api
       .notifyChannels()
-      .then(setChannels)
-      .catch((e) => toast.error("读取渠道列表失败：" + (e as Error).message));
+      .then((items) => {
+        if (mounted.current && channelsRequest === requests.current.channels) setChannels(items);
+      })
+      .catch((e) => {
+        if (mounted.current && channelsRequest === requests.current.channels) toast.error("读取渠道列表失败：" + (e as Error).message);
+      });
   }, []);
   React.useEffect(() => {
     load();
@@ -79,12 +119,17 @@ export default function NotifyPage() {
   }
 
   function openAdd() {
+    if (!metaKnown || metaLoading || !meta) return;
+    editorGeneration.current++;
+    setSaving(false); setTesting(false);
     setEditing(null);
     setForm(emptyForm(meta?.kinds[0]?.kind ?? "dingtalk"));
     setOpen(true);
   }
 
   function openEdit(ch: NotificationChannel) {
+    editorGeneration.current++;
+    setSaving(false); setTesting(false);
     setEditing(ch);
     // filter 在后端是 Go 结构体，永远序列化成对象（不会是 null），所以不需要兜底。
     const f = ch.filter;
@@ -164,11 +209,20 @@ export default function NotifyPage() {
   }
 
   async function saveForm() {
+    if (!metaKnown || metaLoading || !meta) {
+      toast.error("通知配置尚未完整读取，已有配置保持不变");
+      return;
+    }
+    if (!CHANNEL_FIELDS[form.kind]?.length) {
+      toast.error("该渠道表单尚未接入，未修改已有配置");
+      return;
+    }
     if (!form.name.trim()) {
       toast.error("请填写渠道名称");
       return;
     }
     setSaving(true);
+    const generation = editorGeneration.current;
     try {
       const payload = {
         name: form.name.trim(),
@@ -181,41 +235,44 @@ export default function NotifyPage() {
       };
       if (editing) {
         await api.notifyUpdateChannel(editing.id, payload);
-        toast.success("已保存");
-        setOpen(false);
+        if (mounted.current && generation === editorGeneration.current) toast.success("已保存");
+        if (mounted.current && generation === editorGeneration.current) setOpen(false);
       } else {
         await api.notifyCreateChannel(payload);
-        toast.success("已添加渠道");
-        setOpen(false);
+        if (mounted.current && generation === editorGeneration.current) toast.success("已添加渠道");
+        if (mounted.current && generation === editorGeneration.current) setOpen(false);
       }
-      load();
+      if (mounted.current) load();
     } catch (e) {
-      toast.error("保存失败：" + (e as Error).message);
+      if (mounted.current && generation === editorGeneration.current) toast.error("保存失败：" + (e as Error).message);
     } finally {
-      setSaving(false);
+      if (mounted.current && generation === editorGeneration.current) setSaving(false);
     }
   }
 
   async function testChannel() {
     if (!editing) return;
+    const generation = editorGeneration.current;
     setTesting(true);
     try {
       const r = await api.notifyTestChannel(editing.id);
+      if (!mounted.current || generation !== editorGeneration.current) return;
       toast.success(`已发出测试消息（${r.latency_ms} ms），请到群里确认`);
     } catch (e) {
       // 后端把渠道返回的原始错误如实回传，这是排查配置的唯一线索，原样展示。
-      toast.error("测试失败：" + (e as Error).message, { duration: 12000 });
+      if (mounted.current && generation === editorGeneration.current) toast.error("测试失败：" + (e as Error).message, { duration: 12000 });
     } finally {
-      setTesting(false);
+      if (mounted.current && generation === editorGeneration.current) setTesting(false);
     }
   }
 
   async function removeChannel(ch: NotificationChannel) {
+    const generation = editorGeneration.current;
     try {
       await api.notifyDeleteChannel(ch.id);
       toast.success(`已删除：${ch.name}`);
-      setOpen(false);
-      load();
+      if (mounted.current && generation === editorGeneration.current && editing?.id === ch.id) setOpen(false);
+      if (mounted.current) load();
     } catch (e) {
       toast.error("删除失败：" + (e as Error).message);
     }
@@ -231,31 +288,57 @@ export default function NotifyPage() {
   }
 
   async function toggleGlobal(on: boolean) {
+    if (!metaKnown || metaLoading || !meta || globalOperation.current) return;
+    globalOperation.current = true;
+    requests.current.meta++;
     setGlobalSaving(true);
     try {
-      await api.setSettings({ notify_enabled: on });
-      setMeta((m) => (m ? { ...m, enabled: on } : m));
+      const response = readNotificationSettings(await api.setSettings({ notify_enabled: on }));
+      if (!mounted.current) return;
+      setMeta((m) => (m ? { ...m, enabled: response.enabled, public_base_url: response.publicBaseURL, digest_interval_min: String(response.digestMinutes) } : m));
       toast.success(on ? "推送已开启" : "推送已暂停");
     } catch (e) {
-      toast.error("操作失败：" + (e as Error).message);
+      if (mounted.current) {
+        setMetaKnown(false); setMetaError("通知保存结果未确认，请重新读取；已有草稿保留。");
+        toast.error("操作失败：" + (e as Error).message);
+      }
     } finally {
-      setGlobalSaving(false);
+      globalOperation.current = false;
+      if (mounted.current) { setGlobalSaving(false); setMetaLoading(false); }
     }
   }
 
   async function saveGlobal() {
+    if (!metaKnown || metaLoading || !meta || globalOperation.current) return;
+    let digest: number;
+    try {
+      digest = notificationDigestMinutes(digestMin, meta.defaults.digest_interval_min);
+    } catch (e) {
+      toast.error((e as Error).message);
+      return;
+    }
+    const draftVersion = globalDraft.current.version;
+    const patch = { notify_public_base_url: baseURL.trim(), notify_digest_interval_min: digest };
+    globalOperation.current = true;
+    requests.current.meta++;
     setGlobalSaving(true);
     try {
-      const patch: Record<string, unknown> = { notify_public_base_url: baseURL.trim() };
-      const n = Number(digestMin);
-      if (Number.isFinite(n) && n > 0) patch.notify_digest_interval_min = n;
-      await api.setSettings(patch);
+      const response = readNotificationSettings(await api.setSettings(patch));
+      if (!mounted.current) return;
+      setMeta((m) => m ? { ...m, enabled: response.enabled, public_base_url: response.publicBaseURL, digest_interval_min: String(response.digestMinutes) } : m);
+      if (draftVersion === globalDraft.current.version) {
+        globalDraft.current.dirty = false; setGlobalDirty(false);
+        setBaseURL(response.publicBaseURL); setDigestMin(String(response.digestMinutes));
+      }
       toast.success("已保存");
-      load();
     } catch (e) {
-      toast.error("保存失败：" + (e as Error).message);
+      if (mounted.current) {
+        setMetaKnown(false); setMetaError("通知保存结果未确认，请重新读取；已有草稿保留。");
+        toast.error("保存失败：" + (e as Error).message);
+      }
     } finally {
-      setGlobalSaving(false);
+      globalOperation.current = false;
+      if (mounted.current) { setGlobalSaving(false); setMetaLoading(false); }
     }
   }
 
@@ -279,7 +362,7 @@ export default function NotifyPage() {
             <span className="text-muted-foreground">总开关</span>
             <Switch
               checked={meta.enabled}
-              disabled={globalSaving}
+              disabled={!metaKnown || metaLoading || globalSaving}
               onCheckedChange={toggleGlobal}
               aria-label="推送总开关"
             />
@@ -308,13 +391,18 @@ export default function NotifyPage() {
           <CardTitle className="text-base">全局设置</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-2">
+          {(metaLoading || metaError) && <div role="alert" className="sm:col-span-2 text-sm text-amber-700">
+            {metaLoading ? "正在读取通知配置，暂不接受修改…" : metaError}
+            {!metaLoading && <Button variant="outline" size="sm" className="ml-2" onClick={load}>重新读取</Button>}
+          </div>}
           <div className="grid gap-2">
             <Label htmlFor="n-base">回链地址</Label>
             <Input
               id="n-base"
               placeholder="https://artex.example.com"
               value={baseURL}
-              onChange={(e) => setBaseURL(e.target.value)}
+              disabled={!metaKnown || metaLoading || globalSaving}
+              onChange={(e) => { globalDraft.current.version++; globalDraft.current.dirty = true; setGlobalDirty(true); setBaseURL(e.target.value); }}
             />
             <p className="text-muted-foreground text-xs">消息里「查看详情」按钮指向的地址。留空则不带按钮。</p>
           </div>
@@ -327,14 +415,16 @@ export default function NotifyPage() {
               max={1440}
               placeholder="30"
               value={digestMin}
-              onChange={(e) => setDigestMin(e.target.value)}
+              disabled={!metaKnown || metaLoading || globalSaving}
+              onChange={(e) => { globalDraft.current.version++; globalDraft.current.dirty = true; setGlobalDirty(true); setDigestMin(e.target.value); }}
             />
-            <p className="text-muted-foreground text-xs">仅对「汇总」模式的渠道生效。</p>
+            <p className="text-muted-foreground text-xs">留空恢复默认 {meta?.defaults.digest_interval_min ?? 30} 分钟；仅对「汇总」模式的渠道生效。</p>
           </div>
           <div className="sm:col-span-2">
-            <Button onClick={saveGlobal} disabled={globalSaving}>
+            <Button onClick={saveGlobal} disabled={!metaKnown || metaLoading || globalSaving}>
               保存全局设置
             </Button>
+            {globalDirty && <span className="ml-2 text-xs text-muted-foreground">有未保存的全局设置；刷新渠道不会覆盖。</span>}
           </div>
         </CardContent>
       </Card>
@@ -349,6 +439,7 @@ export default function NotifyPage() {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <button
               type="button"
+              disabled={!metaKnown || metaLoading}
               onClick={openAdd}
               className="text-foreground/70 border-foreground/70 hover:bg-muted/60 hover:shadow-sm flex min-h-[130px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed transition"
             >
@@ -411,7 +502,7 @@ export default function NotifyPage() {
         </TabsContent>
       </Tabs>
 
-      <Sheet open={open} onOpenChange={setOpen}>
+      <Sheet open={open} onOpenChange={(value) => { if (!value) editorGeneration.current++; setOpen(value); }}>
         <SheetContent side="right" className="w-full data-[side=right]:sm:max-w-lg">
           <SheetHeader>
             <SheetTitle>{editing ? editing.name : "添加通知渠道"}</SheetTitle>
@@ -588,7 +679,7 @@ export default function NotifyPage() {
             </div>
 
             <div className="flex gap-2 pt-2 pb-6">
-              <Button onClick={saveForm} disabled={saving}>
+              <Button onClick={saveForm} disabled={!metaKnown || metaLoading || saving || fields.length === 0}>
                 {editing ? "保存" : "添加"}
               </Button>
               {editing && (

@@ -106,8 +106,8 @@ type taskLLMStreamHooks struct {
 
 // current resolves the provider this role runs on. Pinned workers use only their
 // assigned profile; legacy task agents use Agent 绑定 → 任务 LLM 配置链 → 全局/环境配置.
-// 绑定优先于任务链：某个角色被显式指定了模型，就一直跑在那个模型上；绑定不存在或
-// 构建失败时才降级到任务链，任务链为空时再降级到全局配置。
+// 绑定优先于任务链：某个角色被显式指定了模型，就一直跑在那个模型上；只有未绑定时
+// 才使用任务链/全局配置。读取失败或所选配置失效明确停止，不静默更换渠道。
 // 返回的 profile id 只有走任务链时才非零 —— streamTaskLLM 以此判断额度错误是否
 // 应该推进任务的故障转移状态（绑定/全局路径不改任务链状态，沿用既有语义）。
 func (r *taskLLMRuntime) current() (taskLLMSelection, error) {
@@ -127,19 +127,21 @@ func (r *taskLLMRuntime) current() (taskLLMSelection, error) {
 	}
 	taskNum, err := parseTaskID(r.taskID)
 	if err != nil {
-		return taskLLMSelection{}, err
+		return taskLLMSelection{}, &taskLLMError{taskID: r.taskID, cause: err}
 	}
 	pt, err := r.s.m.pg.GetTask(taskNum)
 	if err != nil {
-		return taskLLMSelection{}, err
+		return taskLLMSelection{}, &taskLLMError{taskID: r.taskID, cause: err}
 	}
 	if pt == nil {
-		return taskLLMSelection{}, fmt.Errorf("task %s not found", r.taskID)
+		return taskLLMSelection{}, &taskLLMError{taskID: r.taskID, cause: fmt.Errorf("task %s not found", r.taskID)}
 	}
 	r.s.syncTaskLLMState(pt)
 	t, _ := r.s.m.Task(r.taskID)
 	sel := taskLLMSelection{task: t, revision: pt.LLMChainRevision}
-	if prov, cfg, ok := r.s.agentBindingProvider(r.agentKey); ok {
+	if prov, cfg, bound, err := r.s.agentBindingProviderChecked(r.agentKey); err != nil {
+		return sel, &taskLLMError{taskID: r.taskID, cause: err}
+	} else if bound {
 		sel.provider, sel.retry = prov, cfg.Retry
 		return sel, nil
 	}
@@ -181,8 +183,8 @@ func (r *taskLLMRuntime) activeCfg() (agent.Config, bool) {
 	if err != nil || pt == nil {
 		return agent.Config{}, false
 	}
-	if _, cfg, ok := r.s.agentBindingProvider(r.agentKey); ok {
-		return cfg, true
+	if _, cfg, bound, err := r.s.agentBindingProviderChecked(r.agentKey); bound || err != nil {
+		return cfg, err == nil
 	}
 	if len(pt.LLMProfileIDs) > 0 && pt.ActiveLLMProfileID != nil {
 		if _, cfg, ok := r.s.providerForProfile(*pt.ActiveLLMProfileID); ok {
@@ -470,8 +472,11 @@ func (r *taskLLMRuntime) CompactionWindow() int {
 		}
 		return (agent.Config{}).CompactionWindow()
 	}
-	if _, cfg, ok := r.s.agentBindingProvider(r.agentKey); ok {
-		return cfg.CompactionWindow()
+	if _, cfg, bound, err := r.s.agentBindingProviderChecked(r.agentKey); bound || err != nil {
+		if err == nil {
+			return cfg.CompactionWindow()
+		}
+		return (agent.Config{}).CompactionWindow()
 	}
 	taskNum, err := parseTaskID(r.taskID)
 	if err != nil {
@@ -503,20 +508,47 @@ func (r *taskLLMRuntime) CompactionWindow() int {
 }
 
 // agentBindingProvider resolves the profile a role is explicitly bound to
-// (agents.llm_profile_id) — the highest-precedence level for task agents. ok=false
-// when the role has no binding or the bound profile no longer builds, so callers
-// fall through to the task chain. A bound profile stays exclusive unless
-// llm_pool_bind_fallback is on, which is what poolForBinding encodes.
+// (agents.llm_profile_id) — the highest-precedence level for task agents. The
+// compatibility boolean means "a route was selected", not "safe to fall back".
+// Keep existing three-result callers (including the tool-free credential
+// processor) on a zero-network error provider if the binding is unknown/invalid.
 func (s *Server) agentBindingProvider(agentKey string) (llm.Provider, agent.Config, bool) {
-	id := s.effectiveProfileForAgent(agentKey, nil)
+	provider, cfg, selected, err := s.agentBindingProviderChecked(agentKey)
+	if err != nil {
+		cfg.ConfigError = err
+		return agent.ErrorProvider(err), cfg, true
+	}
+	return provider, cfg, selected
+}
+
+// agentBindingProviderChecked distinguishes absence from an unreadable or failed
+// explicit route. Only a healthy selected provider may enter the existing
+// operator-controlled bound-provider pool; lookup/build failures never do.
+func (s *Server) agentBindingProviderChecked(agentKey string) (llm.Provider, agent.Config, bool, error) {
+	if agentKey == "" {
+		return nil, agent.Config{}, false, nil
+	}
+	return resolveAgentBindingProvider(agentKey, func() (*int64, error) {
+		return s.chatProfileSelection(&db.Conversation{AgentKey: agentKey})
+	}, s.providerForProfile, s.poolForBinding)
+}
+
+func resolveAgentBindingProvider(agentKey string, selected func() (*int64, error), provider func(int64) (llm.Provider, agent.Config, bool), bindingPool func(int64, llm.Provider, agent.Config) llm.Provider) (llm.Provider, agent.Config, bool, error) {
+	id, err := selected()
+	if err != nil {
+		return nil, agent.Config{}, false, fmt.Errorf("任务 Agent %q 的模型绑定读取失败，未改用任务链或全局模型: %w", agentKey, err)
+	}
 	if id == nil {
-		return nil, agent.Config{}, false
+		return nil, agent.Config{}, false, nil
 	}
-	prov, cfg, ok := s.providerForProfile(*id)
-	if !ok {
-		return nil, agent.Config{}, false
+	prov, cfg, ok := provider(*id)
+	if !ok || prov == nil {
+		return nil, cfg, true, fmt.Errorf("任务 Agent %q 所选 LLM 配置 #%d 不可用；未改用任务链或全局模型", agentKey, *id)
 	}
-	return s.poolForBinding(*id, prov, cfg), cfg, true
+	if cfg.ConfigError != nil {
+		return nil, cfg, true, fmt.Errorf("任务 Agent %q 所选 LLM 配置 #%d 有配置错误；未改用其它模型: %w", agentKey, *id, cfg.ConfigError)
+	}
+	return bindingPool(*id, prov, cfg), cfg, true, nil
 }
 
 // globalProvider returns the process-wide provider (persisted active profile or
@@ -540,17 +572,22 @@ func (s *Server) taskRuntimeAvailable(t *Task, agentKeys ...string) bool {
 		return false
 	}
 	state := t.llmStateSnapshot()
-	unboundReady := false
-	if len(state.ProfileIDs) > 0 {
-		if state.ActiveID != nil {
-			_, _, unboundReady = s.providerForProfile(*state.ActiveID)
-		}
-	} else {
-		_, _, unboundReady = s.globalProvider()
-	}
+	unboundReady, unboundResolved := false, false
 	for _, key := range agentKeys {
-		if _, _, ok := s.agentBindingProvider(key); ok {
+		if _, _, bound, err := s.agentBindingProviderChecked(key); err != nil {
+			return false
+		} else if bound {
 			continue
+		}
+		if !unboundResolved {
+			unboundResolved = true
+			if len(state.ProfileIDs) > 0 {
+				if state.ActiveID != nil {
+					_, _, unboundReady = s.providerForProfile(*state.ActiveID)
+				}
+			} else {
+				_, _, unboundReady = s.globalProvider()
+			}
 		}
 		if !unboundReady {
 			return false

@@ -3336,6 +3336,9 @@ export const tools: Tool[] = [
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 export const settings: Settings = {
+  roe_enforcement: "warn",
+  llm_records_retention_days: 30,
+  finding_verify_mode: "auto",
   finding_inline_merge_enabled: false,
   task_intelligence_enabled: false,
   credential_agent_enabled: false,
@@ -3343,6 +3346,9 @@ export const settings: Settings = {
   task_auto_title_enabled: false,
   chat_auto_title_enabled: false,
   traffic_capture: true,
+  browser_screenshot_enabled: false,
+  browser_screenshot_timestamp_enabled: false,
+  opsec_enabled: false,
   agent_traffic_binding: false,
   llm_record: false,
   web_search_enabled: true,
@@ -3351,13 +3357,23 @@ export const settings: Settings = {
   tavily_key_set: true,
   web_search_proxy: "",
   global_proxy: "",
-	show_egress_ip: false,
+  show_egress_ip: false,
+  callback_addr: "",
+  callback_addr_source: "unset",
+  callback_addr_locked: false,
   python_interpreter: "/usr/bin/python3",
   workers: 3,
   worker_pools: [],
+  task_concurrency_enabled: false,
+  task_concurrency_limit: 5,
   llm_pool_enabled: true,
   llm_pool_bind_fallback: false,
   noa_compaction: false,
+  constraints_inject_planner: true,
+  constraints_inject_worker: true,
+  notify_enabled: true,
+  notify_public_base_url: "",
+  notify_digest_interval_min: 30,
 };
 
 // ── LLM 轮询（故障转移）──────────────────────────────────────────────────────
