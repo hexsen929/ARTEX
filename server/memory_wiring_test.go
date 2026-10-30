@@ -376,6 +376,10 @@ func TestMemoryRecallQueryIgnoresToolsSystemAndAssistant(t *testing.T) {
 	if len(got) > 512 || !utf8.ValidString(got) || got == "" {
 		t.Fatalf("query truncation broke UTF-8 or budget: %q", got)
 	}
+	got = memoryRecallQuery(llm.CompletionRequest{Messages: []llm.Message{llm.UserText("tool compatibility " + strings.Repeat("bounded context ", 2000))}})
+	if got == "" || len(got) > 512 {
+		t.Fatal("long task context disabled bounded recall")
+	}
 }
 
 func TestMemoryRecallRestrictedRolesAndUnknownIdentityDoNotReadStore(t *testing.T) {

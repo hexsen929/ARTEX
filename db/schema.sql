@@ -1989,7 +1989,7 @@ JOIN tasks t ON t.exploration_id=n.exploration_id AND t.deleted_at IS NULL AND t
 LEFT JOIN memory_sources ms ON ms.source_kind='node' AND ms.source_id=n.id::text
 LEFT JOIN LATERAL (SELECT finding.* FROM findings finding WHERE finding.node_id=n.id ORDER BY finding.id DESC LIMIT 1) f ON true
 WHERE n.kind IN ('fact','hint','finding')
-  AND n.state NOT IN ('dismissed','superseded','consumed')
+  AND n.state NOT IN ('origin','dismissed','superseded','consumed')
   AND (n.kind<>'finding' OR COALESCE(f.verification_status,'unverified')<>'rejected')
   AND CASE WHEN n.kind='finding' THEN
       COALESCE(CASE WHEN f.summary ~ '[^[:space:]]' THEN f.summary END,

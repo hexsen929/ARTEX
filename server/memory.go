@@ -406,7 +406,7 @@ func (s *Server) getMemoryUsage(w http.ResponseWriter, r *http.Request) {
 		memoryAPIError(w, db.ErrMemoryInput)
 		return
 	}
-	items, err := pg.ListMemoryAuditFiltered(r.Context(), taskID, convID, sessionID, memoryLimit(r, 50, 200))
+	items, err := pg.ListMemoryAuditFiltered(r.Context(), taskID, convID, sessionID, memoryLimit(r, 50, 200), true)
 	if err != nil {
 		memoryAPIError(w, err)
 		return
@@ -517,7 +517,7 @@ func memoryRecallQuery(req llm.CompletionRequest) string {
 		if q == "" {
 			continue
 		}
-		if _, err := longmemory.SanitizeSource(q); err != nil {
+		if !utf8.ValidString(q) {
 			return ""
 		}
 		if len(q) > 512 {
@@ -525,6 +525,9 @@ func memoryRecallQuery(req llm.CompletionRequest) string {
 			for !utf8.ValidString(q) {
 				q = q[:len(q)-1]
 			}
+		}
+		if _, err := longmemory.SanitizeSource(q); err != nil {
+			return ""
 		}
 		return q
 	}

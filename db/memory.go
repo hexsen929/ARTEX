@@ -650,13 +650,14 @@ func (d *DB) ListMemoryAudit(ctx context.Context, limit int) ([]MemoryAudit, err
 	return d.ListMemoryAuditFiltered(ctx, 0, 0, "", limit)
 }
 
-func (d *DB) ListMemoryAuditFiltered(ctx context.Context, taskID, conversationID int64, sessionID string, limit int) ([]MemoryAudit, error) {
+func (d *DB) ListMemoryAuditFiltered(ctx context.Context, taskID, conversationID int64, sessionID string, limit int, usageOnly ...bool) ([]MemoryAudit, error) {
 	if limit < 1 || limit > 200 {
 		limit = 50
 	}
 	rows, err := d.QueryContext(ctx, `SELECT id,entry_id,entry_version,task_id,conversation_id,agent_key,session_id,call_key,action,created_at
 		FROM memory_audit WHERE ($1=0 OR task_id=$1) AND ($2=0 OR conversation_id=$2) AND ($3='' OR session_id=$3)
-		ORDER BY id DESC LIMIT $4`, taskID, conversationID, sessionID, limit)
+		AND (NOT $5 OR (entry_id>0 AND action='admitted'))
+		ORDER BY id DESC LIMIT $4`, taskID, conversationID, sessionID, limit, len(usageOnly) > 0 && usageOnly[0])
 	if err != nil {
 		return nil, err
 	}

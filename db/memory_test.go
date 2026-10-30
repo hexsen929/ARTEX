@@ -319,6 +319,13 @@ func TestMemoryDisableRejectsLateLearningAndRequest(t *testing.T) {
 func TestMemorySourceProjectionAndHistoryBoundary(t *testing.T) {
 	d := memoryFixtureDB(t)
 	task := memoryFixtureTask(t, d)
+	originID, err := d.Exploration(task.ExplorationID).OriginFactID()
+	if err != nil || originID <= 0 {
+		t.Fatalf("origin fact: %d %v", originID, err)
+	}
+	if origin, err := d.GetMemorySource(t.Context(), "node", fmt.Sprint(originID)); err != nil || origin != nil {
+		t.Fatalf("task instructions incorrectly became learned observations: %+v %v", origin, err)
+	}
 	nodeID, err := d.Exploration(task.ExplorationID).AddNode(KindFinding, map[string]any{
 		"summary": "fixture finding summary", "evidence": "PRIVATE_RAW_PACKET_CANARY", "target": "fixture.invalid",
 	}, 0, "confirmed", "worker", nil)
