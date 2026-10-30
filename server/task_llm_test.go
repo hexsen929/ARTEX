@@ -574,17 +574,16 @@ func TestResolvedTaskStatusKeepsExhaustedStartedTaskRunning(t *testing.T) {
 // A role with no Agent binding falls through to the task chain, then to global —
 // and an exhausted chain stays a hard stop instead of silently borrowing global.
 func TestTaskRuntimeAvailableUnboundRoleFollowsChainThenGlobal(t *testing.T) {
-	t.Parallel()
-	// A nil pg means effectiveProfileForAgent finds no binding for any role, so
-	// every role here resolves through the chain/global levels.
-	s := &Server{m: &Manager{}}
+	// A known existing role with a NULL binding is genuinely unbound. An
+	// unavailable store cannot establish that fact and must not imply fallback.
+	s, _, _, role := chatProfileWiringFixture(t)
 	task := &Task{ID: "7"}
 
-	if s.taskRuntimeAvailable(task, "worker") {
+	if s.taskRuntimeAvailable(task, role) {
 		t.Fatal("no binding, no chain and no global provider must not be runnable")
 	}
 	s.llmOn, s.llmProv = true, &scriptedLLMProvider{}
-	if !s.taskRuntimeAvailable(task, "worker") {
+	if !s.taskRuntimeAvailable(task, role) {
 		t.Fatal("global provider must serve a role with no binding and no chain")
 	}
 	if s.taskRuntimeAvailable(task) {
@@ -593,8 +592,15 @@ func TestTaskRuntimeAvailableUnboundRoleFollowsChainThenGlobal(t *testing.T) {
 
 	profileID := int64(11)
 	task.setLLMState(&profileID, nil, []int64{profileID}, 1, "chain_exhausted", "quota exhausted")
-	if s.taskRuntimeAvailable(task, "worker") {
+	if s.taskRuntimeAvailable(task, role) {
 		t.Fatal("exhausted chain must not fall back to the global provider")
+	}
+}
+
+func TestTaskRuntimeUnknownBindingStoreDoesNotBorrowGlobal(t *testing.T) {
+	s := &Server{m: &Manager{}, llmOn: true, llmProv: &scriptedLLMProvider{}}
+	if s.taskRuntimeAvailable(&Task{ID: "7"}, "worker") {
+		t.Fatal("unknown binding storage was mistaken for an intentionally unbound role")
 	}
 }
 
