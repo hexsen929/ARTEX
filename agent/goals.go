@@ -159,7 +159,7 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 		return nil
 	}
 	system, boundary := deferredSystem(sys, def)
-	captureRun(ctx, agentcore.Options{
+	opts := agentcore.Options{
 		Provider:               prov,
 		SystemPrompt:           system,
 		DynamicBoundary:        boundary,
@@ -170,7 +170,9 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 		MaxTurns:     8,
 		NonStreaming: nonStreaming, // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    maxTokens,    // 0 = 不发上限,由服务端默认值决定
-	}, userMsg, captureEmit)
+	}
+	ctx = attachMemory(ctx, &opts, "goals")
+	captureRun(ctx, opts, userMsg, captureEmit)
 	// set_goals persisted the goals directly; read them back so the caller sees what
 	// was written (empty slice ⇒ the LLM produced nothing ⇒ caller falls back).
 	if ts == nil {

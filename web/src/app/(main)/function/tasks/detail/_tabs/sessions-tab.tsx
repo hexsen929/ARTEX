@@ -29,6 +29,7 @@ import { toast } from "sonner";
 
 import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { MentionTextarea } from "@/components/mention-textarea";
+import { MemoryUsageButton } from "@/components/memory-usage-button";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
 import { Transcript } from "@/components/transcript";
@@ -1804,6 +1805,7 @@ export function SessionsTab({ taskId, requestedSession = "" }: { taskId: string;
                 );
               })()}
               <SideQuestionButton side={side} />
+              {!isSystem ? <MemoryUsageButton taskId={active.inherited && active.source_task_id ? active.source_task_id : taskId} sessionId={activeKey} /> : null}
               {activeResolution && (
                 <Tooltip>
                   <TooltipTrigger asChild>

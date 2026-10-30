@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Autumn-27/artex/memcontext"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 )
@@ -57,6 +58,10 @@ type Snapshot struct {
 }
 
 func CloneRequest(req llm.CompletionRequest) (llm.CompletionRequest, error) {
+	// Checkpoints retain business conversation history, not the transient
+	// memory block selected for one actual model call. Derived assistant text
+	// remains ordinary business history with its own retention lifecycle.
+	req.System = memcontext.StripSystem(req.System)
 	b, err := json.Marshal(req)
 	if err != nil {
 		return llm.CompletionRequest{}, err

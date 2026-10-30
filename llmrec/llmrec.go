@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/llmguard"
+	"github.com/Autumn-27/artex/memcontext"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/transcript"
 )
@@ -121,6 +123,7 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 	// stats and must be complete even for interrupted/failed runs, so it is NOT
 	// gated. Only body serialization + response accumulation are skipped when off.
 	recordBodies := r.enabled == nil || r.enabled()
+	metadataOnly := memcontext.MetadataOnly(ctx)
 	start := time.Now()
 	session := transcript.SessionIDFrom(ctx)
 	parsedID, worker := parseSession(session)
@@ -143,8 +146,12 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 	reqBody := ""
 	var capt *Capture
 	if recordBodies {
-		reqBody = r.serializeRequest(req)
-		ctx, capt = NewCapture(ctx)
+		if metadataOnly {
+			reqBody = serializeMemoryMetadata(memcontext.References(ctx))
+		} else {
+			reqBody = r.serializeRequest(req)
+			ctx, capt = NewCapture(ctx)
+		}
 	}
 
 	return func(yield func(llm.StreamEvent, error) bool) {
@@ -170,7 +177,7 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 			r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
 			// Heavy trace row — only when body recording is on.
 			if recordBodies {
-				r.record(req, session, taskID, worker, reqBody, capt, start, textBuf.String(), thinkingBuf.String(), usage, stopReason, err)
+				r.record(req, session, taskID, worker, reqBody, capt, start, textBuf.String(), thinkingBuf.String(), usage, stopReason, err, metadataOnly)
 			}
 		}
 		defer func() { finish(ctx.Err()) }()
@@ -192,11 +199,11 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 			// llm.Accumulator; see norma/llm/accumulate.go).
 			switch ev.Type {
 			case llm.SETextDelta:
-				if recordBodies {
+				if recordBodies && !metadataOnly {
 					textBuf.WriteString(ev.Text)
 				}
 			case llm.SEThinkingDelta:
-				if recordBodies {
+				if recordBodies && !metadataOnly {
 					thinkingBuf.WriteString(ev.Text)
 				}
 			case llm.SEMessageStart:
@@ -221,6 +228,7 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 // usage metering, normalized body recording and raw wire capture as Stream.
 func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 	recordBodies := r.enabled == nil || r.enabled()
+	metadataOnly := memcontext.MetadataOnly(ctx)
 	start := time.Now()
 	session := transcript.SessionIDFrom(ctx)
 	parsedID, worker := parseSession(session)
@@ -236,8 +244,12 @@ func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	reqBody := ""
 	var capt *Capture
 	if recordBodies {
-		reqBody = r.serializeRequest(req)
-		ctx, capt = NewCapture(ctx)
+		if metadataOnly {
+			reqBody = serializeMemoryMetadata(memcontext.References(ctx))
+		} else {
+			reqBody = r.serializeRequest(req)
+			ctx, capt = NewCapture(ctx)
+		}
 	}
 
 	msg, stopReason, usage, err := r.inner.Complete(ctx, req)
@@ -247,7 +259,11 @@ func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	}
 	r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
 	if recordBodies {
-		r.record(req, session, taskID, worker, reqBody, capt, start, msg.Text(), thinkingText(msg), usage, stopReason, err)
+		text, thinking := "", ""
+		if !metadataOnly {
+			text, thinking = msg.Text(), thinkingText(msg)
+		}
+		r.record(req, session, taskID, worker, reqBody, capt, start, text, thinking, usage, stopReason, err, metadataOnly)
 	}
 	return msg, stopReason, usage, err
 }
@@ -293,13 +309,24 @@ func (r *Recorder) recordUsage(taskID string, expID int64, worker string, usage 
 // record persists one LLM call to PostgreSQL before the provider stream returns.
 // Keeping the write inside the owning task operation means task deletion can
 // drain calls and then remove records without a late async insert recreating one.
-func (r *Recorder) record(req llm.CompletionRequest, session, taskID, worker, reqBody string, capt *Capture, start time.Time, text, thinking string, usage llm.Usage, stopReason string, streamErr error) {
+func (r *Recorder) record(req llm.CompletionRequest, session, taskID, worker, reqBody string, capt *Capture, start time.Time, text, thinking string, usage llm.Usage, stopReason string, streamErr error, metadataOnly bool) {
+	if r.pg == nil {
+		return
+	}
 	latency := int(time.Since(start).Milliseconds())
 	status := "ok"
 	errMsg := ""
 	if streamErr != nil {
 		status = "error"
 		errMsg = streamErr.Error()
+		if metadataOnly {
+			// SDK errors sometimes echo request/response fragments. A metadata
+			// trace must not become an indirect copy of the memory content.
+			errMsg = "metadata_only: " + string(llmguard.Classify(streamErr))
+			if memcontext.IsStale(streamErr) {
+				errMsg = "metadata_only: memory_invalidated"
+			}
+		}
 	}
 
 	// Build response body JSON.
@@ -315,6 +342,15 @@ func (r *Recorder) record(req llm.CompletionRequest, session, taskID, worker, re
 	}
 	if thinking != "" {
 		resp["thinking"] = thinking
+	}
+	if metadataOnly {
+		delete(resp, "text")
+		delete(resp, "thinking")
+		resp["recording_mode"] = "metadata_only"
+		resp["reason"] = "memory_dependency_or_extraction"
+		resp["stop_reason"] = metadataStopReason(stopReason)
+		// Defense in depth if an outer caller supplied a Capture anyway.
+		capt = nil
 	}
 	respBody, _ := json.Marshal(resp)
 
@@ -348,6 +384,26 @@ func (r *Recorder) record(req llm.CompletionRequest, session, taskID, worker, re
 
 	if err := r.pg.InsertLLMRecord(rec); err != nil {
 		log.Printf("[llmrec] insert: %v", err)
+	}
+}
+
+// A metadata-only trace is explicitly labelled, never presented as an altered
+// raw request. References contain only IDs and revisions, not content hashes.
+func serializeMemoryMetadata(refs []memcontext.Reference) string {
+	data, _ := json.Marshal(map[string]any{
+		"recording_mode":    "metadata_only",
+		"reason":            "memory_dependency_or_extraction",
+		"memory_references": refs,
+	})
+	return string(data)
+}
+
+func metadataStopReason(reason string) string {
+	switch reason {
+	case "", "end_turn", "tool_use", "stop", "max_tokens", "length", "refusal", "pause_turn", "stop_sequence", "canceled", "error":
+		return reason
+	default:
+		return "other"
 	}
 }
 

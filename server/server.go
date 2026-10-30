@@ -145,6 +145,8 @@ type Server struct {
 	archiveWake chan struct{}
 	archiveWG   sync.WaitGroup
 	side        *sideQuestionState
+	memoryWake  chan struct{}
+	memoryWG    sync.WaitGroup
 }
 
 // provEntry is a cached provider + its config for one LLM profile id.
@@ -318,6 +320,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	} else {
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
 	}
+	s.wireMemoryRecall()
 	s.restoreTaskRuntimes()
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()
@@ -329,6 +332,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	// 批 5 B2 出口审查:启动时向进程级共享 EgressGuard 注册平台敏感指纹
 	// (LLM key/jwt.key/gate 路径/PG 密码/callback_addr),所有任务的 guard 即时生效。
 	s.registerEgressFingerprints()
+	s.startMemoryWorker()
 	return s
 }
 
@@ -843,6 +847,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("GET /api/logs/history", s.getLogsHistory)
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
+	s.registerMemoryRoutes(mux)
 
 	// 页面一键更新。走的是默认的 JWT 鉴权（auth.go 只放行 /api/auth/* 和
 	// /api/health），所以这几个改动程序自身的接口天然需要登录。

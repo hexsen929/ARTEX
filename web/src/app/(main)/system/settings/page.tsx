@@ -15,6 +15,7 @@ import {
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { MemorySettingsCard } from "@/components/memory-settings-card";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, FieldContent, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
@@ -629,6 +630,7 @@ export default function SystemSettingsPage() {
             {isSettingVisible("system", "更新 版本 升级") ? <UpdateCard /> : null}
             {isSettingVisible("system", "基础认证 登录 用户名 密码") ? <BasicAuthCard /> : null}
             {isSettingVisible("network", "回连 callback 地址 主机") ? <CallbackAddressCard /> : null}
+            {isSettingVisible("agent", "记忆 memory 自动学习 自动提炼 跨任务 全局共享") ? <MemorySettingsCard /> : null}
 
             <RoEEnforcementCard
               className={`${isSettingVisible("traffic", "RoE roe_enforcement 授权 范围 核验 strict warn off") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}

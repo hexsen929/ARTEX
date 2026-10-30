@@ -1835,3 +1835,261 @@ CREATE INDEX IF NOT EXISTS idx_tunnels_state ON tunnels(state);
 -- honeypot_evidence: 命中签名证据,JSON 数组文本(如 ["cowrie_default_ssh_banner(Cowrie, 0.99)"]),合并去重。
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS honeypot_score REAL NOT NULL DEFAULT 0;
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS honeypot_evidence TEXT NOT NULL DEFAULT '';
+
+-- =====================================================================
+-- N. Automatic shared memory (reference material, never authorization).
+-- This inventory is deliberately outside task archive bundles. Source IDs are
+-- retained as metadata, not SET NULL into apparently independent live notes.
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS memory_settings (
+    singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    auto_extract BOOLEAN NOT NULL DEFAULT true,
+    global_share BOOLEAN NOT NULL DEFAULT true,
+    profile_id BIGINT NOT NULL DEFAULT 0 CHECK (profile_id >= 0),
+    max_entries INTEGER NOT NULL DEFAULT 5 CHECK (max_entries BETWEEN 1 AND 10),
+    max_tokens INTEGER NOT NULL DEFAULT 2000 CHECK (max_tokens BETWEEN 1024 AND 2000),
+    max_jobs_per_hour INTEGER NOT NULL DEFAULT 12 CHECK (max_jobs_per_hour BETWEEN 1 AND 60),
+    retention_days INTEGER NOT NULL DEFAULT 90 CHECK (retention_days BETWEEN 1 AND 3650),
+    learn_after TIMESTAMPTZ NOT NULL DEFAULT now(),
+    epoch BIGINT NOT NULL DEFAULT 1 CHECK (epoch > 0)
+);
+INSERT INTO memory_settings(singleton) VALUES(true) ON CONFLICT DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS memory_sources (
+    id BIGSERIAL PRIMARY KEY,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('node','conversation_activity')),
+    source_id TEXT NOT NULL,
+    source_version BIGINT NOT NULL DEFAULT 0,
+    source_fingerprint TEXT NOT NULL,
+    origin_task_id BIGINT NOT NULL DEFAULT 0,
+    origin_conversation_id BIGINT NOT NULL DEFAULT 0,
+    agent_key TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    source_state TEXT NOT NULL DEFAULT '',
+    source_updated_at TIMESTAMPTZ NOT NULL,
+    valid BOOLEAN NOT NULL DEFAULT true,
+    suppressed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(source_kind,source_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_sources_task ON memory_sources(origin_task_id);
+CREATE INDEX IF NOT EXISTS idx_memory_sources_conversation ON memory_sources(origin_conversation_id);
+
+CREATE TABLE IF NOT EXISTS memory_entries (
+    id BIGSERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'lesson' CHECK (kind IN ('environment','procedure','lesson','target')),
+    applicability TEXT NOT NULL DEFAULT '',
+    target TEXT NOT NULL DEFAULT '',
+    tags JSONB NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(tags)='array'),
+    confidence TEXT NOT NULL DEFAULT 'unverified' CHECK (confidence IN ('observed','unverified')),
+    state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','disabled','source_invalid','deleted')),
+    origin_task_id BIGINT NOT NULL DEFAULT 0,
+    origin_conversation_id BIGINT NOT NULL DEFAULT 0,
+    agent_key TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    source_ref BIGINT REFERENCES memory_sources(id) ON DELETE RESTRICT,
+    source_version BIGINT NOT NULL DEFAULT 0,
+    source_fingerprint TEXT NOT NULL DEFAULT '',
+    automatic BOOLEAN NOT NULL DEFAULT false,
+    manual_override BOOLEAN NOT NULL DEFAULT false,
+    version BIGINT NOT NULL DEFAULT 1 CHECK (version > 0),
+    epoch BIGINT NOT NULL DEFAULT 1 CHECK (epoch > 0),
+    use_count BIGINT NOT NULL DEFAULT 0,
+    last_used_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (NOT automatic OR source_ref IS NOT NULL),
+    CHECK (state <> 'deleted' OR (title='' AND content='' AND content_hash=''))
+);
+CREATE INDEX IF NOT EXISTS idx_memory_entries_active ON memory_entries(updated_at DESC,id DESC) WHERE state='active';
+CREATE INDEX IF NOT EXISTS idx_memory_entries_source ON memory_entries(source_ref);
+CREATE INDEX IF NOT EXISTS idx_memory_entries_task ON memory_entries(origin_task_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_entries_source_identity
+    ON memory_entries(source_ref,source_fingerprint,content_hash) WHERE automatic AND state IN ('active','disabled');
+
+CREATE TABLE IF NOT EXISTS memory_jobs (
+    id BIGSERIAL PRIMARY KEY,
+    source_ref BIGINT NOT NULL REFERENCES memory_sources(id) ON DELETE RESTRICT,
+    source_version BIGINT NOT NULL,
+    source_fingerprint TEXT NOT NULL,
+    settings_epoch BIGINT NOT NULL,
+    extractor_version INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','running','done','failed','skipped')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    lease_token TEXT NOT NULL DEFAULT '',
+    lease_until TIMESTAMPTZ,
+    retry_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(source_ref,source_fingerprint,settings_epoch,extractor_version)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_jobs_pending ON memory_jobs(retry_at,id) WHERE state IN ('queued','running','failed');
+CREATE INDEX IF NOT EXISTS idx_memory_jobs_finished ON memory_jobs(updated_at,id) WHERE state IN ('done','skipped');
+
+CREATE TABLE IF NOT EXISTS memory_audit (
+    id BIGSERIAL PRIMARY KEY,
+    entry_id BIGINT NOT NULL DEFAULT 0,
+    entry_version BIGINT NOT NULL DEFAULT 0,
+    job_id BIGINT NOT NULL DEFAULT 0,
+    task_id BIGINT NOT NULL DEFAULT 0,
+    conversation_id BIGINT NOT NULL DEFAULT 0,
+    agent_key TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    call_key TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL CHECK (action IN ('created','edited','deleted','cleared','admitted','extract_start','extract_admitted','extract_complete','extract_failed','extract_skipped')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_memory_audit_recent ON memory_audit(created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_audit_extraction ON memory_audit(created_at) WHERE action='extract_start';
+CREATE INDEX IF NOT EXISTS idx_memory_audit_entry_usage ON memory_audit(entry_id,created_at DESC) WHERE action='admitted';
+
+-- Read-only allowlist. Neither findings.evidence/report nor credentials,
+-- sessions, raw requests, traffic records or tool payloads appear here.
+CREATE OR REPLACE VIEW memory_live_sources AS
+SELECT 'node'::text AS source_kind,n.id::text AS source_id,
+       n.content_version::bigint AS source_version,
+       md5(n.kind||':'||n.state||':'||n.content_version::text||':'||n.payload::text||':'||
+           COALESCE(f.evidence_version::text,'')||':'||COALESCE(f.verification_status,'')) AS source_fingerprint,
+       t.id AS origin_task_id,0::bigint AS origin_conversation_id,
+       COALESCE(n.origin,'') AS agent_key,''::text AS session_id,
+       CASE WHEN n.kind='finding' THEN COALESCE(f.verification_status,'unverified') ELSE n.state END AS source_state,
+       GREATEST(n.updated_at,COALESCE(ms.source_updated_at,n.updated_at)) AS source_updated_at,
+       CASE WHEN n.kind='finding' THEN
+         left(jsonb_build_object('kind','finding','summary',COALESCE(f.summary,n.payload->>'summary',''),
+           'severity',COALESCE(f.severity,n.payload->>'severity',''),
+           'target',COALESCE(n.payload->>'target',n.payload->>'url',n.payload->>'host',n.payload->>'domain',''),
+           'verification_status',COALESCE(f.verification_status,'unverified'))::text,16000)
+       ELSE left(jsonb_build_object('kind',n.kind,'state',n.state,
+           'summary',COALESCE(n.payload->>'summary',''),
+           'target',COALESCE(n.payload->>'target',n.payload->>'url',n.payload->>'host',n.payload->>'domain',''),
+           'text',COALESCE(n.payload->>'text',n.payload->>'content',n.payload->>'body',''),
+           'confidence',COALESCE(n.payload->>'confidence',''))::text,16000) END AS content_text
+FROM exploration_nodes n
+JOIN tasks t ON t.exploration_id=n.exploration_id AND t.deleted_at IS NULL AND t.archived_at IS NULL
+LEFT JOIN memory_sources ms ON ms.source_kind='node' AND ms.source_id=n.id::text
+LEFT JOIN LATERAL (SELECT finding.* FROM findings finding WHERE finding.node_id=n.id ORDER BY finding.id DESC LIMIT 1) f ON true
+WHERE n.kind IN ('fact','hint','finding')
+  AND n.state NOT IN ('dismissed','superseded','consumed')
+  AND (n.kind<>'finding' OR COALESCE(f.verification_status,'unverified')<>'rejected')
+UNION ALL
+SELECT 'conversation_activity',a.id::text,0::bigint,
+       md5(COALESCE(a.kind,'')||':'||COALESCE(a.summary,'')||':'||COALESCE(a.detail,'')),
+       0::bigint,c.id,COALESCE(a.worker,c.agent_key),('conv-'||c.id::text),'text',GREATEST(a.created_at,COALESCE(ms.source_updated_at,a.created_at)),
+       left(COALESCE(NULLIF(a.detail,''),a.summary,''),16000)
+FROM conversation_activities a JOIN conversations c ON c.id=a.conversation_id
+LEFT JOIN memory_sources ms ON ms.source_kind='conversation_activity' AND ms.source_id=a.id::text
+WHERE a.kind='text' AND NOT a.is_error AND COALESCE(NULLIF(a.detail,''),a.summary,'')<>'';
+
+CREATE OR REPLACE FUNCTION memory_invalidate_source(source_kind_arg text,source_id_arg text,clear_body boolean)
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE source_ref_id bigint;
+BEGIN
+    UPDATE memory_sources SET valid=false,source_updated_at=now(),updated_at=now()
+      WHERE source_kind=source_kind_arg AND source_id=source_id_arg RETURNING id INTO source_ref_id;
+    IF source_ref_id IS NULL AND NOT clear_body THEN
+      INSERT INTO memory_sources(source_kind,source_id,source_version,source_fingerprint,origin_task_id,
+        origin_conversation_id,agent_key,session_id,source_state,source_updated_at,valid)
+      SELECT source_kind,source_id,source_version,source_fingerprint,origin_task_id,
+        origin_conversation_id,agent_key,session_id,source_state,now(),false
+      FROM memory_live_sources WHERE source_kind=source_kind_arg AND source_id=source_id_arg
+      ON CONFLICT(source_kind,source_id) DO UPDATE SET valid=false,source_updated_at=now(),updated_at=now()
+      RETURNING id INTO source_ref_id;
+    END IF;
+    IF source_ref_id IS NULL THEN RETURN; END IF;
+    UPDATE memory_entries SET state='source_invalid',version=version+1,epoch=epoch+1,updated_at=now(),
+      title=CASE WHEN clear_body THEN '' ELSE title END,
+      content=CASE WHEN clear_body THEN '' ELSE content END,
+      content_hash=CASE WHEN clear_body THEN '' ELSE content_hash END,
+      applicability=CASE WHEN clear_body THEN '' ELSE applicability END,
+      target=CASE WHEN clear_body THEN '' ELSE target END,
+      tags=CASE WHEN clear_body THEN '[]'::jsonb ELSE tags END
+      WHERE source_ref=source_ref_id AND state<>'deleted';
+    UPDATE memory_jobs SET state='skipped',lease_token='',lease_until=NULL,updated_at=now()
+      WHERE source_ref=source_ref_id AND state IN ('queued','running','failed');
+END $$;
+
+CREATE OR REPLACE FUNCTION memory_source_node_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+      PERFORM memory_invalidate_source('node',OLD.id::text,true);
+      RETURN OLD;
+    END IF;
+    IF NEW.payload IS DISTINCT FROM OLD.payload OR NEW.state IS DISTINCT FROM OLD.state
+       OR NEW.content_version IS DISTINCT FROM OLD.content_version THEN
+      PERFORM memory_invalidate_source('node',NEW.id::text,false);
+    END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_memory_source_node ON exploration_nodes;
+CREATE TRIGGER trg_memory_source_node AFTER UPDATE OR DELETE ON exploration_nodes
+  FOR EACH ROW EXECUTE PROCEDURE memory_source_node_changed();
+
+CREATE OR REPLACE FUNCTION memory_source_finding_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+      IF OLD.node_id IS NOT NULL THEN PERFORM memory_invalidate_source('node',OLD.node_id::text,true); END IF;
+      RETURN OLD;
+    END IF;
+    IF OLD.node_id IS DISTINCT FROM NEW.node_id AND OLD.node_id IS NOT NULL THEN
+      PERFORM memory_invalidate_source('node',OLD.node_id::text,true);
+    END IF;
+    IF NEW.node_id IS NOT NULL AND (NEW.summary IS DISTINCT FROM OLD.summary OR NEW.severity IS DISTINCT FROM OLD.severity
+       OR NEW.evidence_version IS DISTINCT FROM OLD.evidence_version OR NEW.verification_status IS DISTINCT FROM OLD.verification_status) THEN
+      PERFORM memory_invalidate_source('node',NEW.node_id::text,false);
+    END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_memory_source_finding ON findings;
+CREATE TRIGGER trg_memory_source_finding AFTER UPDATE OR DELETE ON findings
+  FOR EACH ROW EXECUTE PROCEDURE memory_source_finding_changed();
+
+CREATE OR REPLACE FUNCTION memory_source_conversation_activity_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+      PERFORM memory_invalidate_source('conversation_activity',OLD.id::text,true);
+      RETURN OLD;
+    END IF;
+    IF NEW.summary IS DISTINCT FROM OLD.summary OR NEW.detail IS DISTINCT FROM OLD.detail
+       OR NEW.kind IS DISTINCT FROM OLD.kind OR NEW.is_error IS DISTINCT FROM OLD.is_error THEN
+      PERFORM memory_invalidate_source('conversation_activity',NEW.id::text,false);
+    END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_memory_source_conversation_activity ON conversation_activities;
+CREATE TRIGGER trg_memory_source_conversation_activity AFTER UPDATE OR DELETE ON conversation_activities
+  FOR EACH ROW EXECUTE PROCEDURE memory_source_conversation_activity_changed();
+
+CREATE OR REPLACE FUNCTION memory_source_task_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE source_row record;
+BEGIN
+    IF TG_OP='DELETE' OR (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
+       OR (NEW.archived_at IS NOT NULL AND OLD.archived_at IS NULL) THEN
+      FOR source_row IN SELECT source_kind,source_id FROM memory_sources WHERE origin_task_id=OLD.id ORDER BY id LOOP
+        PERFORM memory_invalidate_source(source_row.source_kind,source_row.source_id,true);
+      END LOOP;
+      UPDATE memory_entries SET state='source_invalid',title='',content='',content_hash='',
+        applicability='',target='',tags='[]',version=version+1,epoch=epoch+1,updated_at=now()
+        WHERE origin_task_id=OLD.id AND source_ref IS NULL AND state<>'deleted';
+    END IF;
+    IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_memory_source_task ON tasks;
+CREATE TRIGGER trg_memory_source_task AFTER UPDATE OR DELETE ON tasks
+  FOR EACH ROW EXECUTE PROCEDURE memory_source_task_changed();
+
+CREATE OR REPLACE FUNCTION memory_source_conversation_deleted() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE memory_entries SET state='source_invalid',title='',content='',content_hash='',
+      applicability='',target='',tags='[]',version=version+1,epoch=epoch+1,updated_at=now()
+      WHERE origin_conversation_id=OLD.id AND source_ref IS NULL AND state<>'deleted';
+    RETURN OLD;
+END $$;
+DROP TRIGGER IF EXISTS trg_memory_source_conversation ON conversations;
+CREATE TRIGGER trg_memory_source_conversation BEFORE DELETE ON conversations
+  FOR EACH ROW EXECUTE PROCEDURE memory_source_conversation_deleted();

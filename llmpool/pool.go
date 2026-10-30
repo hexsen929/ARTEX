@@ -84,11 +84,23 @@ func (p *Pool) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[
 	order := p.order(req)
 	return func(yield func(llm.StreamEvent, error) bool) {
 		ctx := llmguard.WithBudget(ctx, llmguard.DefaultHTTPAttempts)
+		if err := poolCancellation(ctx, nil); err != nil {
+			yield(llm.StreamEvent{}, err)
+			return
+		}
 		var lastErr error
 		for i, m := range order {
+			if err := poolCancellation(ctx, nil); err != nil {
+				yield(llm.StreamEvent{}, err)
+				return
+			}
 			emitted := false
 			var failed error
 			for ev, err := range m.Prov.Stream(ctx, req) {
+				if canceled := poolCancellation(ctx, err); canceled != nil {
+					yield(llm.StreamEvent{}, canceled)
+					return
+				}
 				if err != nil && !emitted && shouldFailover(ctx, err) {
 					failed = err
 					break // safe window: nothing reached the caller yet
@@ -101,8 +113,12 @@ func (p *Pool) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[
 					return // terminal error already handed to the caller
 				}
 			}
+			if err := poolCancellation(ctx, failed); err != nil {
+				yield(llm.StreamEvent{}, err)
+				return
+			}
 			if failed == nil {
-				p.health.Pass(m.ID) // completed (or failed in a non-failover way)
+				p.health.Pass(m.ID) // a completed, non-cancelled request only
 				return
 			}
 			lastErr = failed
@@ -131,10 +147,19 @@ func (p *Pool) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[
 // chain-exhaustion behavior.
 func (p *Pool) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 	ctx = llmguard.WithBudget(ctx, llmguard.DefaultHTTPAttempts)
+	if err := poolCancellation(ctx, nil); err != nil {
+		return llm.Message{}, "", llm.Usage{}, err
+	}
 	order := p.order(req)
 	var lastErr error
 	for i, m := range order {
+		if err := poolCancellation(ctx, nil); err != nil {
+			return llm.Message{}, "", llm.Usage{}, err
+		}
 		msg, sr, usage, err := m.Prov.Complete(ctx, req)
+		if canceled := poolCancellation(ctx, err); canceled != nil {
+			return llm.Message{}, "", llm.Usage{}, canceled
+		}
 		if err == nil {
 			p.health.Pass(m.ID)
 			return msg, sr, usage, nil
@@ -160,6 +185,23 @@ func (p *Pool) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Mes
 	}
 	log.Printf("[llmpool] 轮询链已耗尽(%d 个配置全部失败)，最后错误：%s", len(order), trimErr(lastErr))
 	return llm.Message{}, "", llm.Usage{}, fmt.Errorf("%w：%w", ErrExhausted, lastErr)
+}
+
+// A provider may silently end a stream or return a successful-looking value
+// after its caller was cancelled. That is not evidence of channel recovery.
+// Preserve a typed cancellation error (for example a local memory admission
+// failure) when one was supplied; otherwise retain the caller's cancel cause.
+func poolCancellation(ctx context.Context, providerErr error) error {
+	if err := ctx.Err(); err != nil {
+		if providerErr != nil && errors.Is(providerErr, err) {
+			return providerErr
+		}
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		return err
+	}
+	return nil
 }
 
 // order picks the members to try, in order: skip those in a cooling-off window
