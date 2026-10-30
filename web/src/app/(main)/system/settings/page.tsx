@@ -29,6 +29,8 @@ import { useEgressIp } from "../../_components/egress-ip-banner";
 import { BasicAuthCard } from "./_components/basic-auth-card";
 import { CallbackAddressCard } from "./_components/callback-address-card";
 import { UpdateCard } from "./_components/update-card";
+import { RoEEnforcementCard } from "./_components/roe-enforcement-card";
+import { FindingVerifyModeCard, LLMRecordsRetentionCard } from "./_components/policy-settings-cards";
 import { assertSettingsSnapshot } from "./_components/settings-response";
 
 export default function SystemSettingsPage() {
@@ -321,7 +323,7 @@ export default function SystemSettingsPage() {
 
   const settingCategories = [
     { id: "system", label: "系统与账号", hint: "版本、登录与基础配置", icon: SettingsIcon },
-    { id: "traffic", label: "流量与安全", hint: "流量、代理、截图与 OPSEC", icon: RadioTowerIcon },
+    { id: "traffic", label: "流量与安全", hint: "授权范围、流量、截图与 OPSEC", icon: RadioTowerIcon },
     { id: "agent", label: "Agent 行为", hint: "约束、情报与自动化", icon: CpuIcon },
     { id: "network", label: "网络与工具", hint: "搜索、脚本与并发", icon: SearchIcon },
     { id: "chat", label: "对话与界面", hint: "输入与交互偏好", icon: KeyboardIcon },
@@ -550,7 +552,7 @@ export default function SystemSettingsPage() {
           <Input
             value={settingQuery}
             onChange={(event) => setSettingQuery(event.target.value)}
-            placeholder="搜索设置，例如：截图、OPSEC、代理、流量"
+            placeholder="搜索设置，例如：RoE、授权范围、截图、代理"
             className="pl-9"
             aria-label="搜索系统设置"
           />
@@ -559,7 +561,7 @@ export default function SystemSettingsPage() {
 
       {settingsError ? (
         <div role="alert" className="flex flex-wrap items-center gap-3 rounded-lg border border-destructive/40 p-3 text-sm">
-          <p className="min-w-0 flex-1 text-destructive">设置读取失败，保存已锁定，已有配置保持不变：{settingsError}</p>
+          <p className="min-w-0 flex-1 text-destructive">设置读取失败，常规保存已锁定；独立设置卡片会单独校验，未知值不会自动覆盖已有配置：{settingsError}</p>
           <Button type="button" variant="outline" size="sm" onClick={() => window.location.reload()}>
             重新加载
           </Button>
@@ -628,6 +630,16 @@ export default function SystemSettingsPage() {
             {isSettingVisible("system", "基础认证 登录 用户名 密码") ? <BasicAuthCard /> : null}
             {isSettingVisible("network", "回连 callback 地址 主机") ? <CallbackAddressCard /> : null}
 
+            <RoEEnforcementCard
+              className={`${isSettingVisible("traffic", "RoE roe_enforcement 授权 范围 核验 strict warn off") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
+            />
+            <FindingVerifyModeCard
+              className={`${isSettingVisible("agent", "自动验证 复核 finding_verify_mode verifier 触发器") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
+            />
+            <LLMRecordsRetentionCard
+              className={`${isSettingVisible("chat", "LLM 调用 录制 记录 保留期 保留天数 llm_records_retention_days 清理") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
+            />
+
             <Card
               className={`${isSettingVisible("agent", "同入口候选聚合 finding cases 去重") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
             >
@@ -661,11 +673,11 @@ export default function SystemSettingsPage() {
                   流量捕获
                 </CardTitle>
                 <CardDescription>
-                  开启后，所有 Agent 的 HTTP 流量经记录代理全量落库，并向 Agent 注入 traffic_search / traffic_get
-                  工具与代理配置（提示词含代理说明）。
+                  开启后，已接入平台记录代理的 HTTP 流量会保存，并按 Agent 授权提供 traffic_search / traffic_get
+                  工具与代理配置。外部工具仍需遵循实际代理配置；未接入的会话驱动流量不会因此自动经过 MITM。
                   <br />
-                  关闭（默认）时不记录任何流量：Agent
-                  <b>不会</b>拿到代理配置与流量工具，提示词也<b>不含</b>代理相关内容。切换后会即时重建 Agent 生效。
+                  关闭（默认）后不再通过此功能向 Agent 注入记录代理与流量工具；已保存的流量和证据仍保留。
+                  切换后重建 Agent，后续运行使用新的配置，不追溯录制已有交互。
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex items-center justify-between gap-4">
@@ -730,7 +742,8 @@ export default function SystemSettingsPage() {
                       浏览器截图
                     </Label>
                     <p className="text-muted-foreground mt-1 text-xs">
-                      报告撰写 Agent 可使用 browser MCP 为复现步骤保存截图。
+                      为报告撰写 Agent 显式配置 browser MCP 授权并启用后续报告截图提示；浏览器 MCP 需先在工具设置中启用。
+                      不改变其他角色已获授权的截图能力，也不自动修改浏览器启动参数。
                     </p>
                   </div>
                   <Switch

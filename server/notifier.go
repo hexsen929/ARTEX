@@ -119,7 +119,18 @@ func (n *Notifier) Run(ctx context.Context) {
 // 任何一步失败都只记日志、不中断循环——通知系统的故障绝不能升级成进程级问题。
 // 每个 tick 都是独立的，下一轮会自然重试。
 func (n *Notifier) step(ctx context.Context) {
-	if !n.enabled() {
+	if n == nil || ctx.Err() != nil {
+		return
+	}
+	global, err := readNotifyGlobalSettings(n.pg)
+	if err != nil {
+		// An unknown switch/route/window cannot admit new fan-out or leases.
+		// Existing in-flight sends are left alone; the next tick may retry the
+		// settings read after the operator repairs it or storage recovers.
+		log.Printf("[notify] 全局设置不可确认，本轮未派发或领取投递: %v", err)
+		return
+	}
+	if !global.Enabled || ctx.Err() != nil {
 		return
 	}
 	if _, _, err := n.pg.FanOutPendingEvents(ctx, notifyFanOutPerTick); err != nil {
@@ -131,7 +142,8 @@ func (n *Notifier) step(ctx context.Context) {
 		log.Printf("[notify] 读取渠道失败: %v", err)
 		return
 	}
-	baseURL := n.publicBaseURL()
+	baseURL := trimTrailingSlash(global.PublicBaseURL)
+	window := time.Duration(global.DigestMinutes) * time.Minute
 	for _, ch := range channels {
 		if !ch.IsEnabled() {
 			continue
@@ -148,7 +160,7 @@ func (n *Notifier) step(ctx context.Context) {
 			if n.takeTokens(ch.ID, ch.RatePerMin, tokens, now) <= 0 {
 				continue
 			}
-			n.stepDigest(ctx, ch, claimLimit, baseURL)
+			n.stepDigestWithWindow(ctx, ch, claimLimit, baseURL, window)
 			continue
 		}
 		allow := n.takeTokens(ch.ID, ch.RatePerMin, notifyMaxSendsPerChannelPerTick, now)
@@ -208,7 +220,22 @@ func (n *Notifier) stepRealtime(ctx context.Context, ch *db.NotificationChannel,
 
 // stepDigest 在批次到期时把某渠道的待发投递聚合成一条消息发出。
 func (n *Notifier) stepDigest(ctx context.Context, ch *db.NotificationChannel, allow int, baseURL string) {
-	window := n.digestInterval()
+	// Keep the existing per-channel entry point for callers/tests that select a
+	// channel explicitly, but never restore raw-setting fallback semantics.
+	global, err := readNotifyGlobalSettings(n.pg)
+	if err != nil || !global.Enabled || ctx.Err() != nil {
+		if err != nil {
+			log.Printf("[notify] 汇总设置不可确认，本轮未领取投递: %v", err)
+		}
+		return
+	}
+	n.stepDigestWithWindow(ctx, ch, allow, baseURL, time.Duration(global.DigestMinutes)*time.Minute)
+}
+
+// stepDigestWithWindow consumes the already-checked tick snapshot. Do not reread
+// settings after a previous channel's send; one admitted tick keeps its window
+// and link configuration without replaying or cancelling in-flight work.
+func (n *Notifier) stepDigestWithWindow(ctx context.Context, ch *db.NotificationChannel, allow int, baseURL string, window time.Duration) {
 	due, err := n.pg.DigestBatchDue(ctx, ch.ID, window)
 	if err != nil {
 		log.Printf("[notify] 判断汇总批次失败 channel=%d: %v", ch.ID, err)
@@ -487,33 +514,6 @@ func (n *Notifier) takeTokens(channelID int64, ratePerMin, want int, now time.Ti
 	}
 	b.tokens -= float64(take)
 	return take
-}
-
-// enabled 读取总开关。
-func (n *Notifier) enabled() bool {
-	return n.pg.GetBool(settingNotifyEnabled, true)
-}
-
-// publicBaseURL 返回回链用的外部地址，去掉尾部斜杠。
-func (n *Notifier) publicBaseURL() string {
-	v, ok, err := n.pg.GetSetting(settingNotifyPublicBaseURL)
-	if err != nil || !ok {
-		return ""
-	}
-	return trimTrailingSlash(v)
-}
-
-// digestInterval 返回汇总周期，非法或未配置时回落到默认值。
-func (n *Notifier) digestInterval() time.Duration {
-	v, ok, err := n.pg.GetSetting(settingNotifyDigestMinutes)
-	if err != nil || !ok {
-		return time.Duration(notifyDefaultDigestMinutes) * time.Minute
-	}
-	m := 0
-	if _, err := fmt.Sscanf(v, "%d", &m); err != nil || m <= 0 {
-		return time.Duration(notifyDefaultDigestMinutes) * time.Minute
-	}
-	return time.Duration(m) * time.Minute
 }
 
 // parseSnapshot 解析投递对应事件的快照。

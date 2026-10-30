@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -125,8 +126,11 @@ func (s *Server) notifyMeta(w http.ResponseWriter, r *http.Request) {
 			"secret_keys":          ch.SecretKeys(),
 		})
 	}
-	baseURL, _, _ := pg.GetSetting(settingNotifyPublicBaseURL)
-	digest, _, _ := pg.GetSetting(settingNotifyDigestMinutes)
+	global, err := readNotifyGlobalSettings(pg)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	stats, err := pg.NotificationStatsSnapshot(r.Context())
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -134,9 +138,9 @@ func (s *Server) notifyMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{
 		"kinds":               kinds,
-		"enabled":             pg.GetBool(settingNotifyEnabled, true),
-		"public_base_url":     baseURL,
-		"digest_interval_min": digest,
+		"enabled":             global.Enabled,
+		"public_base_url":     global.PublicBaseURL,
+		"digest_interval_min": strconv.Itoa(global.DigestMinutes),
 		"defaults": map[string]any{
 			"digest_interval_min": notifyDefaultDigestMinutes,
 		},

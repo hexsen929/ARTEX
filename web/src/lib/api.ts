@@ -7,6 +7,8 @@ import { auth } from "@/lib/auth";
 import { refreshAccessToken } from "@/lib/auth-refresh";
 import { sseBaseURL, sseTicketURL, sseWithCredentials } from "@/lib/sse-target";
 import type { ChatMention } from "@/lib/chat-mentions";
+import type { RuntimeControlKey } from "@/lib/types";
+import { topologyMappingStatus } from "@/lib/topology-mapping";
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
@@ -487,7 +489,7 @@ export const api = {
   startTopologyMapping: (id: string) =>
     post<{ status: string; agent_key: string; conversation_id: number }>(`/tasks/${id}/topology-mapping`, {}),
   topologyMappingStatus: (id: string) =>
-    get<{ running: boolean; conversation_id?: number }>(`/tasks/${id}/topology-mapping/status`),
+    get<unknown>(`/tasks/${id}/topology-mapping/status`).then(topologyMappingStatus),
   // 全局 llm_usage 聚合（仪表盘新版 token 视图）：按 profile 总量 + 按天分桶。
   usageStats: (days = 365) => get<UsageStats>(`/tokens/usage?days=${days}`),
   // ---- 目标管理（总览）----
@@ -859,9 +861,10 @@ export const api = {
     })),
   tokenDaily: (days = 30) => get<DailyTokenBucket[]>(`/tokens/daily?days=${days}`).then(arr),
   conversationTokens: () =>
-    get<ConvTokenSummary[]>("/tokens/conversations")
-      .then(arr)
-      .catch(() => [] as ConvTokenSummary[]),
+    get<ConvTokenSummary[] | null>("/tokens/conversations").then((items) => {
+      if (items !== null && !Array.isArray(items)) throw new Error("会话用量响应无效");
+      return items ?? [];
+    }),
   explorationGraph: (task?: string) => get<{ nodes: TaskNode[]; edges: Edge[] }>(`/exploration/graph${tq(task)}`),
   // 播报板:服务端按创建顺序分页的探索节点(默认最新在前)。
   explorationNodes: (task: string, query: ExplorationNodeQuery = {}) => {
@@ -992,6 +995,10 @@ export const api = {
       `/${scope}/${scopeId}/intelligence/${intelligenceId}/traffic/${encodeURIComponent(trafficId)}`,
     ),
   settings: () => get<Settings>(`/settings`),
+  getRuntimeControl: (key: RuntimeControlKey) =>
+    get<Partial<Settings>>(`/settings/runtime-controls/${encodeURIComponent(key)}`),
+  saveRuntimeControl: (key: RuntimeControlKey, value: string | number) =>
+    put<Partial<Settings>>(`/settings/runtime-controls/${encodeURIComponent(key)}`, { value }),
   basicAuthSettings: () => get<{ enabled: boolean; username: string; password_set: boolean }>("/settings/basic-auth"),
   setBasicAuthSettings: (settings: { enabled: boolean; username: string; password: string }) =>
     put<{ enabled: boolean; username: string; password_set: boolean }>("/settings/basic-auth", settings),

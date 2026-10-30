@@ -33,9 +33,22 @@ import type {
   TaskTemplate,
   TrafficEvidenceRole,
   TrafficEvidenceSnapshot,
+  RuntimeControlKey,
 } from "../types";
 import { MAX_TASK_REMARK_RUNES, MAX_TASK_WORKER_COUNT } from "../types";
 import * as D from "./data";
+
+function isMockRuntimeControl(key: string): key is RuntimeControlKey {
+  return key === "roe_enforcement" || key === "llm_records_retention_days" || key === "finding_verify_mode";
+}
+
+function mockRuntimeControlValid(key: RuntimeControlKey, value: unknown): boolean {
+  switch (key) {
+    case "roe_enforcement": return value === "off" || value === "warn" || value === "strict";
+    case "finding_verify_mode": return value === "auto" || value === "off";
+    case "llm_records_retention_days": return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 106751;
+  }
+}
 
 const delay = (ms = 120) => new Promise((r) => setTimeout(r, ms));
 
@@ -2405,9 +2418,43 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/traffic/hosts") return { hosts: D.trafficHosts };
   if (path === "/traffic") return D.traffic;
   if (path === "/traffic/exchange") return D.trafficDetail;
-  if (path === "/settings" && m === "GET") return D.settings;
+  const runtimeControl = path.match(/^\/settings\/runtime-controls\/([^/]+)$/);
+  if (runtimeControl) {
+    const key = runtimeControl[1];
+    if (!isMockRuntimeControl(key)) throw new Error("unknown runtime control");
+    if (m === "GET") {
+      if (!mockRuntimeControlValid(key, D.settings[key])) throw new Error(`${key} is invalid`);
+      return { [key]: D.settings[key] };
+    }
+    if (m === "PUT") {
+      if (!b || typeof b !== "object" || Array.isArray(b) || Object.keys(b).length !== 1 || !Object.hasOwn(b, "value") || !mockRuntimeControlValid(key, b.value)) {
+        throw new Error(`${key} requires one valid value`);
+      }
+      Object.assign(D.settings, { [key]: b.value });
+      return { [key]: D.settings[key] };
+    }
+    throw new Error("unsupported runtime control method");
+  }
+  if (path === "/settings" && m === "GET") {
+    for (const key of ["roe_enforcement", "llm_records_retention_days", "finding_verify_mode"] as const) {
+      if (!mockRuntimeControlValid(key, D.settings[key])) throw new Error(`${key} is invalid`);
+    }
+    return D.settings;
+  }
   if (path === "/settings" && m === "PUT") {
+    if (Object.hasOwn(b, "roe_enforcement") && (typeof b.roe_enforcement !== "string" || !["off", "warn", "strict"].includes(b.roe_enforcement))) {
+      throw new Error("roe_enforcement 必须是 off、warn 或 strict");
+    }
+    if (Object.hasOwn(b, "llm_records_retention_days") && (typeof b.llm_records_retention_days !== "number" || !Number.isInteger(b.llm_records_retention_days) || b.llm_records_retention_days < 0 || b.llm_records_retention_days > 106751)) {
+      throw new Error("llm_records_retention_days 必须是 0 到 106751 之间的整数");
+    }
+    if (Object.hasOwn(b, "finding_verify_mode") && b.finding_verify_mode !== "auto" && b.finding_verify_mode !== "off") {
+      throw new Error("finding_verify_mode 必须是 auto 或 off");
+    }
     const next = { ...D.settings, ...b };
+    for (const key of ["roe_enforcement", "llm_records_retention_days", "finding_verify_mode"] as const) {
+      if (!mockRuntimeControlValid(key, next[key])) throw new Error(`${key} is invalid`);
+    }
     if (!Array.isArray(next.worker_pools)) next.worker_pools = D.settings.worker_pools;
     if (next.worker_pools.length > 0) {
       next.workers = next.worker_pools.reduce((sum, pool) => sum + Number(pool.workers), 0);

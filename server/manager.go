@@ -301,6 +301,8 @@ const (
 	settingLLMRecordsRetentionDays = "llm_records_retention_days"
 	// defaultLLMRecordsRetentionDays is the retention when the setting is unset.
 	defaultLLMRecordsRetentionDays = 30
+	// Bound day-to-time.Duration conversion before computing a retention cutoff.
+	maxLLMRecordsRetentionDays = int((1<<63 - 1) / (24 * time.Hour))
 	// LLM 轮询(故障转移)。默认关闭——开启后走「全局激活配置」的 agent 在当前配置
 	// 不可用(余额不足/key 失效/限流/服务异常)时自动切到下一个配置。
 	// settingLLMPoolBindFallback 仅在轮询开启时有意义:默认关闭,即 agent/任务显式
@@ -607,41 +609,50 @@ func (m *Manager) SetWorkers(n int) error {
 func (m *Manager) Enrich() *enrich.Engine { return m.enrich }
 
 // llmRecordsRetentionDays reads settings.llm_records_retention_days (default 30,
-// 0 = keep forever). Unset/unparseable/negative → default.
+// 0 = keep forever). Only an absent value defaults; unknown/invalid means skip.
 func (m *Manager) llmRecordsRetentionDays() int {
-	v, ok, err := m.pg.GetSetting(settingLLMRecordsRetentionDays)
-	if err != nil || !ok {
-		return defaultLLMRecordsRetentionDays
+	days, err := m.llmRecordsRetentionDaysChecked()
+	if err != nil {
+		return 0 // unknown must preserve records, not silently enable 30-day deletion
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(v))
-	if err != nil || n < 0 {
-		return defaultLLMRecordsRetentionDays
-	}
-	return n
+	return days
 }
 
-// startLLMRecordsRetention runs the llm_records retention cleanup once at startup
-// (idempotent — expired rows may predate the setting) and then every 24h, same
-// pattern as the other Manager-start background loops. Retention 0 disables it.
-func (m *Manager) startLLMRecordsRetention() {
-	clean := func() {
-		days := m.llmRecordsRetentionDays()
-		if days <= 0 {
-			return
-		}
-		n, err := m.pg.DeleteLLMRecordsBefore(time.Now().Add(-time.Duration(days) * 24 * time.Hour))
-		if err != nil {
-			log.Printf("[llmrec] retention cleanup: %v", err)
-		} else if n > 0 {
-			log.Printf("[llmrec] retention cleanup: deleted %d records older than %d days", n, days)
-		}
+func (m *Manager) llmRecordsRetentionDaysChecked() (int, error) {
+	if m == nil {
+		return 0, errors.New("LLM 录制保留设置数据库尚未就绪")
 	}
-	clean()
+	return readLLMRecordsRetentionSetting(m.pg)
+}
+
+// cleanupLLMRecordsRetention is intentionally separate from settings writes.
+// Invalid/unknown configuration preserves records instead of guessing a cutoff.
+func (m *Manager) cleanupLLMRecordsRetention() {
+	days, err := m.llmRecordsRetentionDaysChecked()
+	if err != nil {
+		log.Printf("[llmrec] retention settings unavailable/invalid; cleanup skipped, records preserved")
+		return
+	}
+	if days <= 0 {
+		return
+	}
+	n, err := m.pg.DeleteLLMRecordsBefore(time.Now().Add(-time.Duration(days) * 24 * time.Hour))
+	if err != nil {
+		log.Printf("[llmrec] retention cleanup: %v", err)
+	} else if n > 0 {
+		log.Printf("[llmrec] retention cleanup: deleted %d records older than %d days", n, days)
+	}
+}
+
+// startLLMRecordsRetention runs cleanup once at startup, then every 24h. Saving a
+// retention setting does not call cleanup; 0 disables future scheduled deletion.
+func (m *Manager) startLLMRecordsRetention() {
+	m.cleanupLLMRecordsRetention()
 	go func() {
 		t := time.NewTicker(24 * time.Hour)
 		defer t.Stop()
 		for range t.C {
-			clean()
+			m.cleanupLLMRecordsRetention()
 		}
 	}()
 }

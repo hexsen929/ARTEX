@@ -8,6 +8,9 @@ import {
 } from "../app/(main)/system/settings/_components/settings-response.ts";
 
 const fixture = () => ({
+  roe_enforcement: "warn",
+  llm_records_retention_days: 30,
+  finding_verify_mode: "auto",
   credential_agent_enabled: false,
   credential_traffic_binding: false,
   task_intelligence_enabled: false,

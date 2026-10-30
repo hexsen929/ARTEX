@@ -1,5 +1,51 @@
 import type { Settings } from "@/lib/types";
 
+export const MAX_LLM_RECORDS_RETENTION_DAYS = 106751;
+
+export function isLLMRecordsRetentionDays(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_LLM_RECORDS_RETENTION_DAYS;
+}
+
+export function parseLLMRecordsRetentionDraft(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null;
+  const days = Number(value);
+  return isLLMRecordsRetentionDays(days) ? days : null;
+}
+
+export function readLLMRecordsRetentionDays(value: unknown): number {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("服务未返回有效的 LLM 记录保留期，当前值未确认");
+  const days = (value as Record<string, unknown>).llm_records_retention_days;
+  if (!isLLMRecordsRetentionDays(days)) throw new Error("服务未返回有效的 LLM 记录保留期，当前值未确认");
+  return days;
+}
+
+export function isFindingVerifyMode(value: unknown): value is Settings["finding_verify_mode"] {
+  return value === "auto" || value === "off";
+}
+
+export function readFindingVerifyMode(value: unknown): Settings["finding_verify_mode"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("服务未返回有效的自动验证模式，当前值未确认");
+  const mode = (value as Record<string, unknown>).finding_verify_mode;
+  if (!isFindingVerifyMode(mode)) throw new Error("服务未返回有效的自动验证模式，当前值未确认");
+  return mode;
+}
+
+export function isRoEEnforcement(value: unknown): value is Settings["roe_enforcement"] {
+  return value === "off" || value === "warn" || value === "strict";
+}
+
+// Never turn an omitted or malformed response into a permissive local default.
+// The independent RoE card also uses this reader when explicitly repairing a
+// stored invalid value; it writes only the field the user selected.
+export function readRoEEnforcement(value: unknown): Settings["roe_enforcement"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("服务未返回有效的 RoE 授权范围模式，当前值未确认");
+  }
+  const mode = (value as Record<string, unknown>).roe_enforcement;
+  if (!isRoEEnforcement(mode)) throw new Error("服务未返回有效的 RoE 授权范围模式，当前值未确认");
+  return mode;
+}
+
 const requiredBooleanSettings = [
   "credential_agent_enabled",
   "credential_traffic_binding",
@@ -49,6 +95,9 @@ export function assertSettingsSnapshot(value: unknown, maxWorkers: number): asse
   if (requiredStringSettings.some((key) => typeof settings[key] !== "string")) {
     throw new Error("服务未返回完整代理和地址设置，已有配置保持不变");
   }
+  readRoEEnforcement(settings);
+  readLLMRecordsRetentionDays(settings);
+  readFindingVerifyMode(settings);
   for (const key of ["task_concurrency_limit", "notify_digest_interval_min"] as const) {
     const count = settings[key];
     if (typeof count !== "number" || !Number.isInteger(count) || count < 1) {

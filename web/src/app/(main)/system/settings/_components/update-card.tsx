@@ -21,6 +21,7 @@ import { Progress } from "@/components/ui/progress";
 import { api, createSSE, sseUrl } from "@/lib/api";
 import type { UpdateCheck, UpdateProgress, UpdateSettings } from "@/lib/types";
 import { safeHref } from "@/lib/safe-href";
+import { isUpdateTransportFailure, observeUpdateVersion, type UpdateOperation } from "@/lib/update-lifecycle";
 
 /** 等待新版本上线的最长时间。一次升级要经过三次进程启动（暂存 → 换装 → 新版），
  *  每次都是秒级，三分钟足够覆盖慢磁盘和 Docker 容器重建。 */
@@ -47,6 +48,8 @@ export function UpdateCard() {
   // 与 progress 分开：暂存完成后进程就没了，SSE 会断，此时要切到轮询 /api/health。
   const [restarting, setRestarting] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
+  const [checkError, setCheckError] = React.useState("");
+  const [completionNotice, setCompletionNotice] = React.useState("");
 
   const [network, setNetwork] = React.useState<UpdateSettings | null>(null);
   const [savedNetwork, setSavedNetwork] = React.useState<UpdateSettings | null>(null);
@@ -54,6 +57,9 @@ export function UpdateCard() {
   const [networkError, setNetworkError] = React.useState("");
   const streamRef = React.useRef<EventSource | null>(null);
   const streamVersion = React.useRef(0);
+  const checkVersion = React.useRef(0);
+  const alive = React.useRef(true);
+  const restartAbort = React.useRef<AbortController | null>(null);
   const networkDirty = network?.proxy !== savedNetwork?.proxy;
 
   React.useEffect(() => {
@@ -62,6 +68,7 @@ export function UpdateCard() {
       .getUpdateSettings()
       .then((settings) => {
         if (!active) return;
+        if (!settings || typeof settings.proxy !== "string") throw new Error("更新网络设置响应无效");
         setNetwork(settings);
         setSavedNetwork(settings);
       })
@@ -73,18 +80,27 @@ export function UpdateCard() {
     };
   }, []);
 
-  React.useEffect(() => () => {
-    streamVersion.current++;
-    streamRef.current?.close();
+  React.useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      checkVersion.current++;
+      streamVersion.current++;
+      restartAbort.current?.abort();
+      streamRef.current?.close();
+    };
   }, []);
 
   // quiet 同时决定要不要绕过后端缓存：进页面时的自动检查用缓存（顶栏刚查过），
   // 用户手动点「检查更新」则强制回源，否则刚发布的版本要等缓存过期才看得到。
   const check = React.useCallback((quiet = false) => {
+    const version = ++checkVersion.current;
     setChecking(true);
+    setCheckError("");
     api
       .checkUpdate(!quiet)
       .then((r) => {
+        if (!alive.current || version !== checkVersion.current) return;
         setInfo(r);
         if (!quiet) {
           if (r.error) toast.error("检查更新失败：" + r.error);
@@ -93,9 +109,14 @@ export function UpdateCard() {
         }
       })
       .catch((e) => {
+        if (!alive.current || version !== checkVersion.current) return;
+        setInfo(null);
+        setCheckError("检查更新失败：" + (e as Error).message);
         if (!quiet) toast.error("检查更新失败：" + (e as Error).message);
       })
-      .finally(() => setChecking(false));
+      .finally(() => {
+        if (alive.current && version === checkVersion.current) setChecking(false);
+      });
   }, []);
 
   React.useEffect(() => {
@@ -104,57 +125,87 @@ export function UpdateCard() {
 
   const saveNetwork = async () => {
     if (!network) return;
+    // An in-flight result used the previous persisted route and must not become
+    // the result for the newly saved route.
+    checkVersion.current++;
+    setChecking(false);
+    setCheckError("");
+    setInfo(null);
     setSavingNetwork(true);
     setNetworkError("");
     try {
       const settings = await api.saveUpdateSettings({
         proxy: network.proxy,
       });
+      if (!alive.current) return;
+      if (!settings || typeof settings.proxy !== "string") throw new Error("更新网络设置响应无效，保存结果尚未确认");
       setNetwork(settings);
       setSavedNetwork(settings);
       toast.success("更新网络设置已保存");
       check();
     } catch (e) {
-      setNetworkError((e as Error).message);
+      if (alive.current) setNetworkError((e as Error).message);
     } finally {
-      setSavingNetwork(false);
+      if (alive.current) setSavingNetwork(false);
     }
   };
 
-  // 轮询 /api/health 直到版本号变化。
-  //
-  // 判据必须是"版本变了"而不是"能连上了"：换装过程中旧版本会短暂地重新起来一次
-  // （那一次只负责把 artex.new 换上去然后立刻退出），只看连通性会误判成功。
-  const waitForNewVersion = React.useCallback(async (fromVersion: string) => {
+  // Require the requested update target, not merely an arbitrary changed
+  // version. Polls belong to one operation and are aborted on unmount/failure.
+  const waitForNewVersion = React.useCallback(async (operation: UpdateOperation, version: number) => {
+    const active = () => alive.current && version === streamVersion.current;
+    if (!active()) return;
     setRestarting(true);
     const deadline = Date.now() + RESTART_TIMEOUT_MS;
-    while (Date.now() < deadline) {
+    while (active() && Date.now() < deadline) {
       await sleep(2000);
+      if (!active()) return;
+      const controller = new AbortController();
+      restartAbort.current = controller;
+      const timeout = setTimeout(() => controller.abort(), 5000);
       try {
-        const r = await fetch("/api/health", { cache: "no-store" });
+        const r = await fetch("/api/health", { cache: "no-store", signal: controller.signal });
         if (r.ok) {
           const j = (await r.json()) as { version?: string };
-          if (j.version && j.version !== fromVersion) {
+          if (!active()) return;
+          const observation = observeUpdateVersion(operation, j.version);
+          if (observation === "confirmed") {
             toast.success(`已更新到 ${j.version}，正在重新加载页面`);
             await sleep(800);
-            window.location.reload();
+            if (active()) window.location.reload();
+            return;
+          }
+          if (observation === "unexpected" || observation === "rollback_observed") {
+            const notice = operation.kind === "update"
+              ? `服务已响应，但当前版本 ${j.version} 与请求目标 ${operation.target} 不一致，未判定更新成功。请核对后端日志。`
+              : `回滚后服务已响应，当前版本 ${j.version}。现有接口未提供备份版本，尚未核实是否为预期回滚目标。`;
+            setCompletionNotice(notice);
+            setRestarting(false);
+            setBusy(false);
+            setProgress(null);
+            toast.warning(notice);
+            check(true);
             return;
           }
         }
       } catch {
         // 重启窗口内连不上是预期的，继续轮询。
+      } finally {
+        clearTimeout(timeout);
+        if (restartAbort.current === controller) restartAbort.current = null;
       }
     }
+    if (!active()) return;
     setRestarting(false);
     setBusy(false);
     toast.error("等待服务重启超时。请检查后端日志，或确认 artex 是通过 start.sh / start.bat 启动的。");
-  }, []);
+  }, [check]);
 
   // 订阅更新进度。SSE 不走 Next 的 /api 重写（那层会缓冲，事件推不出来）。
   // F6:凭据是 60s 一次性 ticket;更新过程后端会重启,不重连(交给 /api/health 轮询)。
   const openStream = React.useCallback(
-    async (fromVersion: string) => {
-      const version = ++streamVersion.current;
+    async (operation: UpdateOperation, version: number) => {
+      restartAbort.current?.abort();
       streamRef.current?.close();
       const url = await sseUrl("/api/update/stream");
       if (version !== streamVersion.current) throw new Error("更新进度订阅已取消");
@@ -163,7 +214,7 @@ export function UpdateCard() {
       const waitForRestart = () => {
         if (waiting || version !== streamVersion.current) return;
         waiting = true;
-        void waitForNewVersion(fromVersion);
+        void waitForNewVersion(operation, version);
       };
       es.onmessage = (ev) => {
         if (version !== streamVersion.current) return;
@@ -175,8 +226,11 @@ export function UpdateCard() {
         }
         setProgress(p);
         if (p.phase === "failed") {
+          streamVersion.current++;
+          restartAbort.current?.abort();
           es.close();
           setBusy(false);
+          setRestarting(false);
           toast.error("更新失败：" + (p.error || p.message));
           return;
         }
@@ -197,14 +251,15 @@ export function UpdateCard() {
           waitForRestart();
         }
       };
-      return es;
+      return { es, waitForRestart };
     },
     [waitForNewVersion],
   );
 
   const doUpdate = () => {
-    if (!info) return;
+    if (!info?.latest || !info.has_update) return;
     const from = info.current;
+    const target = info.latest;
     const ok = window.confirm(
       `确定更新到 ${info.latest}？\n\n` +
         "更新会重启程序，正在运行的任务会被中断。\n" +
@@ -215,21 +270,35 @@ export function UpdateCard() {
     );
     if (!ok) return;
 
+    const version = ++streamVersion.current;
     setBusy(true);
+    setCompletionNotice("");
     setProgress({ phase: "downloading", percent: 0, message: "准备中…" });
     void (async () => {
-      let es: EventSource;
+      let attempt: Awaited<ReturnType<typeof openStream>>;
       try {
-        es = await openStream(from);
+        attempt = await openStream({ kind: "update", from, target }, version);
       } catch (e) {
+        if (!alive.current || version !== streamVersion.current) return;
         setBusy(false);
         setProgress(null);
         toast.error("打开更新进度流失败：" + (e as Error).message);
         return;
       }
       api.applyUpdate().catch((e) => {
-        es.close();
+        if (!alive.current || version !== streamVersion.current) return;
+        if (isUpdateTransportFailure(e)) {
+          // The process may have accepted the request before its connection
+          // disappeared. Verify health without repeating the state-changing POST.
+          setCompletionNotice("启动更新请求的连接中断，结果未确认；正在只读核对运行版本，未重放更新请求。");
+          attempt.waitForRestart();
+          return;
+        }
+        streamVersion.current++;
+        restartAbort.current?.abort();
+        attempt.es.close();
         setBusy(false);
+        setRestarting(false);
         setProgress(null);
         toast.error("启动更新失败：" + (e as Error).message);
       });
@@ -245,14 +314,27 @@ export function UpdateCard() {
     )
       return;
     const from = info.current;
+    const version = ++streamVersion.current;
+    restartAbort.current?.abort();
+    streamRef.current?.close();
     setBusy(true);
+    setCompletionNotice("");
     api
       .rollbackUpdate()
       .then(() => {
-        toast.success("已切换到上一版本，正在重启…");
-        void waitForNewVersion(from);
+        if (!alive.current || version !== streamVersion.current) return;
+        toast.message("回滚请求已接受，正在等待服务重启…");
+        void waitForNewVersion({ kind: "rollback", from }, version);
       })
       .catch((e) => {
+        if (!alive.current || version !== streamVersion.current) return;
+        if (isUpdateTransportFailure(e)) {
+          setCompletionNotice("回滚请求的连接中断，结果未确认；正在只读核对运行版本，未重放回滚请求。");
+          void waitForNewVersion({ kind: "rollback", from }, version);
+          return;
+        }
+        streamVersion.current++;
+        restartAbort.current?.abort();
         setBusy(false);
         toast.error("回滚失败：" + (e as Error).message);
       });
@@ -356,6 +438,14 @@ export function UpdateCard() {
             <TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />
             {info.boot_notice}
           </p>
+        )}
+
+        {checkError && <p role="alert" className="text-xs text-destructive">{checkError}</p>}
+        {completionNotice && (
+          <div role="status" className="space-y-2 rounded-md border border-amber-500/40 p-2 text-xs">
+            <p>{completionNotice}</p>
+            <Button size="sm" variant="outline" onClick={() => window.location.reload()}>重新加载页面</Button>
+          </div>
         )}
 
         {info?.error && (
