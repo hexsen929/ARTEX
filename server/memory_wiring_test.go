@@ -171,7 +171,7 @@ func TestMemorySettingsEpochConflictDoesNotOverwrite(t *testing.T) {
 	if saved.Epoch != initial.Epoch+1 || saved.MaxEntries != 4 {
 		t.Fatalf("wrong saved settings: %+v", saved)
 	}
-	initial.MaxTokens = 128
+	initial.MaxTokens = 1024
 	w = f.request(t, http.MethodPut, "/api/memories/settings", initial)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("stale settings save: %d %s", w.Code, w.Body)

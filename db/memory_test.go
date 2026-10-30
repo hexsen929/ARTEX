@@ -79,6 +79,28 @@ func memoryFixtureSource(t *testing.T, d *DB, task *Task) MemorySource {
 	return *source
 }
 
+func memoryFixtureConversation(t *testing.T, d *DB) *Conversation {
+	t.Helper()
+	conversation, err := d.CreateConversation("chat", "memory fixture", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = d.DeleteConversation(conversation.ID)
+		for _, query := range []string{
+			`DELETE FROM memory_audit WHERE conversation_id=$1`,
+			`DELETE FROM memory_entries WHERE origin_conversation_id=$1`,
+			`DELETE FROM memory_jobs WHERE source_ref IN (SELECT id FROM memory_sources WHERE origin_conversation_id=$1)`,
+			`DELETE FROM memory_sources WHERE origin_conversation_id=$1`,
+		} {
+			if _, err := d.Exec(query, conversation.ID); err != nil {
+				t.Errorf("clean conversation fixture: %v", err)
+			}
+		}
+	})
+	return conversation
+}
+
 func memoryQueueClaim(t *testing.T, d *DB, source MemorySource) MemoryJob {
 	t.Helper()
 	queued, err := d.QueueMemoryExtraction(t.Context(), source)
@@ -307,6 +329,19 @@ func TestMemorySourceProjectionAndHistoryBoundary(t *testing.T) {
 	if err != nil || source == nil || strings.Contains(source.Text, "PRIVATE_RAW_PACKET_CANARY") || !strings.Contains(source.Text, "fixture.invalid") {
 		t.Fatalf("source projection=%+v %v", source, err)
 	}
+	for _, payload := range []map[string]any{
+		{"evidence": "PRIVATE_RAW_PACKET_CANARY"},
+		{"summary": " \t\n", "text": "\r\n"},
+		{"body": map[string]any{"raw": "PRIVATE_RAW_PACKET_CANARY"}},
+	} {
+		emptyID, err := d.Exploration(task.ExplorationID).AddNode(KindFact, payload, 0, "confirmed", "worker", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if empty, err := d.GetMemorySource(t.Context(), "node", fmt.Sprint(emptyID)); err != nil || empty != nil {
+			t.Fatalf("empty/non-text allowlist projection entered learning: %+v %v", empty, err)
+		}
+	}
 	digestID, err := d.Exploration(task.ExplorationID).AddNode(KindDigest, map[string]any{"body": "derived digest without member invalidation"}, 0, "active", "compactor", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -341,25 +376,12 @@ func TestMemorySourceProjectionAndHistoryBoundary(t *testing.T) {
 
 func TestMemoryConversationDeletionInvalidatesDerivedContent(t *testing.T) {
 	d := memoryFixtureDB(t)
-	conversation, err := d.CreateConversation("chat", "memory fixture", nil)
+	conversation := memoryFixtureConversation(t, d)
+	id, err := d.AppendConvActivity(conversation.ID, Activity{Worker: "chat", Kind: "user", Detail: "fixture human-authored preference"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_ = d.DeleteConversation(conversation.ID)
-		for _, query := range []string{
-			`DELETE FROM memory_audit WHERE conversation_id=$1`,
-			`DELETE FROM memory_entries WHERE origin_conversation_id=$1`,
-			`DELETE FROM memory_jobs WHERE source_ref IN (SELECT id FROM memory_sources WHERE origin_conversation_id=$1)`,
-			`DELETE FROM memory_sources WHERE origin_conversation_id=$1`,
-		} {
-			if _, err := d.Exec(query, conversation.ID); err != nil {
-				t.Errorf("clean conversation fixture: %v", err)
-			}
-		}
-	})
-	id, err := d.AppendConvActivity(conversation.ID, Activity{Worker: "chat", Kind: "text", Detail: "fixture final assistant response"})
-	if err != nil {
+	if err := d.MarkMemoryHumanActivity(t.Context(), id); err != nil {
 		t.Fatal(err)
 	}
 	source, err := d.GetMemorySource(t.Context(), "conversation_activity", fmt.Sprint(id))
@@ -377,6 +399,137 @@ func TestMemoryConversationDeletionInvalidatesDerivedContent(t *testing.T) {
 	entry, err := d.GetMemoryEntry(context.Background(), entries[0].ID)
 	if err != nil || entry.State != "source_invalid" || entry.Content != "" || entry.Title != "" {
 		t.Fatalf("deleted conversation retained active memory: %+v %v", entry, err)
+	}
+}
+
+func TestMemoryAssistantEchoAndUnknownUserAreNotSources(t *testing.T) {
+	d := memoryFixtureDB(t)
+	conversation := memoryFixtureConversation(t, d)
+	id, err := d.AppendConvActivity(conversation.ID, Activity{Worker: "chat", Kind: "user", Detail: "HUMAN_SOURCE_FIXTURE use bounded fixture output"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source, err := d.GetMemorySource(t.Context(), "conversation_activity", fmt.Sprint(id)); err != nil || source != nil {
+		t.Fatalf("unknown user-origin row learned automatically: %+v %v", source, err)
+	}
+	if err := d.MarkMemoryHumanActivity(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	source, err := d.GetMemorySource(t.Context(), "conversation_activity", fmt.Sprint(id))
+	if err != nil || source == nil || source.State != "user_input" {
+		t.Fatalf("marked human source=%+v %v", source, err)
+	}
+	job := memoryQueueClaim(t, d, *source)
+	entries, err := d.CompleteMemoryJob(t.Context(), job, []MemoryInput{{Title: "human fixture", Content: "HUMAN_SOURCE_FIXTURE use bounded fixture output", Kind: "lesson"}})
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("human source learning=%+v %v", entries, err)
+	}
+	settings, _ := d.GetMemorySettings(t.Context())
+	if err := d.ValidateMemoryAdmission(t.Context(), MemoryAdmission{SettingsEpoch: settings.Epoch,
+		References: []MemoryRef{{ID: entries[0].ID, Version: entries[0].Version}}, ConversationID: conversation.ID, SessionID: source.SessionID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DeleteMemoryEntry(t.Context(), entries[0].ID, entries[0].Version); err != nil {
+		t.Fatal(err)
+	}
+	// Even a reply that repeats a previously recalled note is not fresh evidence.
+	assistantID, err := d.AppendConvActivity(conversation.ID, Activity{Worker: "chat", Kind: "text", Detail: entries[0].Content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkMemoryHumanActivity(t.Context(), assistantID); !errors.Is(err, ErrMemoryInput) {
+		t.Fatalf("assistant row could be marked human: %v", err)
+	}
+	triggerID, err := d.AppendConvActivity(conversation.ID, Activity{Worker: "chat", Kind: "user", Detail: "scheduler internal fixture prompt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidateID := range []int64{assistantID, triggerID} {
+		if source, err := d.GetMemorySource(t.Context(), "conversation_activity", fmt.Sprint(candidateID)); err != nil || source != nil {
+			t.Fatalf("automatic/unknown input became a new source: %+v %v", source, err)
+		}
+	}
+	history, err := d.FindMemoryHistorySources(t.Context(), 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range history {
+		if item.Kind == "conversation_activity" && (item.ID == fmt.Sprint(id) || item.ID == fmt.Sprint(assistantID) || item.ID == fmt.Sprint(triggerID)) {
+			t.Fatal("history backfill bypassed origin or source suppression")
+		}
+	}
+}
+
+func TestMemoryHumanOriginRevocationInvalidatesLearning(t *testing.T) {
+	d := memoryFixtureDB(t)
+	conversation := memoryFixtureConversation(t, d)
+	id, err := d.AppendConvActivity(conversation.ID, Activity{Worker: "chat", Kind: "user", Detail: "fixture explicitly human source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkMemoryHumanActivity(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	source, err := d.GetMemorySource(t.Context(), "conversation_activity", fmt.Sprint(id))
+	if err != nil || source == nil {
+		t.Fatalf("source=%+v %v", source, err)
+	}
+	job := memoryQueueClaim(t, d, *source)
+	if _, err := d.Exec(`UPDATE conversation_activities SET memory_input_origin='' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ValidateMemoryExtractionJob(t.Context(), job); !errors.Is(err, ErrMemoryStale) {
+		t.Fatalf("revoked human origin admitted for extraction: %v", err)
+	}
+	if _, err := d.CompleteMemoryJob(t.Context(), job, []MemoryInput{{Title: "late", Content: "late human note", Kind: "lesson"}}); !errors.Is(err, ErrMemoryStale) {
+		t.Fatalf("revoked human origin produced memory: %v", err)
+	}
+}
+
+func TestMemoryExtractionActualAttemptBudget(t *testing.T) {
+	d := memoryFixtureDB(t)
+	settings, _ := d.GetMemorySettings(t.Context())
+	settings.MaxJobsPerHour = 2
+	if _, err := d.UpdateMemorySettings(t.Context(), settings, settings.Epoch); err != nil {
+		t.Fatal(err)
+	}
+	task := memoryFixtureTask(t, d)
+	source := memoryFixtureSource(t, d, task)
+	job := memoryQueueClaim(t, d, source)
+	results := make(chan error, 8)
+	for range 8 {
+		go func() { results <- d.ValidateMemoryExtractionJob(t.Context(), job) }()
+	}
+	admitted, denied := 0, 0
+	for range 8 {
+		err := <-results
+		switch {
+		case err == nil:
+			admitted++
+		case errors.Is(err, ErrMemoryBudget):
+			denied++
+		default:
+			t.Fatalf("unexpected attempt admission error: %v", err)
+		}
+	}
+	if admitted != 2 || denied != 6 {
+		t.Fatalf("non-atomic actual-attempt quota: admitted=%d denied=%d", admitted, denied)
+	}
+	other := memoryFixtureSource(t, d, task)
+	if queued, err := d.QueueMemoryExtraction(t.Context(), other); err != nil || !queued {
+		t.Fatalf("queue while attempt budget full=%v %v", queued, err)
+	}
+	if next, err := d.ClaimMemoryJob(t.Context(), time.Minute); err != nil || next != nil {
+		t.Fatalf("budget-exhausted claim consumed an attempt: %+v %v", next, err)
+	}
+	var attempts int
+	var state string
+	if err := d.QueryRow(`SELECT job.attempts,job.state FROM memory_jobs job JOIN memory_sources source ON source.id=job.source_ref
+		WHERE source.source_kind=$1 AND source.source_id=$2`, other.Kind, other.ID).Scan(&attempts, &state); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 || state != "queued" {
+		t.Fatalf("waiting job burned retries: attempts=%d state=%s", attempts, state)
 	}
 }
 

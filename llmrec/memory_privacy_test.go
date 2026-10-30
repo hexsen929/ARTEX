@@ -111,7 +111,7 @@ func TestMemoryCallsRecordOnlyMetadataAndKeepUsage(t *testing.T) {
 	if _, _, _, err = recorder.Complete(ctx, req); err == nil {
 		t.Fatal("fixture failure was lost")
 	}
-	rows, err := pg.Query(`SELECT request_body,response_body,raw_request,raw_response,error FROM llm_records WHERE profile_name=$1 ORDER BY id`, profile)
+	rows, err := pg.Query(`SELECT request_body,response_body,COALESCE(raw_request,''),COALESCE(raw_response,''),COALESCE(error,'') FROM llm_records WHERE profile_name=$1 ORDER BY id`, profile)
 	if err != nil {
 		t.Fatal(err)
 	}

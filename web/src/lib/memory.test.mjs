@@ -15,12 +15,13 @@ import {
 
 const settings = {
   enabled: true, auto_extract: true, global_share: true, profile_id: 0,
-  max_entries: 5, max_tokens: 1200, max_jobs_per_hour: 12, retention_days: 90,
+  max_entries: 5, max_tokens: 2000, max_jobs_per_hour: 12, retention_days: 90,
   epoch: 7, learn_after: "2026-10-30T04:00:00Z", model_available: true,
 };
 
 test("memory settings require an authoritative complete snapshot and bounded budgets", () => {
   assert.doesNotThrow(() => assertMemorySettings(settings));
+  assert.doesNotThrow(() => assertMemorySettings({ ...settings, max_tokens: 1024 }));
   assert.doesNotThrow(() => assertMemorySettings({ ...settings, model_available: false }));
   for (const key of Object.keys(settings)) {
     const missing = { ...settings };
@@ -29,7 +30,7 @@ test("memory settings require an authoritative complete snapshot and bounded bud
   }
   for (const [key, value] of [
     ["enabled", "true"], ["profile_id", -1], ["profile_id", 0.5],
-    ["max_entries", 0], ["max_entries", 11], ["max_tokens", 127], ["max_tokens", 2001],
+    ["max_entries", 0], ["max_entries", 11], ["max_tokens", 1023], ["max_tokens", 2001],
     ["max_jobs_per_hour", 0], ["max_jobs_per_hour", 61], ["retention_days", 0],
     ["retention_days", 3651], ["learn_after", "not-a-date"],
   ]) assert.throws(() => assertMemorySettings({ ...settings, [key]: value }), undefined, `${key}:${value}`);
@@ -92,4 +93,6 @@ test("memory center and settings are fully wired without an approval queue or sh
   assert.doesNotMatch(page, /批准记忆|审核通过|待审批/);
   assert.match(read("../app/(main)/chat/page.tsx"), /MemoryUsageButton conversationId=\{conv.id\}/);
   assert.match(read("../app/(main)/function/tasks/detail/_tabs/sessions-tab.tsx"), /MemoryUsageButton[^\n]+sessionId=\{activeKey\}/);
+  assert.match(read("../components/memory-settings-card.tsx"), /注入Token预算（UTF-8字节保守计数，含来源元数据）/);
+  assert.match(read("../components/memory-settings-card.tsx"), /index_only/);
 });

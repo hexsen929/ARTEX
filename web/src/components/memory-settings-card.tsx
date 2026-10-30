@@ -117,7 +117,7 @@ export function MemorySettingsCard({
         global_share: form.global_share,
         profile_id: integer(form.profile_id, 0, Number.MAX_SAFE_INTEGER, "模型配置"),
         max_entries: integer(form.max_entries, 1, 10, "每次召回条数"),
-        max_tokens: integer(form.max_tokens, 128, 2000, "记忆 Token 上限"),
+        max_tokens: integer(form.max_tokens, 1024, 2000, "注入 Token 预算"),
         max_jobs_per_hour: integer(form.max_jobs_per_hour, 1, 60, "每小时提炼预算"),
         retention_days: integer(form.retention_days, 1, 3650, "自动记忆有效天数"),
       };
@@ -196,13 +196,14 @@ export function MemorySettingsCard({
               <div className="grid gap-4 sm:grid-cols-2">
                 {([
                   ["max_entries", "每次最多召回条数", 1, 10],
-                  ["max_tokens", "记忆注入 Token 上限", 128, 2000],
+                  ["max_tokens", "注入Token预算（UTF-8字节保守计数，含来源元数据）", 1024, 2000],
                   ["max_jobs_per_hour", "每小时自动提炼任务上限", 1, 60],
                   ["retention_days", "自动记忆有效天数", 1, 3650],
                 ] as const).map(([key, label, min, max]) => (
                   <div key={key} className="space-y-2"><Label htmlFor={`memory-${key}`}>{label}</Label><Input id={`memory-${key}`} type="number" min={min} max={max} step={1} value={form[key]} disabled={!editable || !form.enabled} onChange={(event) => update({ [key]: event.target.value })} /></div>
                 ))}
               </div>
+              <p className="text-muted-foreground text-xs">预算按 UTF-8 字节保守计数，并非模型精确 tokenizer。预算不足以放入完整正文时，仅提供标明 index_only 的短索引，不截断为完整证据；详情在记忆中心查看。</p>
               <p className="text-muted-foreground text-xs">自动学习起点：{memoryTime(saved?.learn_after)}。只处理此后新增或变更的来源；历史资料可在记忆中心主动回顾。</p>
             </>
           ) : null}

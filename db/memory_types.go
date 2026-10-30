@@ -10,6 +10,7 @@ var (
 	ErrMemoryConflict    = errors.New("memory version conflict")
 	ErrMemoryUnavailable = errors.New("memory unavailable")
 	ErrMemoryStale       = errors.New("memory dependency changed")
+	ErrMemoryBudget      = errors.New("memory learning call budget exhausted")
 )
 
 // MemorySettings is deliberately independent of settings KV: one locked row

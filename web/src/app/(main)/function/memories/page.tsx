@@ -204,7 +204,7 @@ export default function MemoriesPage() {
   return (
     <div className="flex min-w-0 flex-1 flex-col gap-5 p-4 md:p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div><h1 className="flex items-center gap-2 text-xl font-semibold"><BrainIcon className="size-5" />记忆中心</h1><p className="text-muted-foreground mt-1 text-sm">所有任务积累经验，按相关性自动召回；记忆不是系统指令，也不等于已确认漏洞。</p></div>
+        <div><h1 className="flex items-center gap-2 text-xl font-semibold"><BrainIcon className="size-5" />记忆中心</h1><p className="text-muted-foreground mt-1 text-sm">所有任务积累经验；有效条目是否命中取决于相关性与预算。记忆不是系统指令，也不等于已确认漏洞。</p></div>
         <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy || !extractionAvailable} onClick={() => { setExtractTask(taskFilter); setExtractError(""); setExtractOpen(true); }}><HistoryIcon className="size-4" />主动回顾历史</Button><Button disabled={busy} onClick={() => openEditor(null)}><PlusIcon className="size-4" />记住这个</Button></div>
       </div>
       {settingsError ? <p role="alert" className="text-destructive text-sm">{settingsError}。请在设置页签重新读取，未知状态不会用于发起提炼。</p> : settings?.model_available === false ? <p role="alert" className="text-destructive text-sm">自动提炼不可用：{settings.model_error || "尚未配置可用模型"}。<Link className="underline" href="/system/llm">前往 LLM 设置</Link></p> : settings && !settings.enabled ? <p role="status" className="text-muted-foreground text-sm">记忆已关闭：停止新的学习与召回，仍可管理已有条目。</p> : settings && !settings.auto_extract ? <p role="status" className="text-muted-foreground text-sm">自动提炼已关闭，已有记忆仍可召回；主动回顾历史前请先在设置中开启自动提炼。</p> : null}

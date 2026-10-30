@@ -1856,6 +1856,12 @@ CREATE TABLE IF NOT EXISTS memory_settings (
 );
 INSERT INTO memory_settings(singleton) VALUES(true) ON CONFLICT DO NOTHING;
 
+-- Only the authenticated human-message HTTP path marks a user row. Scheduler
+-- prompts also use kind='user', so that kind alone is not proof of human input.
+-- Old unknown-origin rows deliberately remain ineligible for automatic learning.
+ALTER TABLE conversation_activities ADD COLUMN IF NOT EXISTS memory_input_origin TEXT NOT NULL DEFAULT ''
+    CHECK (memory_input_origin IN ('','human'));
+
 CREATE TABLE IF NOT EXISTS memory_sources (
     id BIGSERIAL PRIMARY KEY,
     source_kind TEXT NOT NULL CHECK (source_kind IN ('node','conversation_activity')),
@@ -1946,10 +1952,17 @@ CREATE TABLE IF NOT EXISTS memory_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_audit_recent ON memory_audit(created_at DESC,id DESC);
 CREATE INDEX IF NOT EXISTS idx_memory_audit_extraction ON memory_audit(created_at) WHERE action='extract_start';
+CREATE INDEX IF NOT EXISTS idx_memory_audit_extract_attempt ON memory_audit(created_at) WHERE action='extract_admitted';
 CREATE INDEX IF NOT EXISTS idx_memory_audit_entry_usage ON memory_audit(entry_id,created_at DESC) WHERE action='admitted';
 
 -- Read-only allowlist. Neither findings.evidence/report nor credentials,
 -- sessions, raw requests, traffic records or tool payloads appear here.
+CREATE OR REPLACE FUNCTION memory_source_text_field(payload jsonb,field_name text)
+RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+    SELECT CASE WHEN jsonb_typeof(payload->field_name)='string'
+      AND (payload->>field_name) ~ '[^[:space:]]' THEN payload->>field_name END
+$$;
+
 CREATE OR REPLACE VIEW memory_live_sources AS
 SELECT 'node'::text AS source_kind,n.id::text AS source_id,
        n.content_version::bigint AS source_version,
@@ -1960,14 +1973,16 @@ SELECT 'node'::text AS source_kind,n.id::text AS source_id,
        CASE WHEN n.kind='finding' THEN COALESCE(f.verification_status,'unverified') ELSE n.state END AS source_state,
        GREATEST(n.updated_at,COALESCE(ms.source_updated_at,n.updated_at)) AS source_updated_at,
        CASE WHEN n.kind='finding' THEN
-         left(jsonb_build_object('kind','finding','summary',COALESCE(f.summary,n.payload->>'summary',''),
+         left(jsonb_build_object('kind','finding','summary',COALESCE(
+           CASE WHEN f.summary ~ '[^[:space:]]' THEN f.summary END,memory_source_text_field(n.payload,'summary'),''),
            'severity',COALESCE(f.severity,n.payload->>'severity',''),
            'target',COALESCE(n.payload->>'target',n.payload->>'url',n.payload->>'host',n.payload->>'domain',''),
            'verification_status',COALESCE(f.verification_status,'unverified'))::text,16000)
        ELSE left(jsonb_build_object('kind',n.kind,'state',n.state,
-           'summary',COALESCE(n.payload->>'summary',''),
+           'summary',COALESCE(memory_source_text_field(n.payload,'summary'),''),
            'target',COALESCE(n.payload->>'target',n.payload->>'url',n.payload->>'host',n.payload->>'domain',''),
-           'text',COALESCE(n.payload->>'text',n.payload->>'content',n.payload->>'body',''),
+           'text',COALESCE(memory_source_text_field(n.payload,'text'),memory_source_text_field(n.payload,'content'),
+             memory_source_text_field(n.payload,'body'),''),
            'confidence',COALESCE(n.payload->>'confidence',''))::text,16000) END AS content_text
 FROM exploration_nodes n
 JOIN tasks t ON t.exploration_id=n.exploration_id AND t.deleted_at IS NULL AND t.archived_at IS NULL
@@ -1976,14 +1991,20 @@ LEFT JOIN LATERAL (SELECT finding.* FROM findings finding WHERE finding.node_id=
 WHERE n.kind IN ('fact','hint','finding')
   AND n.state NOT IN ('dismissed','superseded','consumed')
   AND (n.kind<>'finding' OR COALESCE(f.verification_status,'unverified')<>'rejected')
+  AND CASE WHEN n.kind='finding' THEN
+      COALESCE(CASE WHEN f.summary ~ '[^[:space:]]' THEN f.summary END,
+        memory_source_text_field(n.payload,'summary')) IS NOT NULL
+    ELSE COALESCE(memory_source_text_field(n.payload,'summary'),memory_source_text_field(n.payload,'text'),
+        memory_source_text_field(n.payload,'content'),memory_source_text_field(n.payload,'body')) IS NOT NULL END
 UNION ALL
 SELECT 'conversation_activity',a.id::text,0::bigint,
-       md5(COALESCE(a.kind,'')||':'||COALESCE(a.summary,'')||':'||COALESCE(a.detail,'')),
-       0::bigint,c.id,COALESCE(a.worker,c.agent_key),('conv-'||c.id::text),'text',GREATEST(a.created_at,COALESCE(ms.source_updated_at,a.created_at)),
+       md5(a.memory_input_origin||':'||COALESCE(a.kind,'')||':'||COALESCE(a.summary,'')||':'||COALESCE(a.detail,'')),
+       0::bigint,c.id,COALESCE(a.worker,c.agent_key),('conv-'||c.id::text),'user_input',GREATEST(a.created_at,COALESCE(ms.source_updated_at,a.created_at)),
        left(COALESCE(NULLIF(a.detail,''),a.summary,''),16000)
 FROM conversation_activities a JOIN conversations c ON c.id=a.conversation_id
 LEFT JOIN memory_sources ms ON ms.source_kind='conversation_activity' AND ms.source_id=a.id::text
-WHERE a.kind='text' AND NOT a.is_error AND COALESCE(NULLIF(a.detail,''),a.summary,'')<>'';
+WHERE a.kind='user' AND a.memory_input_origin='human' AND NOT a.is_error
+  AND COALESCE(NULLIF(a.detail,''),a.summary,'')<>'';
 
 CREATE OR REPLACE FUNCTION memory_invalidate_source(source_kind_arg text,source_id_arg text,clear_body boolean)
 RETURNS void LANGUAGE plpgsql AS $$
@@ -2011,7 +2032,7 @@ BEGIN
       WHERE source_ref=source_ref_id AND state<>'deleted';
     UPDATE memory_jobs SET state='skipped',lease_token='',lease_until=NULL,updated_at=now()
       WHERE source_ref=source_ref_id AND state IN ('queued','running','failed');
-END $$;
+END; $$;
 
 CREATE OR REPLACE FUNCTION memory_source_node_changed() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -2024,7 +2045,7 @@ BEGIN
       PERFORM memory_invalidate_source('node',NEW.id::text,false);
     END IF;
     RETURN NEW;
-END $$;
+END; $$;
 DROP TRIGGER IF EXISTS trg_memory_source_node ON exploration_nodes;
 CREATE TRIGGER trg_memory_source_node AFTER UPDATE OR DELETE ON exploration_nodes
   FOR EACH ROW EXECUTE PROCEDURE memory_source_node_changed();
@@ -2043,7 +2064,7 @@ BEGIN
       PERFORM memory_invalidate_source('node',NEW.node_id::text,false);
     END IF;
     RETURN NEW;
-END $$;
+END; $$;
 DROP TRIGGER IF EXISTS trg_memory_source_finding ON findings;
 CREATE TRIGGER trg_memory_source_finding AFTER UPDATE OR DELETE ON findings
   FOR EACH ROW EXECUTE PROCEDURE memory_source_finding_changed();
@@ -2055,11 +2076,12 @@ BEGIN
       RETURN OLD;
     END IF;
     IF NEW.summary IS DISTINCT FROM OLD.summary OR NEW.detail IS DISTINCT FROM OLD.detail
-       OR NEW.kind IS DISTINCT FROM OLD.kind OR NEW.is_error IS DISTINCT FROM OLD.is_error THEN
+       OR NEW.kind IS DISTINCT FROM OLD.kind OR NEW.is_error IS DISTINCT FROM OLD.is_error
+       OR NEW.memory_input_origin IS DISTINCT FROM OLD.memory_input_origin THEN
       PERFORM memory_invalidate_source('conversation_activity',NEW.id::text,false);
     END IF;
     RETURN NEW;
-END $$;
+END; $$;
 DROP TRIGGER IF EXISTS trg_memory_source_conversation_activity ON conversation_activities;
 CREATE TRIGGER trg_memory_source_conversation_activity AFTER UPDATE OR DELETE ON conversation_activities
   FOR EACH ROW EXECUTE PROCEDURE memory_source_conversation_activity_changed();
@@ -2078,7 +2100,7 @@ BEGIN
     END IF;
     IF TG_OP='DELETE' THEN RETURN OLD; END IF;
     RETURN NEW;
-END $$;
+END; $$;
 DROP TRIGGER IF EXISTS trg_memory_source_task ON tasks;
 CREATE TRIGGER trg_memory_source_task AFTER UPDATE OR DELETE ON tasks
   FOR EACH ROW EXECUTE PROCEDURE memory_source_task_changed();
@@ -2089,7 +2111,7 @@ BEGIN
       applicability='',target='',tags='[]',version=version+1,epoch=epoch+1,updated_at=now()
       WHERE origin_conversation_id=OLD.id AND source_ref IS NULL AND state<>'deleted';
     RETURN OLD;
-END $$;
+END; $$;
 DROP TRIGGER IF EXISTS trg_memory_source_conversation ON conversations;
 CREATE TRIGGER trg_memory_source_conversation BEFORE DELETE ON conversations
   FOR EACH ROW EXECUTE PROCEDURE memory_source_conversation_deleted();

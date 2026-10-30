@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -16,10 +17,46 @@ const memorySourceCols = `live.source_kind,live.source_id,live.source_version,li
 	live.origin_task_id,live.origin_conversation_id,live.agent_key,live.session_id,
 	live.source_state,live.source_updated_at,live.content_text`
 
+// MarkMemoryHumanActivity is called only by the authenticated human input path,
+// never by a scheduler, agent tool or automatic conversation constructor.
+func (d *DB) MarkMemoryHumanActivity(ctx context.Context, id int64) error {
+	res, err := d.ExecContext(ctx, `UPDATE conversation_activities SET memory_input_origin='human'
+		WHERE id=$1 AND kind='user' AND NOT is_error`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrMemoryInput
+	}
+	return nil
+}
+
 func scanMemorySource(row memoryScanner) (MemorySource, error) {
 	var out MemorySource
 	err := row.Scan(&out.Kind, &out.ID, &out.Version, &out.Fingerprint, &out.TaskID, &out.ConversationID,
 		&out.AgentKey, &out.SessionID, &out.State, &out.UpdatedAt, &out.Text)
+	if out.Kind == "conversation_activity" {
+		// Attachment cards are business metadata, not reusable human text. Never
+		// send their paths/identifiers merely because Detail stores a JSON wrapper.
+		var wrapped map[string]json.RawMessage
+		decodeErr := json.Unmarshal([]byte(out.Text), &wrapped)
+		if decodeErr == nil && wrapped["attachments"] != nil {
+			var text string
+			if json.Unmarshal(wrapped["text"], &text) == nil {
+				out.Text = text
+			} else {
+				out.Text = ""
+			}
+		} else if decodeErr != nil && strings.HasPrefix(strings.TrimSpace(out.Text), `{"attachments":`) {
+			// The source view's cap may truncate a large attachment wrapper. A
+			// failed parse must not turn paths/card metadata into memory input.
+			out.Text = ""
+		}
+	}
 	if len(out.Text) > 16000 {
 		out.Text = out.Text[:16000]
 		for !utf8.ValidString(out.Text) {
@@ -192,11 +229,13 @@ func (d *DB) ClaimMemoryJob(ctx context.Context, leaseDuration time.Duration) (*
 	if !settings.Enabled || !settings.AutoExtract {
 		return nil, nil
 	}
-	var started int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM memory_audit WHERE action='extract_start' AND created_at>now()-interval '1 hour'`).Scan(&started); err != nil {
+	var started, attempts int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FILTER (WHERE action='extract_start'),
+		count(*) FILTER (WHERE action='extract_admitted') FROM memory_audit
+		WHERE action IN ('extract_start','extract_admitted') AND created_at>now()-interval '1 hour'`).Scan(&started, &attempts); err != nil {
 		return nil, err
 	}
-	if started >= settings.MaxJobsPerHour {
+	if started >= settings.MaxJobsPerHour || attempts >= settings.MaxJobsPerHour {
 		return nil, nil
 	}
 	var job MemoryJob
@@ -206,7 +245,7 @@ func (d *DB) ClaimMemoryJob(ctx context.Context, leaseDuration time.Duration) (*
 		FROM memory_jobs job JOIN memory_sources source ON source.id=job.source_ref
 		WHERE job.settings_epoch=$1 AND job.attempts<3 AND source.suppressed_at IS NULL AND source.valid
 		AND ((job.state IN ('queued','failed') AND job.retry_at<=now()) OR (job.state='running' AND job.lease_until<now()))
-		ORDER BY job.retry_at,job.id FOR UPDATE OF job SKIP LOCKED LIMIT 1`, settings.Epoch).Scan(&job.ID, &kind, &id,
+		ORDER BY job.retry_at,job.id LIMIT 1 FOR UPDATE OF job SKIP LOCKED`, settings.Epoch).Scan(&job.ID, &kind, &id,
 		&job.Source.Version, &job.Source.Fingerprint, &job.SettingsEpoch, &job.Attempts, &job.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -262,12 +301,22 @@ func (d *DB) ValidateMemoryExtractionJob(ctx context.Context, job MemoryJob) err
 		return err
 	}
 	defer tx.Rollback()
-	settings, err := memorySettings(ctx, tx, "FOR SHARE")
+	// Serialize the actual-attempt count and ledger insertion; the short lock
+	// ends before HTTP and is also used by ClaimMemoryJob's preflight quota.
+	settings, err := memorySettings(ctx, tx, "FOR UPDATE")
 	if err != nil {
 		return err
 	}
 	if !settings.Enabled || !settings.AutoExtract || settings.Epoch != job.SettingsEpoch {
 		return ErrMemoryStale
+	}
+	var attempts int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM memory_audit
+		WHERE action='extract_admitted' AND created_at>now()-interval '1 hour'`).Scan(&attempts); err != nil {
+		return err
+	}
+	if attempts >= settings.MaxJobsPerHour {
+		return ErrMemoryBudget
 	}
 	var refID int64
 	err = tx.QueryRowContext(ctx, `SELECT source_ref FROM memory_jobs WHERE id=$1`, job.ID).Scan(&refID)

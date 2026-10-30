@@ -6,7 +6,7 @@ export const MEMORY_KIND_LABELS = {
 } as const;
 
 export const MEMORY_STATUS_LABELS = {
-  active: "可召回",
+  active: "有效",
   disabled: "已停用",
   expired: "已过期",
   source_invalid: "来源失效",
@@ -118,7 +118,7 @@ export function assertMemorySettings(value: unknown): asserts value is MemorySet
     flags.some((key) => typeof item[key] !== "boolean") ||
     numbers.some((key) => !Number.isSafeInteger(item[key]) || Number(item[key]) < 0) ||
     Number(item.max_entries) < 1 || Number(item.max_entries) > 10 ||
-    Number(item.max_tokens) < 128 || Number(item.max_tokens) > 2000 ||
+    Number(item.max_tokens) < 1024 || Number(item.max_tokens) > 2000 ||
     Number(item.max_jobs_per_hour) < 1 || Number(item.max_jobs_per_hour) > 60 ||
     Number(item.retention_days) < 1 || Number(item.retention_days) > 3650 ||
     Number(item.epoch) < 1 ||

@@ -13,7 +13,7 @@ const output = path.resolve(__dirname, "..", "out");
 if (!fs.existsSync(path.join(output, "function", "memories", "index.html"))) throw new Error("Missing cloud memory-page export");
 const settings = {
   enabled: true, auto_extract: true, global_share: true, profile_id: 0,
-  max_entries: 5, max_tokens: 1200, max_jobs_per_hour: 12, retention_days: 90,
+  max_entries: 5, max_tokens: 2000, max_jobs_per_hour: 12, retention_days: 90,
   epoch: 1, learn_after: "2026-10-30T04:00:00Z", model_available: true,
 };
 const fixture = {
@@ -115,7 +115,15 @@ async function main() {
     await page.goto(origin + "/function/memories/", { waitUntil: "networkidle" });
     await page.getByRole("heading", { name: "记忆中心", exact: true }).waitFor();
     await page.getByRole("button", { name: fixture.title, exact: true }).waitFor();
-    assert.equal(await page.getByRole("link", { name: "任务 #24", exact: true }).getAttribute("href"), "/function/tasks/detail?id=24");
+    const sourceHref = await page.getByRole("link", { name: "任务 #24", exact: true }).getAttribute("href");
+    assert.equal(typeof sourceHref, "string");
+    const sourceURL = new URL(sourceHref, origin);
+    // Next static export canonicalizes internal links with trailingSlash. The
+    // destination and task identity matter, not the optional terminal slash.
+    assert.equal(sourceURL.origin, origin);
+    assert.equal(sourceURL.pathname.replace(/\/+$/, ""), "/function/tasks/detail");
+    assert.equal(sourceURL.searchParams.get("id"), "24");
+    assert.deepEqual([...sourceURL.searchParams.keys()], ["id"]);
     assert.equal(requests.filter((item) => ["POST", "PATCH", "DELETE", "PUT"].includes(item.method)).length, 0);
     console.log("PASS memory list loads with source ownership and no approval/default writes");
 

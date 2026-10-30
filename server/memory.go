@@ -575,10 +575,15 @@ func (s *Server) recallMemory(ctx context.Context, info agent.RunInfo, role stri
 	}
 	var refs []memcontext.Reference
 	var selected []map[string]any
+	seen := map[string]bool{}
 	block := ""
 	for _, entry := range entries {
 		if len(selected) >= settings.MaxEntries {
 			break
+		}
+		identity := strings.Join([]string{entry.Title, entry.Content, entry.Kind, entry.Target, entry.Applicability}, "\x00")
+		if seen[identity] {
+			continue
 		}
 		if err := s.validateMemoryInput(db.MemoryInput{Title: entry.Title, Content: entry.Content, Kind: entry.Kind,
 			Target: entry.Target, Applicability: entry.Applicability, Tags: entry.Tags}); err != nil {
@@ -596,6 +601,9 @@ func (s *Server) recallMemory(ctx context.Context, info agent.RunInfo, role stri
 		}
 		nextRefs := append(append([]memcontext.Reference(nil), refs...), memcontext.Reference{ID: entry.ID, Version: entry.Version})
 		if len(memcontext.FormatBlock(string(body), nextRefs)) > budget {
+			if entry.Automatic {
+				continue
+			} // automated notes must supply their actual short content
 			// A long note still contributes an explicitly labelled INDEX, never
 			// a silently truncated claim that could lose its qualifications.
 			index := map[string]any{"id": entry.ID, "title": entry.Title, "kind": entry.Kind,
@@ -609,6 +617,7 @@ func (s *Server) recallMemory(ctx context.Context, info agent.RunInfo, role stri
 			}
 		}
 		selected, refs, block = next, nextRefs, string(body)
+		seen[identity] = true
 	}
 	if len(refs) == 0 {
 		return empty, nil

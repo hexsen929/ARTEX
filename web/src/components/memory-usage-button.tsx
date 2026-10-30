@@ -17,6 +17,7 @@ const RESULT_LABELS: Record<string, string> = {
   used: "已使用",
   read: "按需读取",
   admitted: "已准入",
+  index_only: "仅短索引（非完整证据）",
   stale: "已失效，未使用",
   excluded: "已排除",
   source_invalid: "来源失效",
