@@ -227,8 +227,13 @@ func TestMemoryCRUDRejectsSensitiveInputsAndStaleMutation(t *testing.T) {
 
 func TestMemoryPatchOmissionEmptyValuesAndExpiryNull(t *testing.T) {
 	f := newMemoryHTTPFixture(t)
+	task, err := f.pg.CreateTask("memory patch fixture", "memory patch fixture", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.pg.DeleteTask(task.ID) })
 	expires := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Microsecond)
-	entry := f.create(t, "-patch", map[string]any{"target": "HOST", "tags": []string{"old"}, "expires_at": expires})
+	entry := f.create(t, "-patch", map[string]any{"kind": "target", "origin_task_id": task.ID, "target": "HOST", "tags": []string{"old"}, "expires_at": expires})
 	path := fmt.Sprintf("/api/memories/%d", entry.ID)
 	for _, field := range []string{"title", "content"} {
 		w := f.request(t, http.MethodPatch, path, map[string]any{"version": entry.Version, field: ""})
@@ -241,7 +246,7 @@ func TestMemoryPatchOmissionEmptyValuesAndExpiryNull(t *testing.T) {
 		t.Fatalf("omitted fields lost: %+v", changed)
 	}
 	cleared := memoryEntryResponse(t, f.request(t, http.MethodPatch, path, map[string]any{
-		"version": changed.Version, "target": "", "applicability": "", "tags": []string{}, "expires_at": nil,
+		"version": changed.Version, "kind": "lesson", "target": "", "applicability": "", "tags": []string{}, "expires_at": nil,
 	}), http.StatusOK)
 	if cleared.Target != "" || cleared.Applicability != "" || len(cleared.Tags) != 0 || cleared.ExpiresAt != nil || cleared.Content != entry.Content {
 		t.Fatalf("explicit clear was ignored: %+v", cleared)

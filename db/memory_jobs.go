@@ -39,6 +39,13 @@ func scanMemorySource(row memoryScanner) (MemorySource, error) {
 	var out MemorySource
 	err := row.Scan(&out.Kind, &out.ID, &out.Version, &out.Fingerprint, &out.TaskID, &out.ConversationID,
 		&out.AgentKey, &out.SessionID, &out.State, &out.UpdatedAt, &out.Text)
+	if err != nil {
+		return out, err
+	}
+	if isMemoryStage(out.Kind) {
+		out.Text, err = boundedMemoryStageText(out.Text)
+		return out, err
+	}
 	if out.Kind == "conversation_activity" {
 		// Attachment cards are business metadata, not reusable human text. Never
 		// send their paths/identifiers merely because Detail stores a JSON wrapper.
@@ -116,11 +123,16 @@ func (d *DB) findMemorySources(ctx context.Context, taskID int64, limit int, his
 	rows, err := d.QueryContext(ctx, `SELECT `+memorySourceCols+` FROM memory_live_sources live
 		LEFT JOIN memory_sources source ON source.source_kind=live.source_kind AND source.source_id=live.source_id
 		WHERE ($1 OR live.source_updated_at>$2) AND ($3=0 OR live.origin_task_id=$3)
+		AND live.source_kind IN ('intent_stage','task_stage')
 		AND source.suppressed_at IS NULL
+		AND ($1 OR source.last_completed_version IS DISTINCT FROM live.source_version)
+		AND ($1 OR source.last_attempted_version IS DISTINCT FROM live.source_version)
+		AND NOT (COALESCE(source.valid,false) AND source.last_completed_fingerprint=live.source_fingerprint)
 		AND NOT EXISTS(SELECT 1 FROM memory_entries entry WHERE entry.source_ref=source.id
 		  AND entry.source_fingerprint=live.source_fingerprint AND entry.state IN ('active','disabled'))
 		AND NOT EXISTS(SELECT 1 FROM memory_jobs job WHERE job.source_ref=source.id
-		  AND job.source_fingerprint=live.source_fingerprint AND job.settings_epoch=$4 AND job.extractor_version=1)
+		  AND job.source_fingerprint=live.source_fingerprint AND job.settings_epoch=$4 AND job.extractor_version=1
+		  AND (NOT $1 OR job.state IN ('queued','running')))
 		ORDER BY live.source_updated_at,live.source_kind,live.source_id LIMIT $5`, historical, settings.LearnAfter, taskID, settings.Epoch, limit)
 	if err != nil {
 		return nil, err
@@ -144,7 +156,7 @@ func sameMemorySource(a, b MemorySource) bool {
 }
 
 func (d *DB) QueueMemoryExtraction(ctx context.Context, source MemorySource) (bool, error) {
-	if source.Kind != "node" && source.Kind != "conversation_activity" {
+	if !isMemoryStage(source.Kind) {
 		return false, ErrMemoryInput
 	}
 	tx, err := d.BeginTx(ctx, nil)
@@ -172,6 +184,21 @@ func (d *DB) QueueMemoryExtraction(ctx context.Context, source MemorySource) (bo
 	if !source.Historical && !current.UpdatedAt.After(settings.LearnAfter) {
 		return false, nil
 	}
+	var previousVersion, attemptedVersion sql.NullInt64
+	var previousFingerprint string
+	var previousValid bool
+	var previousSuppressed sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT last_completed_version,last_completed_fingerprint,valid,suppressed_at,last_attempted_version
+		FROM memory_sources WHERE source_kind=$1 AND source_id=$2 FOR UPDATE`, current.Kind, current.ID).Scan(
+		&previousVersion, &previousFingerprint, &previousValid, &previousSuppressed, &attemptedVersion)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if previousSuppressed.Valid || (!source.Historical && previousVersion.Valid && previousVersion.Int64 == current.Version) ||
+		(!source.Historical && attemptedVersion.Valid && attemptedVersion.Int64 == current.Version) ||
+		(previousValid && previousFingerprint == current.Fingerprint) {
+		return false, nil
+	}
 	var pending int
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM memory_jobs WHERE state IN ('queued','running') OR (state='failed' AND attempts<3)`).Scan(&pending); err != nil {
 		return false, err
@@ -197,8 +224,10 @@ func (d *DB) QueueMemoryExtraction(ctx context.Context, source MemorySource) (bo
 	if suppressed.Valid {
 		return false, nil
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO memory_jobs(source_ref,source_version,source_fingerprint,settings_epoch)
-		VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, refID, current.Version, current.Fingerprint, settings.Epoch)
+	res, err := tx.ExecContext(ctx, `INSERT INTO memory_jobs(source_ref,source_version,source_fingerprint,settings_epoch,historical)
+		VALUES($1,$2,$3,$4,$5) ON CONFLICT(source_ref,source_fingerprint,settings_epoch,extractor_version)
+		DO UPDATE SET state='queued',attempts=0,lease_token='',lease_until=NULL,retry_at=now(),historical=true,result='',updated_at=now()
+		WHERE $5 AND memory_jobs.state IN ('done','failed','skipped')`, refID, current.Version, current.Fingerprint, settings.Epoch, source.Historical)
 	if err != nil {
 		return false, err
 	}
@@ -241,12 +270,15 @@ func (d *DB) ClaimMemoryJob(ctx context.Context, leaseDuration time.Duration) (*
 	var job MemoryJob
 	var kind, id string
 	err = tx.QueryRowContext(ctx, `SELECT job.id,source.source_kind,source.source_id,job.source_version,
-		job.source_fingerprint,job.settings_epoch,job.attempts,job.created_at
+		job.source_fingerprint,job.settings_epoch,job.attempts,job.created_at,job.historical
 		FROM memory_jobs job JOIN memory_sources source ON source.id=job.source_ref
 		WHERE job.settings_epoch=$1 AND job.attempts<3 AND source.suppressed_at IS NULL AND source.valid
+		AND source.source_kind IN ('intent_stage','task_stage')
+		AND (job.historical OR source.last_completed_version IS DISTINCT FROM job.source_version)
+		AND (job.historical OR source.last_attempted_version IS DISTINCT FROM job.source_version OR source.last_attempted_job_id=job.id)
 		AND ((job.state IN ('queued','failed') AND job.retry_at<=now()) OR (job.state='running' AND job.lease_until<now()))
 		ORDER BY job.retry_at,job.id LIMIT 1 FOR UPDATE OF job SKIP LOCKED`, settings.Epoch).Scan(&job.ID, &kind, &id,
-		&job.Source.Version, &job.Source.Fingerprint, &job.SettingsEpoch, &job.Attempts, &job.CreatedAt)
+		&job.Source.Version, &job.Source.Fingerprint, &job.SettingsEpoch, &job.Attempts, &job.CreatedAt, &job.Historical)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -284,7 +316,7 @@ func (d *DB) ClaimMemoryJob(ctx context.Context, leaseDuration time.Duration) (*
 }
 
 func skipMemoryJob(ctx context.Context, tx *sql.Tx, job MemoryJob) error {
-	_, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state='skipped',lease_token='',lease_until=NULL,updated_at=now()
+	_, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state='skipped',result='skipped',lease_token='',lease_until=NULL,updated_at=now()
 		WHERE id=$1 AND state='running' AND lease_token=$2`, job.ID, job.LeaseToken)
 	return err
 }
@@ -293,7 +325,7 @@ func skipMemoryJob(ctx context.Context, tx *sql.Tx, job MemoryJob) error {
 // Call after queueing, immediately before each real HTTP attempt (including
 // retries/failover), not just before creating the logical model request.
 func (d *DB) ValidateMemoryExtractionJob(ctx context.Context, job MemoryJob) error {
-	if job.ID < 1 || job.LeaseToken == "" {
+	if job.ID < 1 || job.LeaseToken == "" || !isMemoryStage(job.Source.Kind) {
 		return ErrMemoryInput
 	}
 	tx, err := d.BeginTx(ctx, nil)
@@ -329,23 +361,31 @@ func (d *DB) ValidateMemoryExtractionJob(ctx context.Context, job MemoryJob) err
 	var kind, id string
 	var suppressed sql.NullTime
 	var valid bool
-	err = tx.QueryRowContext(ctx, `SELECT source_kind,source_id,suppressed_at,valid FROM memory_sources WHERE id=$1 FOR SHARE`, refID).Scan(&kind, &id, &suppressed, &valid)
+	var completedVersion, attemptedVersion sql.NullInt64
+	var attemptedJob int64
+	err = tx.QueryRowContext(ctx, `SELECT source_kind,source_id,suppressed_at,valid,last_completed_version,last_attempted_version,last_attempted_job_id
+		FROM memory_sources WHERE id=$1 FOR UPDATE`, refID).Scan(&kind, &id, &suppressed, &valid, &completedVersion, &attemptedVersion, &attemptedJob)
 	if err != nil {
 		return err
 	}
-	if !valid || suppressed.Valid {
+	if !isMemoryStage(kind) || !valid || suppressed.Valid {
 		return ErrMemoryStale
 	}
 	var version, epoch int64
 	var fingerprint, state, token string
 	var leaseUntil sql.NullTime
-	err = tx.QueryRowContext(ctx, `SELECT source_version,source_fingerprint,settings_epoch,state,lease_token,lease_until
-		FROM memory_jobs WHERE id=$1 FOR SHARE`, job.ID).Scan(&version, &fingerprint, &epoch, &state, &token, &leaseUntil)
+	var historical bool
+	err = tx.QueryRowContext(ctx, `SELECT source_version,source_fingerprint,settings_epoch,state,lease_token,lease_until,historical
+		FROM memory_jobs WHERE id=$1 FOR SHARE`, job.ID).Scan(&version, &fingerprint, &epoch, &state, &token, &leaseUntil, &historical)
 	if err != nil {
 		return err
 	}
 	if state != "running" || token != job.LeaseToken || epoch != settings.Epoch ||
 		!leaseUntil.Valid || !leaseUntil.Time.After(time.Now()) {
+		return ErrMemoryStale
+	}
+	if !historical && ((completedVersion.Valid && completedVersion.Int64 == version) ||
+		(attemptedVersion.Valid && attemptedVersion.Int64 == version && attemptedJob != job.ID)) {
 		return ErrMemoryStale
 	}
 	current, err := getMemorySource(ctx, tx, kind, id)
@@ -355,6 +395,9 @@ func (d *DB) ValidateMemoryExtractionJob(ctx context.Context, job MemoryJob) err
 	if current == nil || current.Version != version || current.Fingerprint != fingerprint || !sameMemorySource(job.Source, *current) {
 		return ErrMemoryStale
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_sources SET last_attempted_version=$2,last_attempted_job_id=$3 WHERE id=$1`, refID, version, job.ID); err != nil {
+		return err
+	}
 	if err := memoryAuditTx(ctx, tx, 0, 0, job.ID, MemoryAdmission{TaskID: current.TaskID, ConversationID: current.ConversationID,
 		AgentKey: current.AgentKey, SessionID: current.SessionID}, "extract_admitted"); err != nil {
 		return err
@@ -363,7 +406,7 @@ func (d *DB) ValidateMemoryExtractionJob(ctx context.Context, job MemoryJob) err
 }
 
 func (d *DB) CompleteMemoryJob(ctx context.Context, job MemoryJob, inputs []MemoryInput) ([]MemoryEntry, error) {
-	if len(inputs) > 10 || job.ID < 1 || job.LeaseToken == "" {
+	if len(inputs) > 3 || job.ID < 1 || job.LeaseToken == "" || !isMemoryStage(job.Source.Kind) {
 		return nil, ErrMemoryInput
 	}
 	prepared := make([]MemoryInput, 0, len(inputs))
@@ -407,19 +450,21 @@ func (d *DB) CompleteMemoryJob(ctx context.Context, job MemoryJob, inputs []Memo
 	var kind, id string
 	var suppressed sql.NullTime
 	var valid bool
-	err = tx.QueryRowContext(ctx, `SELECT source_kind,source_id,suppressed_at,valid FROM memory_sources WHERE id=$1 FOR UPDATE`, refID).Scan(&kind, &id, &suppressed, &valid)
+	var completedVersion sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT source_kind,source_id,suppressed_at,valid,last_completed_version FROM memory_sources WHERE id=$1 FOR UPDATE`, refID).Scan(&kind, &id, &suppressed, &valid, &completedVersion)
 	if err != nil {
 		return nil, err
 	}
 	var version, epoch int64
 	var fingerprint, state, token string
 	var leaseUntil sql.NullTime
-	err = tx.QueryRowContext(ctx, `SELECT source_version,source_fingerprint,settings_epoch,state,lease_token,lease_until
-		FROM memory_jobs WHERE id=$1 FOR UPDATE`, job.ID).Scan(&version, &fingerprint, &epoch, &state, &token, &leaseUntil)
+	var historical bool
+	err = tx.QueryRowContext(ctx, `SELECT source_version,source_fingerprint,settings_epoch,state,lease_token,lease_until,historical
+		FROM memory_jobs WHERE id=$1 FOR UPDATE`, job.ID).Scan(&version, &fingerprint, &epoch, &state, &token, &leaseUntil, &historical)
 	if err != nil {
 		return nil, err
 	}
-	if !valid || suppressed.Valid || state != "running" || token != job.LeaseToken || epoch != settings.Epoch ||
+	if !isMemoryStage(kind) || !valid || suppressed.Valid || (!historical && completedVersion.Valid && completedVersion.Int64 == version) || state != "running" || token != job.LeaseToken || epoch != settings.Epoch ||
 		!leaseUntil.Valid || !leaseUntil.Time.After(time.Now()) {
 		return stale()
 	}
@@ -433,19 +478,26 @@ func (d *DB) CompleteMemoryJob(ctx context.Context, job MemoryJob, inputs []Memo
 	if len(prepared) > settings.MaxEntries {
 		prepared = prepared[:settings.MaxEntries]
 	}
-	var sourceProjection struct {
-		Target string `json:"target"`
+	var sourceProjection memoryStageBundle
+	if err := json.Unmarshal([]byte(current.Text), &sourceProjection); err != nil {
+		return nil, ErrMemoryUnavailable
 	}
-	_ = json.Unmarshal([]byte(current.Text), &sourceProjection)
+	allowedEvidence := map[string]bool{}
+	for _, fact := range sourceProjection.Facts {
+		allowedEvidence[fact.ID] = true
+	}
 	out := []MemoryEntry{}
 	expires := time.Now().UTC().Add(time.Duration(settings.RetentionDays) * 24 * time.Hour)
 	for _, in := range prepared {
-		if (in.Kind == "target" && sourceProjection.Target == "") ||
-			(in.Target != "" && in.Target != sourceProjection.Target) {
+		if in.Kind == "target" || in.Target != "" || len(in.EvidenceIDs) < 1 || len(in.EvidenceIDs) > 3 {
 			return nil, ErrMemoryInput
 		}
-		if in.Kind == "target" {
-			in.Target = sourceProjection.Target
+		seenEvidence := map[string]bool{}
+		for _, id := range in.EvidenceIDs {
+			if !allowedEvidence[id] || seenEvidence[id] {
+				return nil, ErrMemoryInput
+			}
+			seenEvidence[id] = true
 		}
 		// The extractor does not choose provenance or change task permissions.
 		in.OriginTaskID, in.OriginConversationID = current.TaskID, current.ConversationID
@@ -454,13 +506,14 @@ func (d *DB) CompleteMemoryJob(ctx context.Context, job MemoryJob, inputs []Memo
 			in.ExpiresAt = &expires
 		}
 		tags, _ := json.Marshal(in.Tags)
+		evidence, _ := json.Marshal(in.EvidenceIDs)
 		var entryID int64
 		err := tx.QueryRowContext(ctx, `INSERT INTO memory_entries(title,content,content_hash,kind,applicability,target,tags,confidence,
-			origin_task_id,origin_conversation_id,agent_key,session_id,source_ref,source_version,source_fingerprint,automatic,expires_at)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,true,$16)
-			ON CONFLICT DO NOTHING RETURNING id`, in.Title, in.Content, memoryContentHash(in.Content), in.Kind, in.Applicability,
+			origin_task_id,origin_conversation_id,agent_key,session_id,source_ref,source_version,source_fingerprint,automatic,expires_at,evidence_ids)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,true,$16,$17)
+			ON CONFLICT DO NOTHING RETURNING id`, in.Title, in.Content, memoryEvidenceHash(in.Content, in.EvidenceIDs), in.Kind, in.Applicability,
 			in.Target, string(tags), in.Confidence, in.OriginTaskID, in.OriginConversationID, in.AgentKey, in.SessionID,
-			refID, version, fingerprint, in.ExpiresAt).Scan(&entryID)
+			refID, version, fingerprint, in.ExpiresAt, string(evidence)).Scan(&entryID)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
@@ -477,7 +530,15 @@ func (d *DB) CompleteMemoryJob(ctx context.Context, job MemoryJob, inputs []Memo
 			return nil, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state='done',lease_token='',lease_until=NULL,updated_at=now() WHERE id=$1`, job.ID); err != nil {
+	result := "no_experience"
+	if len(out) > 0 {
+		result = "saved"
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_sources SET last_completed_version=$2,last_completed_fingerprint=$3,
+		last_result=$4,last_completed_at=now(),last_result_at=now(),last_job_id=$5 WHERE id=$1`, refID, version, fingerprint, result, job.ID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state='done',result=$2,lease_token='',lease_until=NULL,updated_at=now() WHERE id=$1`, job.ID, result); err != nil {
 		return nil, err
 	}
 	if err := memoryAuditTx(ctx, tx, 0, 0, job.ID, MemoryAdmission{TaskID: current.TaskID, ConversationID: current.ConversationID,
@@ -488,7 +549,7 @@ func (d *DB) CompleteMemoryJob(ctx context.Context, job MemoryJob, inputs []Memo
 }
 
 func (d *DB) FailMemoryJob(ctx context.Context, job MemoryJob, retryAfter time.Duration) error {
-	if job.ID < 1 || job.LeaseToken == "" {
+	if job.ID < 1 || job.LeaseToken == "" || !isMemoryStage(job.Source.Kind) {
 		return ErrMemoryInput
 	}
 	if retryAfter < 30*time.Second {
@@ -502,7 +563,19 @@ func (d *DB) FailMemoryJob(ctx context.Context, job MemoryJob, retryAfter time.D
 		return err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state=CASE WHEN attempts>=3 THEN 'skipped' ELSE 'failed' END,
+	var refID int64
+	err = tx.QueryRowContext(ctx, `SELECT source_ref FROM memory_jobs WHERE id=$1`, job.ID).Scan(&refID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrMemoryStale
+	}
+	if err != nil {
+		return err
+	}
+	var lockedID int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM memory_sources WHERE id=$1 FOR UPDATE`, refID).Scan(&lockedID); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state=CASE WHEN attempts>=3 THEN 'skipped' ELSE 'failed' END,result='failed',
 		retry_at=$3,lease_token='',lease_until=NULL,updated_at=now()
 		WHERE id=$1 AND state='running' AND lease_token=$2`, job.ID, job.LeaseToken, time.Now().UTC().Add(retryAfter))
 	if err != nil {
@@ -514,6 +587,9 @@ func (d *DB) FailMemoryJob(ctx context.Context, job MemoryJob, retryAfter time.D
 	}
 	if n == 0 {
 		return ErrMemoryStale
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_sources SET last_result='failed',last_result_at=now(),last_job_id=$2 WHERE id=$1`, refID, job.ID); err != nil {
+		return err
 	}
 	if err := memoryAuditTx(ctx, tx, 0, 0, job.ID, MemoryAdmission{TaskID: job.Source.TaskID, ConversationID: job.Source.ConversationID,
 		AgentKey: job.Source.AgentKey, SessionID: job.Source.SessionID}, "extract_failed"); err != nil {

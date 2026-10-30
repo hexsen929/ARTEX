@@ -1849,12 +1849,13 @@ CREATE TABLE IF NOT EXISTS memory_settings (
     profile_id BIGINT NOT NULL DEFAULT 0 CHECK (profile_id >= 0),
     max_entries INTEGER NOT NULL DEFAULT 5 CHECK (max_entries BETWEEN 1 AND 10),
     max_tokens INTEGER NOT NULL DEFAULT 2000 CHECK (max_tokens BETWEEN 1024 AND 2000),
-    max_jobs_per_hour INTEGER NOT NULL DEFAULT 12 CHECK (max_jobs_per_hour BETWEEN 1 AND 60),
+    max_jobs_per_hour INTEGER NOT NULL DEFAULT 3 CHECK (max_jobs_per_hour BETWEEN 1 AND 60),
     retention_days INTEGER NOT NULL DEFAULT 90 CHECK (retention_days BETWEEN 1 AND 3650),
     learn_after TIMESTAMPTZ NOT NULL DEFAULT now(),
     epoch BIGINT NOT NULL DEFAULT 1 CHECK (epoch > 0)
 );
 INSERT INTO memory_settings(singleton) VALUES(true) ON CONFLICT DO NOTHING;
+ALTER TABLE memory_settings ALTER COLUMN max_jobs_per_hour SET DEFAULT 3;
 
 -- Only the authenticated human-message HTTP path marks a user row. Scheduler
 -- prompts also use kind='user', so that kind alone is not proof of human input.
@@ -1864,7 +1865,7 @@ ALTER TABLE conversation_activities ADD COLUMN IF NOT EXISTS memory_input_origin
 
 CREATE TABLE IF NOT EXISTS memory_sources (
     id BIGSERIAL PRIMARY KEY,
-    source_kind TEXT NOT NULL CHECK (source_kind IN ('node','conversation_activity')),
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('node','conversation_activity','intent_stage','task_stage')),
     source_id TEXT NOT NULL,
     source_version BIGINT NOT NULL DEFAULT 0,
     source_fingerprint TEXT NOT NULL,
@@ -1881,6 +1882,17 @@ CREATE TABLE IF NOT EXISTS memory_sources (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_sources_task ON memory_sources(origin_task_id);
 CREATE INDEX IF NOT EXISTS idx_memory_sources_conversation ON memory_sources(origin_conversation_id);
+ALTER TABLE memory_sources DROP CONSTRAINT IF EXISTS memory_sources_source_kind_check;
+ALTER TABLE memory_sources ADD CONSTRAINT memory_sources_source_kind_check
+    CHECK (source_kind IN ('node','conversation_activity','intent_stage','task_stage'));
+ALTER TABLE memory_sources ADD COLUMN IF NOT EXISTS last_completed_version BIGINT;
+ALTER TABLE memory_sources ADD COLUMN IF NOT EXISTS last_completed_fingerprint TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_sources ADD COLUMN IF NOT EXISTS last_result TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_sources ADD COLUMN IF NOT EXISTS last_completed_at TIMESTAMPTZ;
+ALTER TABLE memory_sources ADD COLUMN IF NOT EXISTS last_job_id BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE memory_sources ADD COLUMN IF NOT EXISTS last_result_at TIMESTAMPTZ;
+ALTER TABLE memory_sources ADD COLUMN IF NOT EXISTS last_attempted_version BIGINT;
+ALTER TABLE memory_sources ADD COLUMN IF NOT EXISTS last_attempted_job_id BIGINT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS memory_entries (
     id BIGSERIAL PRIMARY KEY,
@@ -1917,6 +1929,8 @@ CREATE INDEX IF NOT EXISTS idx_memory_entries_source ON memory_entries(source_re
 CREATE INDEX IF NOT EXISTS idx_memory_entries_task ON memory_entries(origin_task_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_entries_source_identity
     ON memory_entries(source_ref,source_fingerprint,content_hash) WHERE automatic AND state IN ('active','disabled');
+ALTER TABLE memory_entries ADD COLUMN IF NOT EXISTS evidence_ids JSONB NOT NULL DEFAULT '[]'
+    CHECK (jsonb_typeof(evidence_ids)='array');
 
 CREATE TABLE IF NOT EXISTS memory_jobs (
     id BIGSERIAL PRIMARY KEY,
@@ -1936,6 +1950,8 @@ CREATE TABLE IF NOT EXISTS memory_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_jobs_pending ON memory_jobs(retry_at,id) WHERE state IN ('queued','running','failed');
 CREATE INDEX IF NOT EXISTS idx_memory_jobs_finished ON memory_jobs(updated_at,id) WHERE state IN ('done','skipped');
+ALTER TABLE memory_jobs ADD COLUMN IF NOT EXISTS historical BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE memory_jobs ADD COLUMN IF NOT EXISTS result TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS memory_audit (
     id BIGSERIAL PRIMARY KEY,
@@ -1963,7 +1979,7 @@ RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
       AND (payload->>field_name) ~ '[^[:space:]]' THEN payload->>field_name END
 $$;
 
-CREATE OR REPLACE VIEW memory_live_sources AS
+CREATE OR REPLACE VIEW memory_legacy_sources AS
 SELECT 'node'::text AS source_kind,n.id::text AS source_id,
        n.content_version::bigint AS source_version,
        md5(n.kind||':'||n.state||':'||n.content_version::text||':'||n.payload::text||':'||
@@ -2006,21 +2022,168 @@ LEFT JOIN memory_sources ms ON ms.source_kind='conversation_activity' AND ms.sou
 WHERE a.kind='user' AND a.memory_input_origin='human' AND NOT a.is_error
   AND COALESCE(NULLIF(a.detail,''),a.summary,'')<>'';
 
+CREATE OR REPLACE FUNCTION memory_stage_target(payload jsonb) RETURNS text
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+    SELECT COALESCE((SELECT value FROM (VALUES
+      (1,memory_source_text_field(payload,'target')),(2,memory_source_text_field(payload,'host')),
+      (3,memory_source_text_field(payload,'domain')),(4,memory_source_text_field(payload,'url'))
+    ) candidate(ord,value) WHERE value IS NOT NULL AND octet_length(value)<=512
+      AND value !~* '^[a-z][a-z0-9+.-]*://[^/]*@'
+      AND value !~* '(authorization|api[_-]?key|access[_-]?token|client[_-]?secret|password|passwd|cookie|token)[=:]'
+      ORDER BY ord LIMIT 1),'')
+$$;
+
+CREATE OR REPLACE FUNCTION memory_stage_conditions(payload jsonb) RETURNS jsonb
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+    SELECT CASE WHEN COALESCE(bool_or(raw IS NOT NULL AND raw<>'null'::jsonb
+      AND (jsonb_typeof(raw)<>'string' OR ((raw#>>'{}') ~ '[^[:space:]]' AND octet_length(raw#>>'{}')>160))),false)
+      THEN NULL ELSE COALESCE(jsonb_agg(field_name||'='||(raw#>>'{}') ORDER BY ord)
+      FILTER (WHERE jsonb_typeof(raw)='string' AND (raw#>>'{}') ~ '[^[:space:]]'),'[]'::jsonb) END
+    FROM (VALUES
+      (1,'tool',payload->'tool'),(2,'tool_version',payload->'tool_version'),
+      (3,'platform',payload->'platform'),(4,'technology',payload->'technology'),(5,'preconditions',payload->'preconditions')
+    ) condition_field(ord,field_name,raw)
+$$;
+
+CREATE OR REPLACE FUNCTION memory_stage_anchor_signature(node_id_arg bigint) RETURNS text
+LANGUAGE sql STABLE AS $$
+    SELECT COALESCE(jsonb_agg(jsonb_build_object('asset_id',asset.id,'domain',asset.domain,
+      'ip',asset.ip,'url',asset.url) ORDER BY asset.id)::text,'[]')
+    FROM exploration_anchors anchor JOIN assets asset ON asset.id=anchor.asset_id WHERE anchor.node_id=node_id_arg
+$$;
+
+CREATE OR REPLACE FUNCTION memory_stage_targets(payload jsonb,node_id_arg bigint) RETURNS jsonb
+LANGUAGE sql STABLE AS $$
+    WITH identifiers AS (
+      SELECT memory_source_text_field(payload,key) AS value FROM (VALUES('target'),('url'),('host'),('domain')) field(key)
+      UNION SELECT asset.domain FROM exploration_anchors anchor JOIN assets asset ON asset.id=anchor.asset_id WHERE anchor.node_id=node_id_arg
+      UNION SELECT asset.ip FROM exploration_anchors anchor JOIN assets asset ON asset.id=anchor.asset_id WHERE anchor.node_id=node_id_arg
+      UNION SELECT asset.url FROM exploration_anchors anchor JOIN assets asset ON asset.id=anchor.asset_id WHERE anchor.node_id=node_id_arg
+    ), present AS (SELECT DISTINCT value FROM identifiers WHERE value IS NOT NULL AND value ~ '[^[:space:]]' LIMIT 17)
+    SELECT CASE WHEN count(*)>16 OR COALESCE(bool_or(octet_length(value)>512
+      OR value ~* '^[a-z][a-z0-9+.-]*://[^/]*@'
+      OR value ~* '(authorization|api[_-]?key|access[_-]?token|client[_-]?secret|password|passwd|cookie|token)[=:]'),false)
+      THEN NULL ELSE COALESCE(jsonb_agg(value ORDER BY value),'[]'::jsonb) END FROM present
+$$;
+
+-- A content edit or repeated terminal-state write is not a new completed phase.
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS memory_completion_generation BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS memory_completion_generation BIGINT NOT NULL DEFAULT 0;
+CREATE OR REPLACE FUNCTION memory_completion_generation_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.memory_completion_generation:=COALESCE(NEW.memory_completion_generation,0);
+    IF TG_TABLE_NAME='exploration_nodes' THEN
+      IF NEW.kind<>'intent' THEN RETURN NEW; END IF;
+      IF TG_OP='INSERT' THEN
+        RETURN NEW;
+      ELSIF NEW.state IN ('done','blocked','exhausted','stopped') AND OLD.state NOT IN ('done','blocked','exhausted','stopped') THEN
+        NEW.memory_completion_generation:=OLD.memory_completion_generation+1;
+      ELSE NEW.memory_completion_generation:=OLD.memory_completion_generation;
+      END IF;
+    ELSE
+      IF TG_OP='INSERT' THEN
+        RETURN NEW;
+      ELSIF NEW.status IN ('done','failed','timeout') AND OLD.status NOT IN ('done','failed','timeout') THEN
+        NEW.memory_completion_generation:=OLD.memory_completion_generation+1;
+      ELSE NEW.memory_completion_generation:=OLD.memory_completion_generation;
+      END IF;
+    END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS trg_memory_completion_generation ON exploration_nodes;
+CREATE TRIGGER trg_memory_completion_generation BEFORE INSERT OR UPDATE ON exploration_nodes
+  FOR EACH ROW EXECUTE PROCEDURE memory_completion_generation_changed();
+DROP TRIGGER IF EXISTS trg_memory_completion_generation ON tasks;
+CREATE TRIGGER trg_memory_completion_generation BEFORE INSERT OR UPDATE ON tasks
+  FOR EACH ROW EXECUTE PROCEDURE memory_completion_generation_changed();
+CREATE INDEX IF NOT EXISTS idx_memory_phase_intents ON exploration_nodes(completed_at,id)
+  WHERE kind='intent' AND state IN ('done','blocked','exhausted','stopped');
+CREATE INDEX IF NOT EXISTS idx_memory_phase_intent_id ON exploration_nodes((id::text)) WHERE kind='intent';
+CREATE INDEX IF NOT EXISTS idx_memory_phase_tasks ON tasks(completed_at,id)
+  WHERE status IN ('done','failed','timeout') AND deleted_at IS NULL AND archived_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_memory_phase_task_id ON tasks((id::text));
+
+-- Native terminal phases, not generated digests or model conversation replies.
+-- All effective fact members affect identity; only <=8 complete <=600-byte
+-- summaries enter the bounded model input. No brief, instructions, raw evidence,
+-- intelligence, credentials, fact.detail or worker_result.message are projected.
+CREATE OR REPLACE VIEW memory_stage_sources AS
+WITH stages AS NOT MATERIALIZED (
+    SELECT 'intent_stage'::text AS source_kind,intent.id::text AS source_id,
+      intent.memory_completion_generation+1 AS source_version,task.id AS origin_task_id,
+      intent.exploration_id,intent.id AS intent_id,
+      COALESCE(intent.owner,intent.origin,'worker') AS agent_key,
+      intent.state AS source_state,intent.completed_at,intent.content_version::bigint AS native_version,
+      CASE WHEN COALESCE(intent.payload#>>'{worker_result,code}','') ~ '^[a-z0-9_:-]{0,64}$'
+        THEN COALESCE(intent.payload#>>'{worker_result,code}','') ELSE '' END AS termination_code
+    FROM exploration_nodes intent JOIN tasks task ON task.exploration_id=intent.exploration_id
+    WHERE intent.kind='intent' AND intent.state IN ('done','blocked','exhausted','stopped')
+      AND intent.completed_at IS NOT NULL AND intent.completed_at<=now()-interval '30 seconds'
+      AND task.deleted_at IS NULL AND task.archived_at IS NULL
+    UNION ALL
+    SELECT 'task_stage',task.id::text,task.memory_completion_generation+1,
+      task.id,task.exploration_id,0::bigint,'mainagent',task.status,task.completed_at,0::bigint,''
+    FROM tasks task WHERE task.status IN ('done','failed','timeout') AND task.completed_at IS NOT NULL
+      AND task.completed_at<=now()-interval '30 seconds' AND task.deleted_at IS NULL AND task.archived_at IS NULL
+), members AS NOT MATERIALIZED (
+    SELECT stage.source_kind,stage.source_id,fact.id,fact.content_version,fact.state,fact.payload,
+      memory_stage_anchor_signature(fact.id) AS anchor_signature,
+      memory_stage_targets(fact.payload,fact.id) AS targets,
+      memory_stage_conditions(fact.payload) AS conditions,
+      memory_source_text_field(fact.payload,'summary') AS summary,
+      CASE WHEN fact.payload->>'confidence' IN ('observed','inferred','confirmed') THEN fact.payload->>'confidence'
+        ELSE 'unverified' END AS confidence
+    FROM stages stage JOIN exploration_nodes fact ON fact.exploration_id=stage.exploration_id
+    WHERE fact.kind='fact' AND fact.state NOT IN ('origin','dismissed')
+      AND memory_source_text_field(fact.payload,'summary') IS NOT NULL
+      AND ((stage.intent_id>0 AND EXISTS(SELECT 1 FROM exploration_edges edge
+        WHERE edge.exploration_id=stage.exploration_id AND edge.src_id=stage.intent_id AND edge.dst_id=fact.id AND edge.rel='yields'))
+        OR (stage.intent_id=0 AND NOT EXISTS(SELECT 1 FROM exploration_edges edge
+          JOIN exploration_nodes parent ON parent.id=edge.src_id AND parent.exploration_id=edge.exploration_id
+          WHERE edge.exploration_id=stage.exploration_id AND edge.dst_id=fact.id AND edge.rel='yields' AND parent.kind='intent')))
+)
+SELECT stage.source_kind,stage.source_id,stage.source_version,
+    md5(stage.source_kind||':'||stage.source_id||':'||stage.source_version::text||':'||stage.source_state||':'||
+      extract(epoch FROM stage.completed_at)::text||':'||stage.native_version::text||':'||stage.termination_code||':'||all_members.signature) AS source_fingerprint,
+    stage.origin_task_id,0::bigint AS origin_conversation_id,stage.agent_key,
+    CASE WHEN stage.intent_id>0 THEN 'work-'||stage.intent_id::text ELSE 'task-'||stage.origin_task_id::text END AS session_id,
+    stage.source_state,stage.completed_at AS source_updated_at,
+    jsonb_build_object('stage',jsonb_build_object('kind',stage.source_kind,'id',stage.source_id,
+      'state',stage.source_state,'termination_code',stage.termination_code,'completed_at',stage.completed_at),
+      'coverage',jsonb_build_object('included',included.count,'total',all_members.count,'partial',included.count<all_members.count),
+      'facts',included.facts)::text AS content_text
+FROM stages stage
+JOIN LATERAL (
+    SELECT count(*) AS count,string_agg(member.id::text||':'||member.content_version::text||':'||member.state||':'||
+      member.confidence||':'||member.payload::text||':'||member.anchor_signature,'|' ORDER BY member.id) AS signature
+    FROM members member WHERE member.source_kind=stage.source_kind AND member.source_id=stage.source_id
+) all_members ON all_members.count>0
+JOIN LATERAL (
+    SELECT count(*) AS count,jsonb_agg(chosen.observation ORDER BY chosen.id) AS facts
+    FROM (SELECT candidate.* FROM (SELECT member.id,jsonb_build_object('id',member.id::text,'version',member.content_version,
+        'confidence',member.confidence,'summary',member.summary,'target',COALESCE(member.targets->>0,''),'targets',member.targets,
+        'conditions',member.conditions) AS observation
+      FROM members member WHERE member.source_kind=stage.source_kind AND member.source_id=stage.source_id
+        AND octet_length(member.summary)<=600 AND member.targets IS NOT NULL AND member.conditions IS NOT NULL) candidate
+      WHERE octet_length(candidate.observation::text)<=6000
+        AND octet_length(to_jsonb(candidate.observation::text)::text)<=9000
+      ORDER BY candidate.id DESC LIMIT 8) chosen
+) included ON included.count>0;
+
+CREATE OR REPLACE VIEW memory_live_sources AS
+SELECT * FROM memory_stage_sources
+UNION ALL SELECT * FROM memory_legacy_sources;
+
+UPDATE memory_jobs SET state='skipped',result='skipped',lease_token='',lease_until=NULL,updated_at=now()
+WHERE state IN ('queued','running','failed') AND source_ref IN (
+  SELECT id FROM memory_sources WHERE source_kind IN ('node','conversation_activity'));
+
 CREATE OR REPLACE FUNCTION memory_invalidate_source(source_kind_arg text,source_id_arg text,clear_body boolean)
 RETURNS void LANGUAGE plpgsql AS $$
 DECLARE source_ref_id bigint;
 BEGIN
     UPDATE memory_sources SET valid=false,source_updated_at=now(),updated_at=now()
       WHERE source_kind=source_kind_arg AND source_id=source_id_arg RETURNING id INTO source_ref_id;
-    IF source_ref_id IS NULL AND NOT clear_body THEN
-      INSERT INTO memory_sources(source_kind,source_id,source_version,source_fingerprint,origin_task_id,
-        origin_conversation_id,agent_key,session_id,source_state,source_updated_at,valid)
-      SELECT source_kind,source_id,source_version,source_fingerprint,origin_task_id,
-        origin_conversation_id,agent_key,session_id,source_state,now(),false
-      FROM memory_live_sources WHERE source_kind=source_kind_arg AND source_id=source_id_arg
-      ON CONFLICT(source_kind,source_id) DO UPDATE SET valid=false,source_updated_at=now(),updated_at=now()
-      RETURNING id INTO source_ref_id;
-    END IF;
     IF source_ref_id IS NULL THEN RETURN; END IF;
     UPDATE memory_entries SET state='source_invalid',version=version+1,epoch=epoch+1,updated_at=now(),
       title=CASE WHEN clear_body THEN '' ELSE title END,
@@ -2028,9 +2191,10 @@ BEGIN
       content_hash=CASE WHEN clear_body THEN '' ELSE content_hash END,
       applicability=CASE WHEN clear_body THEN '' ELSE applicability END,
       target=CASE WHEN clear_body THEN '' ELSE target END,
-      tags=CASE WHEN clear_body THEN '[]'::jsonb ELSE tags END
+      tags=CASE WHEN clear_body THEN '[]'::jsonb ELSE tags END,
+      evidence_ids=CASE WHEN clear_body THEN '[]'::jsonb ELSE evidence_ids END
       WHERE source_ref=source_ref_id AND state<>'deleted';
-    UPDATE memory_jobs SET state='skipped',lease_token='',lease_until=NULL,updated_at=now()
+    UPDATE memory_jobs SET state='skipped',result='skipped',lease_token='',lease_until=NULL,updated_at=now()
       WHERE source_ref=source_ref_id AND state IN ('queued','running','failed');
 END; $$;
 
@@ -2115,3 +2279,131 @@ END; $$;
 DROP TRIGGER IF EXISTS trg_memory_source_conversation ON conversations;
 CREATE TRIGGER trg_memory_source_conversation BEFORE DELETE ON conversations
   FOR EACH ROW EXECUTE PROCEDURE memory_source_conversation_deleted();
+
+-- Invalidate existing dependency rows only. Forming a native phase does not
+-- create persistent source/job metadata before the bounded queue admits it.
+CREATE OR REPLACE FUNCTION memory_stage_node_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE source_row record; nid bigint; expid bigint; nkind text; clear_body boolean; affects_fact boolean;
+BEGIN
+    nid:=OLD.id; expid:=OLD.exploration_id; nkind:=OLD.kind; clear_body:=TG_OP='DELETE';
+    IF TG_OP='UPDATE' THEN
+      IF NEW.payload IS NOT DISTINCT FROM OLD.payload AND NEW.state IS NOT DISTINCT FROM OLD.state
+         AND NEW.content_version IS NOT DISTINCT FROM OLD.content_version
+         AND NEW.completed_at IS NOT DISTINCT FROM OLD.completed_at THEN RETURN NEW; END IF;
+      affects_fact:=nkind='fact' AND (OLD.state<>'origin' OR NEW.state<>'origin')
+        AND (memory_source_text_field(OLD.payload,'summary') IS NOT NULL OR memory_source_text_field(NEW.payload,'summary') IS NOT NULL);
+    ELSE affects_fact:=nkind='fact' AND OLD.state<>'origin' AND memory_source_text_field(OLD.payload,'summary') IS NOT NULL;
+    END IF;
+    FOR source_row IN
+      SELECT source_kind,source_id FROM memory_sources source WHERE
+        (source.source_kind='node' AND source.source_id=nid::text)
+        OR (source.source_kind='intent_stage' AND ((nkind='intent' AND source.source_id=nid::text)
+          OR (affects_fact AND EXISTS(SELECT 1 FROM exploration_edges edge WHERE edge.exploration_id=expid
+            AND edge.dst_id=nid AND edge.rel='yields' AND edge.src_id::text=source.source_id))))
+        OR (source.source_kind='task_stage' AND affects_fact
+          AND EXISTS(SELECT 1 FROM tasks task WHERE task.exploration_id=expid AND task.id::text=source.source_id)
+          AND (clear_body OR NOT EXISTS(SELECT 1 FROM exploration_edges edge JOIN exploration_nodes parent
+            ON parent.id=edge.src_id AND parent.exploration_id=edge.exploration_id
+            WHERE edge.exploration_id=expid AND edge.dst_id=nid AND edge.rel='yields' AND parent.kind='intent')))
+      ORDER BY source.id
+    LOOP PERFORM memory_invalidate_source(source_row.source_kind,source_row.source_id,clear_body); END LOOP;
+    IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS trg_memory_source_node ON exploration_nodes;
+DROP TRIGGER IF EXISTS trg_memory_stage_node ON exploration_nodes;
+CREATE TRIGGER trg_memory_stage_node BEFORE UPDATE OR DELETE ON exploration_nodes
+  FOR EACH ROW EXECUTE PROCEDURE memory_stage_node_changed();
+
+CREATE OR REPLACE FUNCTION memory_stage_edge_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE source_row record; old_src bigint:=0; new_src bigint:=0; old_exp bigint:=0; new_exp bigint:=0;
+BEGIN
+    IF TG_OP<>'INSERT' THEN
+      old_exp:=OLD.exploration_id;
+      IF OLD.rel='yields' THEN old_src:=OLD.src_id; END IF;
+    END IF;
+    IF TG_OP<>'DELETE' THEN
+      new_exp:=NEW.exploration_id;
+      IF NEW.rel='yields' THEN new_src:=NEW.src_id; END IF;
+    END IF;
+    IF old_src=0 AND new_src=0 THEN RETURN NULL; END IF;
+    FOR source_row IN SELECT source_kind,source_id FROM memory_sources source WHERE
+      (source.source_kind='intent_stage' AND source.source_id IN (old_src::text,new_src::text))
+      OR (source.source_kind='task_stage' AND EXISTS(SELECT 1 FROM tasks task
+        WHERE task.exploration_id IN (old_exp,new_exp) AND task.id::text=source.source_id))
+      ORDER BY source.id
+    LOOP PERFORM memory_invalidate_source(source_row.source_kind,source_row.source_id,TG_OP='DELETE'); END LOOP;
+    RETURN NULL;
+END; $$;
+DROP TRIGGER IF EXISTS trg_memory_stage_edge ON exploration_edges;
+CREATE TRIGGER trg_memory_stage_edge AFTER INSERT OR UPDATE OR DELETE ON exploration_edges
+  FOR EACH ROW EXECUTE PROCEDURE memory_stage_edge_changed();
+
+CREATE OR REPLACE FUNCTION memory_stage_task_state_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.status IS DISTINCT FROM OLD.status OR NEW.completed_at IS DISTINCT FROM OLD.completed_at THEN
+      PERFORM memory_invalidate_source('task_stage',NEW.id::text,false);
+    END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS trg_memory_stage_task_state ON tasks;
+CREATE TRIGGER trg_memory_stage_task_state AFTER UPDATE ON tasks
+  FOR EACH ROW EXECUTE PROCEDURE memory_stage_task_state_changed();
+
+CREATE OR REPLACE FUNCTION memory_invalidate_fact_stage_set(node_ids_arg bigint[],clear_body boolean)
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE source_row record;
+BEGIN
+    FOR source_row IN SELECT source_kind,source_id FROM memory_sources source WHERE
+      (source.source_kind='intent_stage' AND EXISTS(SELECT 1 FROM exploration_edges edge
+        WHERE edge.dst_id=ANY(node_ids_arg) AND edge.rel='yields' AND edge.src_id::text=source.source_id))
+      OR (source.source_kind='task_stage' AND EXISTS(SELECT 1 FROM exploration_nodes fact JOIN tasks task
+        ON task.exploration_id=fact.exploration_id WHERE fact.id=ANY(node_ids_arg) AND fact.kind='fact'
+        AND task.id::text=source.source_id AND NOT EXISTS(SELECT 1 FROM exploration_edges edge
+          JOIN exploration_nodes parent ON parent.id=edge.src_id AND parent.exploration_id=edge.exploration_id
+          WHERE edge.dst_id=fact.id AND edge.exploration_id=fact.exploration_id AND edge.rel='yields' AND parent.kind='intent')))
+      ORDER BY source.id
+    LOOP PERFORM memory_invalidate_source(source_row.source_kind,source_row.source_id,clear_body); END LOOP;
+END; $$;
+
+CREATE OR REPLACE FUNCTION memory_invalidate_fact_stages(node_id_arg bigint,clear_body boolean)
+RETURNS void LANGUAGE sql AS $$
+    SELECT memory_invalidate_fact_stage_set(ARRAY[node_id_arg],clear_body)
+$$;
+
+CREATE OR REPLACE FUNCTION memory_stage_anchor_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE changed_nodes bigint[]:='{}'::bigint[];
+BEGIN
+    IF TG_OP<>'INSERT' THEN changed_nodes:=array_append(changed_nodes,OLD.node_id); END IF;
+    IF TG_OP<>'DELETE' THEN changed_nodes:=array_append(changed_nodes,NEW.node_id); END IF;
+    PERFORM memory_invalidate_fact_stage_set(changed_nodes,TG_OP='DELETE');
+    RETURN NULL;
+END; $$;
+DROP TRIGGER IF EXISTS trg_memory_stage_anchor ON exploration_anchors;
+CREATE TRIGGER trg_memory_stage_anchor AFTER INSERT OR UPDATE OR DELETE ON exploration_anchors
+  FOR EACH ROW EXECUTE PROCEDURE memory_stage_anchor_changed();
+
+CREATE OR REPLACE FUNCTION memory_stage_asset_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE changed_nodes bigint[];
+BEGIN
+    IF TG_OP='UPDATE' AND NEW.domain IS NOT DISTINCT FROM OLD.domain AND NEW.ip IS NOT DISTINCT FROM OLD.ip
+       AND NEW.url IS NOT DISTINCT FROM OLD.url THEN RETURN NEW; END IF;
+    SELECT array_agg(node_id ORDER BY node_id) INTO changed_nodes FROM exploration_anchors WHERE asset_id=OLD.id;
+    IF changed_nodes IS NOT NULL THEN PERFORM memory_invalidate_fact_stage_set(changed_nodes,TG_OP='DELETE'); END IF;
+    IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS trg_memory_stage_asset ON assets;
+CREATE TRIGGER trg_memory_stage_asset BEFORE UPDATE OR DELETE ON assets
+  FOR EACH ROW EXECUTE PROCEDURE memory_stage_asset_changed();
+
+CREATE OR REPLACE FUNCTION memory_stage_fact_inserted() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.kind='fact' AND NEW.state<>'origin' AND memory_source_text_field(NEW.payload,'summary') IS NOT NULL THEN
+      PERFORM memory_invalidate_fact_stages(NEW.id,false);
+    END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS trg_memory_stage_fact_inserted ON exploration_nodes;
+CREATE TRIGGER trg_memory_stage_fact_inserted AFTER INSERT ON exploration_nodes
+  FOR EACH ROW EXECUTE PROCEDURE memory_stage_fact_inserted();

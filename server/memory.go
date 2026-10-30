@@ -28,6 +28,7 @@ func (s *Server) registerMemoryRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/memories/settings", s.getMemorySettings)
 	mux.HandleFunc("PUT /api/memories/settings", s.putMemorySettings)
 	mux.HandleFunc("GET /api/memories/usage", s.getMemoryUsage)
+	mux.HandleFunc("GET /api/memories/learning", s.getMemoryLearning)
 	mux.HandleFunc("POST /api/memories/extract", s.extractMemoryHistory)
 	mux.HandleFunc("GET /api/memories", s.listMemories)
 	mux.HandleFunc("POST /api/memories", s.createMemory)
@@ -153,7 +154,7 @@ func (s *Server) putMemorySettings(w http.ResponseWriter, r *http.Request) {
 		memoryAPIError(w, db.ErrMemoryInput)
 		return
 	}
-	if settings.ProfileID > 0 {
+	if settings.Enabled && settings.AutoExtract && settings.ProfileID > 0 {
 		if _, _, err := s.memoryModel(settings); err != nil {
 			writeErr(w, http.StatusBadRequest, "所选记忆提炼模型不可用，请选择有效配置")
 			return
@@ -311,7 +312,8 @@ func (s *Server) patchMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input := db.MemoryInput{Title: old.Title, Content: old.Content, Kind: old.Kind, State: old.State,
-		Confidence: old.Confidence, Applicability: old.Applicability, Target: old.Target, Tags: old.Tags, ExpiresAt: old.ExpiresAt}
+		Confidence: old.Confidence, Applicability: old.Applicability, Target: old.Target, Tags: old.Tags, ExpiresAt: old.ExpiresAt,
+		EvidenceIDs: append([]string(nil), old.EvidenceIDs...)}
 	if input.State == "expired" {
 		input.State = "active"
 	} // expiry remains unchanged unless explicitly edited
@@ -465,7 +467,7 @@ func (s *Server) extractMemoryHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.wakeMemoryWorker()
-	writeJSON(w, http.StatusAccepted, map[string]int{"queued": queued})
+	writeJSON(w, http.StatusAccepted, map[string]any{"queued": queued, "unit": "stages"})
 }
 
 func memoryConversationID(session string) int64 {

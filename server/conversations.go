@@ -450,12 +450,8 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	if ua.Detail == "" {
 		ua.Detail = msg
 	}
-	if activityID, err := pg.AppendConvActivity(c.ID, ua); err != nil {
+	if _, err := pg.AppendConvActivity(c.ID, ua); err != nil {
 		log.Printf("[conv %d] append user msg failed: %v", c.ID, err)
-	} else if err := pg.MarkMemoryHumanActivity(r.Context(), activityID); err != nil {
-		// Only this authenticated human HTTP path labels a learning source.
-		// Triggered/synthetic user-role messages and assistant repetitions do not.
-		log.Printf("[memory] human input attribution unavailable; source excluded from automatic learning")
 	}
 	if c.Title == "" || c.Title == "新对话" {
 		title := firstLine(msg, 40)

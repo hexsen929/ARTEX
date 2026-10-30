@@ -56,6 +56,8 @@ type MemoryEntry struct {
 	ExpiresAt            *time.Time `json:"expires_at,omitempty"`
 	UseCount             int64      `json:"use_count"`
 	LastUsedAt           *time.Time `json:"last_used_at,omitempty"`
+	EvidenceIDs          []string   `json:"evidence_ids"`
+	ShareScope           string     `json:"share_scope"`
 }
 
 type MemoryInput struct {
@@ -72,6 +74,7 @@ type MemoryInput struct {
 	AgentKey             string     `json:"agent_key"`
 	SessionID            string     `json:"session_id"`
 	ExpiresAt            *time.Time `json:"expires_at,omitempty"`
+	EvidenceIDs          []string   `json:"evidence_ids,omitempty"`
 }
 
 type MemoryFilter struct {
@@ -134,6 +137,7 @@ type MemoryJob struct {
 	LeaseToken    string       `json:"-"`
 	LeaseUntil    *time.Time   `json:"lease_until,omitempty"`
 	CreatedAt     time.Time    `json:"created_at"`
+	Historical    bool         `json:"-"`
 }
 
 type MemoryAudit struct {
@@ -147,4 +151,22 @@ type MemoryAudit struct {
 	CallKey        string    `json:"call_key"`
 	Action         string    `json:"action"`
 	CreatedAt      time.Time `json:"created_at"`
+}
+
+type MemoryLearningLastJob struct {
+	ID        int64     `json:"id"`
+	Result    string    `json:"result"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type MemoryLearningSnapshot struct {
+	Queued           int64                  `json:"queued"`
+	Running          int64                  `json:"running"`
+	RetryableFailed  int64                  `json:"retryable_failed"`
+	Failed           int64                  `json:"failed"`
+	Done             int64                  `json:"done"`
+	StartsLastHour   int64                  `json:"starts_last_hour"`
+	AttemptsLastHour int64                  `json:"attempts_last_hour"`
+	LastJob          *MemoryLearningLastJob `json:"last_job,omitempty"`
+	WaitingStage     bool                   `json:"waiting_stage"`
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -64,7 +65,7 @@ func (d *DB) UpdateMemorySettings(ctx context.Context, in MemorySettings, expect
 	if current.Epoch != expectedEpoch {
 		return current, ErrMemoryConflict
 	}
-	if in.ProfileID > 0 {
+	if in.Enabled && in.AutoExtract && in.ProfileID > 0 {
 		var exists bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM llm_profiles WHERE id=$1)`, in.ProfileID).Scan(&exists); err != nil {
 			return current, err
@@ -90,27 +91,38 @@ func (d *DB) UpdateMemorySettings(ctx context.Context, in MemorySettings, expect
 
 const memoryEntryStateSQL = `CASE WHEN e.state='active' AND e.expires_at IS NOT NULL AND e.expires_at<=now() THEN 'expired' ELSE e.state END`
 
+const memoryShareScopeSQL = `CASE WHEN e.kind IN ('environment','procedure','lesson') AND e.target=''
+	AND (NOT e.automatic OR s.source_kind IN ('intent_stage','task_stage')) THEN 'global_experience' ELSE 'source_only' END`
+
 const memoryEntryCols = `e.id,e.title,e.content,e.kind,e.applicability,e.confidence,` + memoryEntryStateSQL + `,e.target,e.tags,
 	e.origin_task_id,e.origin_conversation_id,e.agent_key,e.session_id,
 	COALESCE(s.source_kind,''),COALESCE(s.source_id,''),e.source_version,e.source_fingerprint,
 	e.automatic,e.version,e.epoch,e.created_at,e.updated_at,e.expires_at,
 	(SELECT count(*) FROM memory_audit used WHERE used.entry_id=e.id AND used.action='admitted'),
-	(SELECT max(used.created_at) FROM memory_audit used WHERE used.entry_id=e.id AND used.action='admitted')`
+	(SELECT max(used.created_at) FROM memory_audit used WHERE used.entry_id=e.id AND used.action='admitted'),
+	e.evidence_ids,` + memoryShareScopeSQL
 
 type memoryScanner interface{ Scan(...any) error }
 
 func scanMemoryEntry(row memoryScanner) (MemoryEntry, error) {
 	var out MemoryEntry
-	var tags []byte
+	var tags, evidence []byte
 	err := row.Scan(&out.ID, &out.Title, &out.Content, &out.Kind, &out.Applicability, &out.Confidence, &out.State, &out.Target, &tags,
 		&out.OriginTaskID, &out.OriginConversationID, &out.AgentKey, &out.SessionID,
 		&out.SourceKind, &out.SourceID, &out.SourceVersion, &out.SourceFingerprint,
-		&out.Automatic, &out.Version, &out.Epoch, &out.CreatedAt, &out.UpdatedAt, &out.ExpiresAt, &out.UseCount, &out.LastUsedAt)
+		&out.Automatic, &out.Version, &out.Epoch, &out.CreatedAt, &out.UpdatedAt, &out.ExpiresAt, &out.UseCount, &out.LastUsedAt,
+		&evidence, &out.ShareScope)
 	if err == nil {
 		err = json.Unmarshal(tags, &out.Tags)
 	}
 	if out.Tags == nil {
 		out.Tags = []string{}
+	}
+	if err == nil {
+		err = json.Unmarshal(evidence, &out.EvidenceIDs)
+	}
+	if out.EvidenceIDs == nil {
+		out.EvidenceIDs = []string{}
 	}
 	return out, err
 }
@@ -209,6 +221,10 @@ func validateMemoryInput(in MemoryInput, automatic bool) (MemoryInput, error) {
 	if in.Kind != "environment" && in.Kind != "procedure" && in.Kind != "lesson" && in.Kind != "target" {
 		return in, ErrMemoryInput
 	}
+	if (in.Kind == "target" && (strings.TrimSpace(in.Target) == "" || in.OriginTaskID <= 0)) ||
+		(in.Kind != "target" && in.Target != "") || (automatic && (in.Kind == "target" || in.Target != "")) {
+		return in, ErrMemoryInput
+	}
 	if in.State == "" {
 		in.State = "active"
 	}
@@ -217,6 +233,7 @@ func validateMemoryInput(in MemoryInput, automatic bool) (MemoryInput, error) {
 	}
 	if automatic {
 		in.State = "active"
+		in.Confidence = "unverified"
 	}
 	if in.Confidence == "" {
 		in.Confidence = "unverified"
@@ -256,6 +273,15 @@ func memoryContentHash(content string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func memoryEvidenceHash(content string, evidenceIDs []string) string {
+	raw, _ := json.Marshal(struct {
+		Content     string
+		EvidenceIDs []string
+	}{content, evidenceIDs})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
 func memoryAuditTx(ctx context.Context, tx *sql.Tx, entryID, version, jobID int64, admission MemoryAdmission, action string) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO memory_audit(entry_id,entry_version,job_id,task_id,conversation_id,agent_key,session_id,call_key,action)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, entryID, version, jobID, admission.TaskID, admission.ConversationID,
@@ -286,6 +312,9 @@ func memoryOriginExists(ctx context.Context, q memoryQueryer, taskID, conversati
 }
 
 func (d *DB) CreateManualMemory(ctx context.Context, in MemoryInput) (*MemoryEntry, error) {
+	if len(in.EvidenceIDs) != 0 {
+		return nil, ErrMemoryInput
+	}
 	in, err := validateMemoryInput(in, false)
 	if err != nil {
 		return nil, err
@@ -300,6 +329,9 @@ func (d *DB) CreateManualMemory(ctx context.Context, in MemoryInput) (*MemoryEnt
 		return nil, err
 	}
 	if err := memoryOriginExists(ctx, tx, in.OriginTaskID, in.OriginConversationID); err != nil {
+		if errors.Is(err, ErrMemoryStale) {
+			return nil, ErrMemoryInput
+		}
 		return nil, err
 	}
 	if in.ExpiresAt == nil {
@@ -350,6 +382,9 @@ func (d *DB) EditMemoryEntry(ctx context.Context, id int64, in MemoryInput, expe
 	if entry == nil || entry.State == "deleted" || entry.Version != expectedVersion {
 		return nil, ErrMemoryConflict
 	}
+	if !slices.Equal(entry.EvidenceIDs, in.EvidenceIDs) {
+		return nil, ErrMemoryInput
+	}
 	if entry.Automatic && entry.State == "source_invalid" {
 		return nil, ErrMemoryStale
 	}
@@ -362,7 +397,7 @@ func (d *DB) EditMemoryEntry(ctx context.Context, id int64, in MemoryInput, expe
 	tags, _ := json.Marshal(in.Tags)
 	_, err = tx.ExecContext(ctx, `UPDATE memory_entries SET title=$2,content=$3,content_hash=$4,kind=$5,applicability=$6,
 		target=$7,tags=$8,confidence=$9,state=$10,expires_at=$11,manual_override=true,version=version+1,epoch=epoch+1,updated_at=now()
-		WHERE id=$1`, id, in.Title, in.Content, memoryContentHash(in.Content), in.Kind, in.Applicability, in.Target, string(tags), in.Confidence, in.State, in.ExpiresAt)
+		WHERE id=$1`, id, in.Title, in.Content, memoryEvidenceHash(in.Content, entry.EvidenceIDs), in.Kind, in.Applicability, in.Target, string(tags), in.Confidence, in.State, in.ExpiresAt)
 	if err != nil {
 		return nil, err
 	}
@@ -400,7 +435,7 @@ func (d *DB) DeleteMemoryEntry(ctx context.Context, id, expectedVersion int64) e
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET state='deleted',title='',content='',content_hash='',
-		applicability='',target='',tags='[]',source_fingerprint='',version=version+1,epoch=epoch+1,updated_at=now() WHERE id=$1`, id); err != nil {
+		applicability='',target='',tags='[]',evidence_ids='[]',source_fingerprint='',version=version+1,epoch=epoch+1,updated_at=now() WHERE id=$1`, id); err != nil {
 		return err
 	}
 	if err := memoryAuditTx(ctx, tx, id, entry.Version+1, 0, MemoryAdmission{}, "deleted"); err != nil {
@@ -442,7 +477,7 @@ func (d *DB) ClearMemoryEntries(ctx context.Context) error {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET state='deleted',title='',content='',content_hash='',
-		applicability='',target='',tags='[]',source_fingerprint='',version=version+1,epoch=epoch+1,updated_at=now() WHERE state<>'deleted'`); err != nil {
+		applicability='',target='',tags='[]',evidence_ids='[]',source_fingerprint='',version=version+1,epoch=epoch+1,updated_at=now() WHERE state<>'deleted'`); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state='skipped',lease_token='',lease_until=NULL,updated_at=now() WHERE state IN ('queued','running','failed')`); err != nil {
@@ -472,7 +507,7 @@ func lockMemoryEntrySource(ctx context.Context, tx *sql.Tx, id int64) error {
 const memoryLivePredicate = `e.state='active' AND (e.expires_at IS NULL OR e.expires_at>now())
 	AND (e.origin_task_id=0 OR EXISTS(SELECT 1 FROM tasks mt WHERE mt.id=e.origin_task_id AND mt.deleted_at IS NULL AND mt.archived_at IS NULL))
 	AND (e.origin_conversation_id=0 OR EXISTS(SELECT 1 FROM conversations mc WHERE mc.id=e.origin_conversation_id))
-	AND (NOT e.automatic OR (s.valid AND EXISTS(SELECT 1 FROM memory_live_sources live
+	AND (NOT e.automatic OR (s.source_kind IN ('intent_stage','task_stage') AND s.valid AND EXISTS(SELECT 1 FROM memory_live_sources live
 		WHERE live.source_kind=s.source_kind AND live.source_id=s.source_id
 		AND live.source_version=e.source_version AND live.source_fingerprint=e.source_fingerprint)))`
 
@@ -543,9 +578,9 @@ func (d *DB) SearchMemory(ctx context.Context, in MemorySearchInput) ([]MemoryEn
 		limit = settings.MaxEntries
 	}
 	args := []any{in.TaskID, in.ConversationID}
-	visibility := `(e.origin_task_id=$1 AND $1>0) OR (e.origin_conversation_id=$2 AND $2>0)`
+	visibility := `(e.origin_task_id=$1 AND $1>0) OR ((` + memoryShareScopeSQL + `)='global_experience' AND e.origin_conversation_id=$2 AND $2>0)`
 	if settings.GlobalShare {
-		visibility = `true`
+		visibility = `(e.origin_task_id=$1 AND $1>0) OR (` + memoryShareScopeSQL + `)='global_experience'`
 	}
 	terms, matches, scores := memorySearchTerms(in.Query), []string{}, []string{}
 	for _, term := range terms {
@@ -624,16 +659,21 @@ func (d *DB) ValidateMemoryAdmission(ctx context.Context, in MemoryAdmission) er
 		}
 		var version int64
 		var taskID, convID int64
-		err := tx.QueryRowContext(ctx, `SELECT e.version,e.origin_task_id,e.origin_conversation_id
+		var scope string
+		err := tx.QueryRowContext(ctx, `SELECT e.version,e.origin_task_id,e.origin_conversation_id,`+memoryShareScopeSQL+`
 			FROM memory_entries e LEFT JOIN memory_sources s ON s.id=e.source_ref
-			WHERE e.id=$1 AND `+memoryLivePredicate+` FOR SHARE OF e`, ref.ID).Scan(&version, &taskID, &convID)
+			WHERE e.id=$1 AND `+memoryLivePredicate+` FOR SHARE OF e`, ref.ID).Scan(&version, &taskID, &convID, &scope)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrMemoryStale
 		}
 		if err != nil {
 			return err
 		}
-		if version != ref.Version || (!settings.GlobalShare && !(taskID > 0 && taskID == in.TaskID) && !(convID > 0 && convID == in.ConversationID)) {
+		visible := taskID > 0 && taskID == in.TaskID
+		if scope == "global_experience" {
+			visible = visible || settings.GlobalShare || (convID > 0 && convID == in.ConversationID)
+		}
+		if version != ref.Version || !visible {
 			return ErrMemoryStale
 		}
 		if err := memoryAuditTx(ctx, tx, ref.ID, version, 0, in, "admitted"); err != nil {

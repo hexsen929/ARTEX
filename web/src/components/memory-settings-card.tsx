@@ -6,6 +6,7 @@ import Link from "next/link";
 import { BrainIcon, RefreshCwIcon } from "lucide-react";
 import { toast } from "sonner";
 
+import { MemoryLearningStatus } from "@/components/memory-learning-status";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -51,9 +52,11 @@ function integer(value: string, min: number, max: number, label: string): number
 export function MemorySettingsCard({
   className,
   onChange,
+  showLearningStatus = true,
 }: {
   className?: string;
   onChange?: (settings: MemorySettings) => void;
+  showLearningStatus?: boolean;
 }) {
   const [saved, setSaved] = React.useState<MemorySettings | null>(null);
   const [form, setForm] = React.useState<Form | null>(null);
@@ -156,10 +159,10 @@ export function MemorySettingsCard({
   return (
     <Card className={className}>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base"><BrainIcon className="size-4" />自动共享记忆</CardTitle>
+        <CardTitle className="flex items-center gap-2 text-base"><BrainIcon className="size-4" />跨任务经验库</CardTitle>
         <CardDescription>
-          自动提炼、整理并按相关性召回，无需逐条审批。全局共享不是全量注入，也不扩大任何任务或工具权限。
-          提炼输入和召回片段会发送给所用模型；不保存明文密钥、Cookie 或原始流量。
+          工具与环境、方法、排错经验可自动跨任务复用，无需逐条审批。目标记录始终仅供原任务使用，不扩大任务或工具权限。
+          阶段总结和经验召回会发送资料给所用模型并产生额外费用；不保存明文密钥、Cookie 或原始流量。
         </CardDescription>
       </CardHeader>
       <form onSubmit={(event) => { event.preventDefault(); void save(); }}>
@@ -170,8 +173,8 @@ export function MemorySettingsCard({
               <div className="space-y-3">
                 {([
                   ["enabled", "启用记忆", "关闭后停止新的学习与召回，原业务记录保持不变。"],
-                  ["auto_extract", "自动提炼", "从新增或变更的来源提炼有用经验，无需人工审批。"],
-                  ["global_share", "所有任务共享", "开启后所有任务可按相关性检索经验，保留来源、目标与适用条件。"],
+                  ["auto_extract", "阶段结束后自动总结", "意图终态或任务结束并稳定约 30 秒后有界总结，不逐条 fact、hint 或普通聊天调用模型。"],
+                  ["global_share", "跨任务共享通用经验", "仅共享工具、方法和排错经验；目标记录始终只在来源任务召回。关闭后不跨任务共享。"],
                 ] as const).map(([key, label, description]) => (
                   <div key={key} className="flex items-center justify-between gap-4">
                     <div><Label htmlFor={`memory-${key}`}>{label}</Label><p className="text-muted-foreground mt-1 text-xs">{description}</p></div>
@@ -197,17 +200,19 @@ export function MemorySettingsCard({
                 {([
                   ["max_entries", "每次最多召回条数", 1, 10],
                   ["max_tokens", "注入Token预算（UTF-8字节保守计数，含来源元数据）", 1024, 2000],
-                  ["max_jobs_per_hour", "每小时自动提炼任务上限", 1, 60],
+                  ["max_jobs_per_hour", "每小时模型请求尝试上限（含有限重试）", 1, 60],
                   ["retention_days", "自动记忆有效天数", 1, 3650],
                 ] as const).map(([key, label, min, max]) => (
                   <div key={key} className="space-y-2"><Label htmlFor={`memory-${key}`}>{label}</Label><Input id={`memory-${key}`} type="number" min={min} max={max} step={1} value={form[key]} disabled={!editable || !form.enabled} onChange={(event) => update({ [key]: event.target.value })} /></div>
                 ))}
               </div>
-              <p className="text-muted-foreground text-xs">预算按 UTF-8 字节保守计数，并非模型精确 tokenizer。预算不足以放入完整正文时，仅提供标明 index_only 的短索引，不截断为完整证据；详情在记忆中心查看。</p>
-              <p className="text-muted-foreground text-xs">自动学习起点：{memoryTime(saved?.learn_after)}。只处理此后新增或变更的来源；历史资料可在记忆中心主动回顾。</p>
+              <p className="text-muted-foreground text-xs">预算按 UTF-8 字节保守计数，并非模型精确 tokenizer。人工长笔记超预算时仅提供标明 index_only 的短索引；自动短经验按相关性与预算择要召回，不截断成不完整证据。全文在经验库查看。</p>
+              <p className="text-muted-foreground text-xs">每阶段建立一个总结任务，最多择要读取 8 段完整事实摘录，可能仅覆盖该阶段部分记录；最多产生 3 条通用经验。领取阶段与实际 HTTP 尝试分别计数、分别受小时上限约束；有限重试计入实际请求尝试，不代表一次阶段总结只有一次物理请求。</p>
+              <p className="text-muted-foreground text-xs">自动学习起点：{memoryTime(saved?.learn_after)}。只自动处理起点后结束的阶段；已处理执行代不会因事实追加或设置改动反复总结。普通聊天不自动整理，历史已结束阶段可主动回顾。</p>
             </>
           ) : null}
           {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
+          {showLearningStatus ? <MemoryLearningStatus embedded /> : null}
         </CardContent>
         <CardFooter className="mt-4 flex flex-wrap gap-2">
           <Button type="submit" disabled={!editable || !dirty}>{saving ? "保存中…" : "保存记忆设置"}</Button>

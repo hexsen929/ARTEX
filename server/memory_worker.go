@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
@@ -14,21 +13,6 @@ import (
 	"github.com/Autumn-27/artex/memcontext"
 	longmemory "github.com/Autumn-27/artex/memory"
 )
-
-// Targets are read from the source store's structured projection, never a
-// model guess or the first scope of a multi-target task.
-func memorySourceTarget(source db.MemorySource) string {
-	if source.Kind != "node" {
-		return ""
-	}
-	var projection struct {
-		Target string `json:"target"`
-	}
-	if json.Unmarshal([]byte(source.Text), &projection) != nil {
-		return ""
-	}
-	return strings.TrimSpace(projection.Target)
-}
 
 func (s *Server) wakeMemoryWorker() {
 	if s.memoryWake == nil {
@@ -50,8 +34,8 @@ func (s *Server) startMemoryWorker() {
 		defer s.memoryWG.Done()
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
-		// Sources older than the installation's learn_after are excluded unless
-		// the administrator explicitly requests a bounded historical backfill.
+		// Discover only completed native stages, never individual fact/hint/chat
+		// writes. Historical backfill is explicit and bounded in the API.
 		for {
 			select {
 			case <-s.ctx.Done():
@@ -138,11 +122,24 @@ func (s *Server) memoryWorkerTick(ctx context.Context) {
 	if source.TaskID > 0 {
 		callCtx = llmrec.WithTaskID(callCtx, strconv.FormatInt(source.TaskID, 10))
 	}
-	drafts, err := longmemory.Extract(callCtx, provider, cfg.Model, longmemory.Input{
+	input := longmemory.Input{
 		Kind: source.Kind, ID: source.ID, Version: strconv.FormatInt(source.Version, 10), AgentKey: source.AgentKey,
 		TaskID: source.TaskID, ConversationID: source.ConversationID, Content: source.Text, Status: source.State,
-		Target: memorySourceTarget(*source),
-	})
+	}
+	// Compare the entire envelope against registered secrets as well as source
+	// text. Metadata is host-selected but must not become a secret side channel.
+	envelope, err := json.Marshal(input)
+	if err != nil {
+		_, _ = s.m.pg.CompleteMemoryJob(ctx, *job, nil)
+		return
+	}
+	if s.m.egress != nil {
+		if _, hit := s.m.egress.Check(string(envelope)); hit {
+			_, _ = s.m.pg.CompleteMemoryJob(ctx, *job, nil)
+			return
+		}
+	}
+	drafts, err := longmemory.Extract(callCtx, provider, cfg.Model, input)
 	if err != nil {
 		if errors.Is(err, longmemory.ErrSensitive) || errors.Is(err, longmemory.ErrInvalid) {
 			_, _ = s.m.pg.CompleteMemoryJob(ctx, *job, nil)
@@ -155,8 +152,16 @@ func (s *Server) memoryWorkerTick(ctx context.Context) {
 	}
 	entries := make([]db.MemoryInput, 0, len(drafts))
 	for _, draft := range drafts {
+		switch draft.Kind {
+		case "environment", "procedure", "lesson":
+		default:
+			continue
+		}
+		if draft.Target != "" {
+			continue
+		}
 		entry := db.MemoryInput{Title: draft.Title, Content: draft.Content, Kind: draft.Kind,
-			Target: draft.Target, Applicability: draft.Applicability, Tags: draft.Tags,
+			Applicability: draft.Applicability, Tags: draft.Tags, EvidenceIDs: append([]string(nil), draft.EvidenceIDs...),
 			Confidence: "unverified", State: "active", OriginTaskID: source.TaskID,
 			OriginConversationID: source.ConversationID, AgentKey: source.AgentKey, SessionID: source.SessionID}
 		if err := s.validateMemoryInput(entry); err != nil {

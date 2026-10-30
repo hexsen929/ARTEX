@@ -13,19 +13,23 @@ const output = path.resolve(__dirname, "..", "out");
 if (!fs.existsSync(path.join(output, "function", "memories", "index.html"))) throw new Error("Missing cloud memory-page export");
 const settings = {
   enabled: true, auto_extract: true, global_share: true, profile_id: 0,
-  max_entries: 5, max_tokens: 2000, max_jobs_per_hour: 12, retention_days: 90,
+  max_entries: 5, max_tokens: 2000, max_jobs_per_hour: 3, retention_days: 90,
   epoch: 1, learn_after: "2026-10-30T04:00:00Z", model_available: true,
 };
 const fixture = {
   id: 7, title: "合成工具兼容经验", content: "工具版本更新后，应重新核对参数支持情况。",
   kind: "environment", status: "active", confidence: "observed", origin_task_id: 24,
   origin_conversation_id: 0, agent_key: "worker", target: "", applicability: "仅适用于来源所述版本",
-  tags: ["版本"], source_kind: "fact", source_id: "31", source_version: 2, version: 1,
+  tags: ["版本"], source_kind: "intent_stage", source_id: "31", source_version: 2, version: 1,
   created_at: "2026-10-30T04:00:00Z", updated_at: "2026-10-30T04:00:00Z", expires_at: null,
-  last_used_at: null, use_count: 0, automatic: true,
+  last_used_at: null, use_count: 0, automatic: true, share_scope: "global_experience", evidence_ids: ["31"],
+};
+const learning = {
+  status: "waiting_stage", message: "等待阶段结束并稳定后再总结，不逐条调用模型。",
+  queued: 0, running: 0, failed: 0, processed: 0, starts_last_hour: 0, attempts_last_hour: 0, max_calls_per_hour: 3,
 };
 let entries = [{ ...fixture }], nextId = 8;
-const state = { failList: false, conflictEdit: false, conflictSettings: false, failUsage: false };
+const state = { failList: false, conflictEdit: false, conflictSettings: false, failUsage: false, failLearning: false, learningDelay: 0 };
 const requests = [], unexpected = new Set(), external = new Set(), errors = [];
 const json = (response, status, value) => { response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); };
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -37,17 +41,22 @@ async function api(request, response, url) {
   if (endpoint === "/api/memories/settings") {
     if (method === "GET") return json(response, 200, settings);
     if (method === "PUT") {
-      for (const key of ["model_available", "model_error", "learn_after"]) assert.equal(Object.hasOwn(body, key), false, `Readonly settings field ${key} was echoed`);
+      assert.deepEqual(Object.keys(body).sort(), ["enabled", "auto_extract", "global_share", "profile_id", "max_entries", "max_tokens", "max_jobs_per_hour", "retention_days", "epoch"].sort(), "Settings PUT must be an explicit writable-field whitelist");
       if (state.conflictSettings) { state.conflictSettings = false; settings.epoch += 1; settings.global_share = false; return json(response, 409, { error: "记忆或来源已变化，请刷新后重试" }); }
       assert.equal(body.epoch, settings.epoch);
       Object.assign(settings, body, { epoch: settings.epoch + 1 });
       return json(response, 200, settings);
     }
   }
+  if (endpoint === "/api/memories/learning") {
+    if (state.learningDelay) await pause(state.learningDelay);
+    if (response.destroyed) return;
+    return state.failLearning ? json(response, 503, { error: "fixture learning unavailable" }) : json(response, 200, learning);
+  }
   if (endpoint === "/api/memories/usage") return state.failUsage
     ? json(response, 503, { error: "fixture usage unavailable" })
     : json(response, 200, { items: [{ id: 1, entry_id: 7, entry_version: 1, task_id: 24, conversation_id: 0, session_id: "intent:31", agent_key: "worker", result: "injected", created_at: "2026-10-30T05:00:00Z" }] });
-  if (endpoint === "/api/memories/extract") return json(response, 202, { queued: 2 });
+  if (endpoint === "/api/memories/extract") return json(response, 202, { queued: 2, unit: "stages" });
   if (endpoint === "/api/memories") {
     if (method === "GET") {
       if (state.failList) return json(response, 503, { error: "fixture list unavailable" });
@@ -58,8 +67,12 @@ async function api(request, response, url) {
     }
     if (method === "POST") {
       assert.equal(Object.hasOwn(body, "status"), false, "Manual creation attempted an approval state");
+      if (body.kind === "target") {
+        assert.equal(Number.isSafeInteger(body.origin_task_id) && body.origin_task_id > 0, true);
+        assert.equal(typeof body.target === "string" && body.target.trim().length > 0, true);
+      } else assert.equal(body.target, "", "General experience must not carry a concrete target");
       await pause(100);
-      const entry = { ...fixture, ...body, id: nextId++, status: "active", confidence: "unverified", automatic: false, origin_task_id: 0, source_kind: "manual", source_id: "", version: 1 };
+      const entry = { ...fixture, ...body, id: nextId++, status: "active", confidence: "unverified", automatic: false, origin_task_id: body.origin_task_id || 0, source_kind: "manual", source_id: "", version: 1, share_scope: body.kind === "target" ? "source_only" : "global_experience", evidence_ids: [] };
       entries.unshift(entry); return json(response, 201, entry);
     }
   }
@@ -69,6 +82,7 @@ async function api(request, response, url) {
     if (!entry) return json(response, 404, { error: "记忆或来源不存在" });
     if (method === "GET") return json(response, 200, entry);
     if (method === "PATCH") {
+      assert.equal(Object.hasOwn(body, "origin_task_id"), false, "Edits must not change source task ownership");
       if (state.conflictEdit) { state.conflictEdit = false; entry.content = "另一操作已更新的最新内容"; entry.version += 1; return json(response, 409, { error: "记忆或来源已变化，请刷新后重试" }); }
       assert.equal(body.version, entry.version); Object.assign(entry, body, { version: entry.version + 1 }); return json(response, 200, entry);
     }
@@ -107,13 +121,14 @@ async function main() {
   browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1500, height: 1100 }, locale: "zh-CN", timezoneId: "Asia/Shanghai" });
   const page = await context.newPage(); page.setDefaultTimeout(15000); page.on("pageerror", (error) => errors.push(error.message));
+  await page.clock.install();
   await context.route("**/*", (route) => { const url = new URL(route.request().url()); if (url.origin === origin || ["data:", "blob:"].includes(url.protocol)) return route.continue(); external.add(url.origin); return route.abort("blockedbyclient"); });
   const token = [Buffer.from('{"alg":"none"}').toString("base64url"), Buffer.from('{"sub":"fixture-admin","exp":4102444800}').toString("base64url"), "fixture"].join(".");
   await page.addInitScript(({ token }) => { localStorage.setItem("artex_token", token); document.cookie = "artex_session=1; path=/; SameSite=Lax"; document.cookie = "sidebar_state=false; path=/; SameSite=Lax"; }, { token });
   const writes = (method, endpoint) => requests.filter((item) => item.method === method && item.endpoint === endpoint);
   try {
     await page.goto(origin + "/function/memories/", { waitUntil: "networkidle" });
-    await page.getByRole("heading", { name: "记忆中心", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "跨任务经验库", exact: true }).waitFor();
     await page.getByRole("button", { name: fixture.title, exact: true }).waitFor();
     const sourceHref = await page.getByRole("link", { name: "任务 #24", exact: true }).getAttribute("href");
     assert.equal(typeof sourceHref, "string");
@@ -127,12 +142,77 @@ async function main() {
     assert.equal(requests.filter((item) => ["POST", "PATCH", "DELETE", "PUT"].includes(item.method)).length, 0);
     console.log("PASS memory list loads with source ownership and no approval/default writes");
 
+    await page.getByText("等待阶段结束", { exact: true }).waitFor();
+    await page.getByText("通用经验（可跨任务）", { exact: true }).waitFor();
+    assert.equal(await page.getByText(/已学会|已经学习完成/).count(), 0);
+    const stageStates = [
+      ["queued", "阶段总结已排队"], ["running", "正在总结阶段经验"],
+      ["budget_wait", "等待调用预算"], ["retry_wait", "等待有限重试"],
+      ["idle", "当前无待总结阶段"], ["disabled", "自动学习已关闭"],
+      ["model_unavailable", "总结模型不可用"], ["waiting_stage", "等待阶段结束"],
+    ];
+    for (const [status, label] of stageStates) {
+      Object.assign(learning, { status, starts_last_hour: status === "budget_wait" ? 3 : 0, attempts_last_hour: 0 });
+      await page.getByRole("button", { name: "刷新学习状态", exact: true }).click();
+      await page.getByText(label, { exact: true }).waitFor();
+      if (status === "budget_wait") await page.getByText(/领取阶段 3 \/ 3；实际 HTTP 尝试 0 \/ 3/).waitFor();
+    }
+    Object.assign(learning, { status: "idle", processed: 2, last_result: "no_experience", last_completed_at: "2026-10-30T05:00:00Z" });
+    await page.getByRole("button", { name: "刷新学习状态", exact: true }).click();
+    await page.getByText("上次阶段总结已完成，未发现值得保存的通用经验；这不是学习失败。", { exact: true }).waitFor();
+    state.failLearning = true;
+    await page.getByRole("button", { name: "刷新学习状态", exact: true }).click();
+    await page.getByText(/学习状态读取失败：fixture learning unavailable/).waitFor();
+    await page.getByText("已处理阶段 2", { exact: true }).waitFor();
+    state.failLearning = false;
+    await page.getByRole("button", { name: "刷新学习状态", exact: true }).click();
+    await eventually(async () => await page.getByText(/学习状态读取失败/).count() === 0, "Learning-status error did not clear after an authoritative read");
+    console.log("PASS phase waiting, model unavailability, budgets, retries and empty successful summaries stay distinct");
+
+    state.learningDelay = 200;
+    const beforeSlow = requests.filter((item) => item.endpoint === "/api/memories/learning").length;
+    await page.getByRole("button", { name: "刷新学习状态", exact: true }).click();
+    await eventually(() => requests.filter((item) => item.endpoint === "/api/memories/learning").length > beforeSlow, "Delayed learning read did not start");
+    await page.evaluate(() => { Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" }); document.dispatchEvent(new Event("visibilitychange")); });
+    const hiddenReads = requests.filter((item) => item.endpoint === "/api/memories/learning").length;
+    await page.clock.fastForward(31_000); await pause(250);
+    assert.equal(requests.filter((item) => item.endpoint === "/api/memories/learning").length, hiddenReads, "Hidden memory status kept polling");
+    state.learningDelay = 0;
+    await page.evaluate(() => { Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" }); document.dispatchEvent(new Event("visibilitychange")); });
+    await eventually(() => requests.filter((item) => item.endpoint === "/api/memories/learning").length > hiddenReads, "Visible memory status did not refresh");
+    await eventually(async () => await page.getByRole("button", { name: "刷新学习状态", exact: true }).isEnabled(), "Visible memory read did not finish");
+    console.log("PASS backgrounding aborts reads and suppresses 30-second polling until visible");
+
     await page.getByRole("button", { name: "记住这个", exact: true }).click();
     await page.getByLabel("标题", { exact: true }).fill("人工合成排错经验");
     await page.getByLabel("记忆正文", { exact: true }).fill("仅在匹配版本和适用条件时复用历史排错结果。");
     await page.getByRole("button", { name: "保存记忆", exact: true }).click();
     await page.getByRole("button", { name: "人工合成排错经验", exact: true }).waitFor();
     assert.equal(writes("POST", "/api/memories").length, 1); console.log("PASS manual memory activates directly without approval");
+
+    await page.getByRole("button", { name: "记住这个", exact: true }).click();
+    await page.getByLabel("标题", { exact: true }).fill("人工目标历史记录");
+    await page.getByLabel("记忆正文", { exact: true }).fill("仅为来源任务保留的历史参考，不构成确认漏洞。");
+    await page.getByLabel("类型", { exact: true }).click();
+    await page.getByRole("option", { name: "目标记录（仅原任务）", exact: true }).click();
+    await page.getByLabel("目标地址或标识（必填）", { exact: true }).fill("TARGET");
+    assert.equal(await page.getByRole("button", { name: "保存记忆", exact: true }).isDisabled(), true);
+    assert.equal(writes("POST", "/api/memories").length, 1, "Target record submitted without task ownership");
+    await page.getByLabel("来源任务 ID（目标记录必填）", { exact: true }).fill("24");
+    await page.getByRole("button", { name: "保存记忆", exact: true }).click();
+    const targetRow = page.getByRole("row").filter({ has: page.getByRole("button", { name: "人工目标历史记录", exact: true }) });
+    await targetRow.getByText("仅原任务", { exact: true }).waitFor();
+    assert.equal(await targetRow.getByText("通用经验（可跨任务）", { exact: true }).count(), 0);
+    assert.equal(writes("POST", "/api/memories").at(-1).body.origin_task_id, 24);
+    console.log("PASS target records require task ownership and never display a global-sharing badge");
+
+    await page.getByRole("button", { name: "编辑记忆 8", exact: true }).click();
+    await page.getByLabel("类型", { exact: true }).click();
+    assert.equal(await page.getByRole("option", { name: "目标记录（仅原任务）", exact: true }).getAttribute("aria-disabled"), "true");
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    await page.getByLabel("记忆正文", { exact: true }).waitFor({ state: "hidden" });
+    console.log("PASS an existing unowned global note is not silently converted to a target record");
 
     state.conflictEdit = true;
     await page.getByRole("button", { name: "编辑记忆 7", exact: true }).click();
@@ -148,20 +228,28 @@ async function main() {
     assert.equal(writes("PATCH", "/api/memories/7").at(-1).body.version, 2); console.log("PASS edit conflict blocks overwrite and requires explicit latest-version reload");
 
     await page.getByRole("tab", { name: "记忆设置", exact: true }).click();
-    await page.getByLabel("所有任务共享", { exact: true }).waitFor();
+    await page.getByLabel("跨任务共享通用经验", { exact: true }).waitFor();
     state.conflictSettings = true;
-    await page.getByLabel("所有任务共享", { exact: true }).click();
+    await page.getByLabel("跨任务共享通用经验", { exact: true }).click();
     await page.getByRole("button", { name: "保存记忆设置", exact: true }).click();
     await page.getByText("记忆设置已发生变化，本次未覆盖。请重新读取最新设置后再修改。", { exact: true }).waitFor();
     assert.equal(await page.getByRole("button", { name: "保存记忆设置", exact: true }).isDisabled(), true);
     await page.getByRole("button", { name: "重新读取最新设置", exact: true }).click();
-    await eventually(async () => await page.getByLabel("所有任务共享", { exact: true }).getAttribute("aria-checked") === "false", "Conflicted settings did not reload");
-    await page.getByLabel("所有任务共享", { exact: true }).click();
+    await eventually(async () => await page.getByLabel("跨任务共享通用经验", { exact: true }).getAttribute("aria-checked") === "false", "Conflicted settings did not reload");
+    await page.getByLabel("跨任务共享通用经验", { exact: true }).click();
     await page.getByRole("button", { name: "保存记忆设置", exact: true }).click();
     await eventually(() => settings.global_share === true && settings.epoch === 3, "Settings save did not use the latest epoch");
     console.log("PASS settings epoch conflict locks stale save and read-only metadata is excluded");
 
     await page.getByRole("tab", { name: "记忆条目", exact: true }).click();
+    await page.getByRole("button", { name: "主动回顾历史", exact: true }).click();
+    await page.getByRole("heading", { name: "回顾已结束阶段", exact: true }).waitFor();
+    await page.getByLabel("来源任务 ID（留空为各任务的已结束阶段）", { exact: true }).fill("24");
+    await page.getByRole("button", { name: "确认回顾并排队", exact: true }).click();
+    await page.getByText("已排队 2 个已结束阶段，等待后台总结；尚未报告产生经验", { exact: true }).waitFor();
+    assert.equal(writes("POST", "/api/memories/extract").length, 1);
+    assert.deepEqual(writes("POST", "/api/memories/extract").at(-1).body, { task_id: 24 });
+    console.log("PASS historical review reports ended-stage queue counts, not completed learning or all historical data");
     await page.getByRole("button", { name: "删除记忆 8", exact: true }).click();
     await page.getByRole("alertdialog").getByText("删除这条记忆？", { exact: true }).waitFor();
     assert.equal(writes("DELETE", "/api/memories/8").length, 0);
@@ -177,9 +265,9 @@ async function main() {
     await page.getByText(/记忆列表读取失败：fixture list unavailable/).waitFor();
     await page.getByText("数量未确认", { exact: true }).waitFor();
     assert.equal(await page.getByText("暂无符合条件的记忆。", { exact: true }).count(), 0);
-    state.failList = false; entries[0].status = "source_invalid";
+    state.failList = false; for (const entry of entries) entry.status = "source_invalid";
     await page.getByRole("button", { name: "重试读取", exact: true }).click();
-    await page.getByText("来源已失效", { exact: true }).waitFor();
+    await page.getByText("来源已失效", { exact: true }).first().waitFor();
     assert.equal(await page.getByRole("link", { name: "任务 #24", exact: true }).count(), 0);
     console.log("PASS failed reads are not empty data and invalid sources lose their links");
 
@@ -192,6 +280,7 @@ async function main() {
     console.log("PASS usage metadata has independent error and retry states");
 
     settings.model_available = false; settings.model_error = "合成模型未配置";
+    learning.status = "model_unavailable";
     await page.reload({ waitUntil: "networkidle" });
     await page.getByText(/自动提炼不可用：合成模型未配置/).waitFor();
     assert.equal(await page.getByRole("button", { name: "主动回顾历史", exact: true }).isDisabled(), true);
