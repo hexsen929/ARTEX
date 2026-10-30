@@ -23,6 +23,7 @@ import {
 import { toast } from "sonner";
 
 import { MentionTextarea } from "@/components/mention-textarea";
+import { MemoryUsageButton } from "@/components/memory-usage-button";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
 import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
@@ -776,6 +777,7 @@ function ChatView({
         )}
         {running && <LiveBadge />}
         <SideQuestionButton side={side} />
+        <MemoryUsageButton conversationId={conv.id} sessionId={`conv-${conv.id}`} />
         <div className="text-muted-foreground ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-xs max-sm:w-full max-sm:flex-wrap">
           {tokenTotal.turns > 0 && (
             <span title="agent 循环轮次（模型调用次数）" className="tabular-nums">

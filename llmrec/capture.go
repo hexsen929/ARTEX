@@ -6,6 +6,8 @@ import (
 	"io"
 	"strings"
 	"sync"
+
+	"github.com/Autumn-27/artex/memcontext"
 )
 
 type captureContextKey struct{}
@@ -47,7 +49,7 @@ func NewCapture(ctx context.Context) (context.Context, *Capture) {
 // off. Callers must tolerate nil — recording is a toggle, and non-recorded
 // providers dial through the same transport.
 func CaptureFrom(ctx context.Context) *Capture {
-	if ctx == nil {
+	if ctx == nil || memcontext.MetadataOnly(ctx) {
 		return nil
 	}
 	c, _ := ctx.Value(captureContextKey{}).(*Capture)

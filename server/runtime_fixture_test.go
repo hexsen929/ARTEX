@@ -15,6 +15,7 @@ func newTestServer(t *testing.T, parent context.Context, manager *Manager, skill
 			s.engine.StopTask(task.ID)
 		}
 		s.archiveWG.Wait()
+		s.memoryWG.Wait()
 		if s.side != nil && s.side.done != nil {
 			<-s.side.done
 		}

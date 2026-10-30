@@ -23,6 +23,7 @@ import (
 	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/llmguard"
 	"github.com/Autumn-27/artex/llmrec"
+	"github.com/Autumn-27/artex/memcontext"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/compaction"
 	"github.com/Autumn-27/norma/llm"
@@ -371,7 +372,9 @@ func (c Config) newProvider(client *http.Client, limiter *RequestLimiter) (llm.P
 	// worker/planner。包在这里(组装处),recorder/pool 都在它之外,归一化错误可被
 	// llm_usage 记录并触发安全窗口内的故障转移。外层 HTTP 总预算经派生 context
 	// 保留并在配置切换间共享;Codex Complete 的流式缓冲也受同一墙钟保护。
-	return llmguard.Wrap(wrapCallTimeout(provider, c)), nil
+	// Memory requests must lose vendor-echoed bodies before a recorder, retry
+	// loop or routing pool can log their errors. Non-memory calls are unchanged.
+	return memoryPrivateProvider{inner: llmguard.Wrap(wrapCallTimeout(provider, c))}, nil
 }
 
 // IsQuotaExhaustedMessage deliberately recognizes only explicit balance,
@@ -465,9 +468,17 @@ func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error
 	// them: norma builds the request body internally and decodes the SSE response
 	// before either reaches the recorder.
 	capt := llmrec.CaptureFrom(req.Context())
-	capt.SetRequest(requestBodySnapshot(req))
+	if capt != nil {
+		capt.SetRequest(requestBodySnapshot(req))
+	}
 
 	if err := llmguard.TakeHTTP(req.Context()); err != nil {
+		return nil, err
+	}
+	// The enclosing shared rate limiter has finished waiting. Revalidate on
+	// every actual SDK HTTP attempt, including retries and provider failover,
+	// rather than admitting an old body before it enters the queue.
+	if err := memcontext.Validate(req.Context()); err != nil {
 		return nil, err
 	}
 	responsesAttempt := startResponsesErrorAttempt(req)

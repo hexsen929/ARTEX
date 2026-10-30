@@ -6,6 +6,9 @@ on:
   workflow_call:
 permissions:
   contents: read
+concurrency:
+  group: tests-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 jobs:
   # Pin the validated image: ubuntu-latest now selects 26.04, which is not
   # supported by the pinned Playwright browser runtime used below.
@@ -184,6 +187,13 @@ jobs:
           ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
         run: node scripts/update-lifecycle-ui-smoke.cjs
+        working-directory: web
+      - name: Shared automatic memory browser regressions
+        env:
+          ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
+          ARTEX_UI_ARTIFACTS: ${{ runner.temp }}/memory-ui-artifacts
+        run: node scripts/memory-ui-smoke.cjs
         working-directory: web
       - uses: actions/upload-artifact@v4
         if: always()
