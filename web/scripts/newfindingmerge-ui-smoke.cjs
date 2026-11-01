@@ -14,16 +14,33 @@ const { chromium } = require(path.resolve(process.env.ARTEX_PLAYWRIGHT_DIR));
 const output = path.resolve(__dirname, "..", "out");
 const taskName = "合成发现回归任务";
 const stamp = "2026-10-29T04:00:00Z";
-const report = "## 复现步骤\n\n### 步骤 1：核对合成证据\n\n本步骤仅展示已保存的合成内容，不执行任何请求。\n\n## 最终结果\n\n待人工核对。";
+const screenshotMarkdown = "![UI_FIXTURE_SCREENSHOT](workspace://findings/screenshots/legacy-synthetic.png)";
+const report = "## 复现步骤\n\n### 步骤 1：核对合成证据\n\n本步骤仅展示已保存的合成内容，不执行任何请求。\n\n## 最终结果\n\n待人工核对。\n\n" + screenshotMarkdown;
 const findings = ["unverified", "confirmed"].map((verification_status, index) => ({
   id: String(501 + index), finding_id: String(501 + index), task_id: "101",
   task_name: taskName, task_description: taskName, ts: stamp, severity: "high",
   status: "pending", verification_status, verification_note: "UI_FIXTURE_ONLY",
   vulnclass: "Synthetic", name: `UI_FIXTURE_${verification_status.toUpperCase()}`,
   summary: "合成发现；不含真实漏洞、目标或密钥。", evidence: "UI_FIXTURE_EVIDENCE",
-  report, evidence_version: 1, assets: [], traffic_count: 0, inherited: false,
+  report, report_conversation_id: 999, evidence_version: 1, assets: [], traffic_count: 1, inherited: false,
 }));
 const requests = [], unexpected = new Set(), external = new Set(), sideItems = [];
+// These are saved synthetic packets, never an instruction to contact fixture.invalid.
+const binding = {
+  id: "701", finding_id: "501", snapshot_id: "801", role: "proof", note: "UI_FIXTURE_BOUND_PACKET", position: 0, created_at: stamp,
+  snapshot: { id: "801", source_traffic_id: "601", captured_at: 1793246400,
+    url: "https://fixture.invalid/demo", method: "POST", status: 200, content_type: "text/plain",
+    req_head: "POST /demo HTTP/1.1\nHost: fixture.invalid\nContent-Type: text/plain", resp_head: "HTTP/1.1 200 OK\nContent-Type: text/plain",
+    req_hash: "fixture-request-hash", resp_hash: "fixture-response-hash", req_len: 33, resp_len: 19 },
+};
+const packet = {
+  binding,
+  request: { content: "FIXTURE_PACKET_MATCH\nsecond line", offset: 0, total: 33, next_offset: 33, truncated: false, binary: false },
+  response: { content: "UI_FIXTURE_RESPONSE", offset: 0, total: 19, next_offset: 19, truncated: false, binary: false },
+};
+const reportItems = [{ seq: 1, worker: "reporter", ts: stamp, kind: "text", summary: "UI_FIXTURE_EXISTING_REPORT_HISTORY", detail: "UI_FIXTURE_EXISTING_REPORT_HISTORY\n\n" + screenshotMarkdown }];
+let reportResolves = 0;
+let reportSends = 0;
 function json(response, code, value) {
   response.writeHead(code, { "Content-Type": "application/json", "Cache-Control": "no-store" });
   response.end(JSON.stringify(value));
@@ -41,6 +58,14 @@ function pageValue(url, items, extra = {}) {
 async function serveAPI(request, response, url) {
   const endpoint = url.pathname, method = request.method || "GET";
   requests.push({ method, endpoint, query: Object.fromEntries(url.searchParams) });
+  if (endpoint === "/api/workspace/preview") {
+    assert.equal(method, "GET");
+    assert.equal(url.searchParams.get("path"), "findings/screenshots/legacy-synthetic.png");
+    assert.equal(url.searchParams.get("finding_id"), "501", "Screenshot preview lost its real finding identity");
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==", "base64");
+    response.writeHead(200, { "Content-Type": "image/png", "Content-Length": png.length, "Cache-Control": "no-store", "X-Report-Screenshot-Timestamp": stamp });
+    return response.end(png);
+  }
   if (endpoint === "/api/health") return json(response, 200, { ok: true, service: "synthetic", version: "fixture" });
   if (endpoint === "/api/auth/status") return json(response, 200, { initialized: true });
   if (endpoint === "/api/update/check") return json(response, 200, { has_update: false, current: "fixture" });
@@ -84,7 +109,35 @@ async function serveAPI(request, response, url) {
   if (endpoint === "/api/findings/503/inline-history") return json(response, 200, { events: [] });
   if (endpoint === "/api/exploration/findings/501/retests") return json(response, 200, { retests: [] });
   if (endpoint === "/api/exploration/findings/503/retests") return json(response, 200, { retests: [] });
-  if (endpoint === "/api/exploration/findings/501/traffic") return json(response, 200, { finding_id: "501", version: 1, report_version: 1, bindings: [] });
+  if (endpoint === "/api/exploration/findings/501/traffic") return json(response, 200, { finding_id: "501", version: 1, report_version: 1, bindings: [binding] });
+  if (endpoint === "/api/exploration/findings/501/traffic/701") return json(response, 200, packet);
+  if (endpoint === "/api/exploration/findings/501/report-conversation" && method === "POST") {
+    reportResolves += 1;
+    // Failure is visible and must not turn into an unbound generic conversation.
+    if (reportResolves === 1) return json(response, 503, { error: "UI_FIXTURE_REPORT_RESOLVE_FAILURE" });
+    return json(response, 200, { conversation_id: 901, task_id: 101, finding_id: 501 });
+  }
+  if (endpoint === "/api/conversations/901/messages" && method === "POST") {
+    let raw = "";
+    for await (const chunk of request) { raw += chunk; assert.ok(raw.length < 8192); }
+    const body = JSON.parse(raw);
+    assert.equal(body.message, "仅整理现有证据，不增加测试结论");
+    reportSends += 1;
+    reportItems.push(
+      { seq: 2, worker: "reporter", ts: stamp, kind: "user", summary: body.message, detail: body.message },
+      { seq: 3, worker: "reporter", ts: stamp, kind: "text", summary: "UI_FIXTURE_REPORT_EDIT_ANSWER", detail: "UI_FIXTURE_REPORT_EDIT_ANSWER" },
+    );
+    return json(response, 200, { status: "started" });
+  }
+  if (endpoint === "/api/conversations/901/messages" && method === "GET") {
+    const since = Number(url.searchParams.get("since") || 0);
+    return json(response, 200, { items: reportItems.filter((item) => item.seq > since), cursor: reportItems.at(-1).seq, running: false, hasMore: false });
+  }
+  if (/^\/api\/conversations\/901\/messages\/\d+$/.test(endpoint) && method === "GET") {
+    const item = reportItems.find((item) => item.seq === Number(endpoint.split("/").at(-1)));
+    assert.ok(item, "Unknown synthetic reporter message detail");
+    return json(response, 200, { detail: item.detail });
+  }
   if (endpoint === "/api/exploration/findings/503/traffic") return json(response, 200, { finding_id: "503", version: 1, report_version: 1, bindings: [] });
   if (endpoint === "/api/exploration/findings/501/generate-report" && method === "POST") return json(response, 200, { queued: true, agent_key: "reporter", finding_id: 501, finding_node_id: 501 });
   if (endpoint === "/api/exploration/findings/501") return json(response, 200, { ...findings[0], inherited: url.searchParams.has("context_task") && url.searchParams.get("context_task") !== "101", source_task_id: "101" });
@@ -175,6 +228,8 @@ async function main() {
   await page.getByText("步骤同时展示，数据包默认隐藏；需要核对原始请求时再按步骤展开。", { exact: true }).waitFor();
   await page.getByText("证据 / PoC", { exact: true }).waitFor();
   await page.getByText("详细报告", { exact: true }).waitFor();
+  await eventually(() => requests.some((r) => r.endpoint === "/api/workspace/preview"), "Report screenshot preview was not requested");
+  assert.ok(requests.filter((r) => r.endpoint === "/api/workspace/preview").every((r) => r.query.finding_id === "501"), "Report screenshot used a task/viewing context instead of its actual finding");
   assert.equal(await page.getByText("漏洞复测", { exact: true }).count(), 1, "Retest panel was duplicated by conflict resolution");
   await page.getByRole("button", { name: "重新生成步骤与报告", exact: true }).click();
   await eventually(() => requests.some((r) => r.method === "POST" && r.endpoint.endsWith("/generate-report")), "Report generation action was not preserved");
@@ -195,6 +250,7 @@ async function main() {
   console.log("PASS finding analysis is task-bound read-only Q&A, not an executable Auto conversation");
   // Next integrates the native History API with useSearchParams. Keep the same
   // document/component alive so the previous delayed report callback still runs.
+  const previewsBeforeInherited = requests.filter((r) => r.endpoint === "/api/workspace/preview").length;
   await page.evaluate(() => window.history.pushState(null, "", "/function/findings/detail/?id=501&context_task=202"));
   await page.getByText("来源任务 #101 · 只读", { exact: true }).waitFor();
   assert.equal(await page.getByRole("button", { name: "更新验证", exact: true }).count(), 0);
@@ -204,6 +260,9 @@ async function main() {
   await new Promise((resolve) => setTimeout(resolve, 2300));
   assert.equal(await page.getByRole("button", { name: "更新验证", exact: true }).count(), 0);
   assert.equal(await page.getByRole("button", { name: "重新生成步骤与报告", exact: true }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: "调整报告", exact: true }).count(), 0, "Inherited view exposed the report editing action");
+  await eventually(() => requests.filter((r) => r.endpoint === "/api/workspace/preview").length > previewsBeforeInherited, "Inherited report did not reload the associated screenshot");
+  assert.ok(requests.filter((r) => r.endpoint === "/api/workspace/preview").every((r) => r.query.finding_id === "501"), "Inherited screenshot used context_task instead of source finding identity");
   console.log("PASS inherited detail remains read-only after delayed report refresh");
   await page.getByRole("button", { name: "询问 Auto Agent（只读）", exact: true }).click();
   await page.getByRole("textbox", { name: "旁路问题", exact: true }).waitFor();
@@ -214,7 +273,99 @@ async function main() {
   await page.getByText("无任务关联，分析入口不可用", { exact: true }).waitFor();
   assert.ok(await page.getByRole("button", { name: "询问 Auto Agent（只读）", exact: true }).isDisabled());
   assert.equal(requests.filter((r) => r.method === "POST" && r.endpoint.includes("/conversations")).length, 0);
+  const orphanReportButton = page.getByRole("button", { name: "调整报告", exact: true });
+  assert.ok((await orphanReportButton.count()) === 0 || await orphanReportButton.isDisabled(), "Orphan finding exposed executable report editing");
   console.log("PASS inherited analysis uses actual owner; orphan finding has no execution fallback");
+
+  // Reporter editing is deliberately separate from task-bound read-only Auto Q&A.
+  // Neither the stored ID nor the finding DTO's old ID may select the conversation.
+  await page.evaluate(() => {
+    localStorage.setItem("artex.finding.reporter-conversation.501", "999");
+    localStorage.setItem("artex.finding.auto-conversation.501", "999");
+  });
+  await page.goto(origin + "/function/findings/detail/?id=501", { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "调整报告", exact: true }).click();
+  let reportDialog = page.getByRole("dialog", { name: "调整漏洞报告", exact: true });
+  await reportDialog.getByText("UI_FIXTURE_REPORT_RESOLVE_FAILURE", { exact: false }).waitFor();
+  assert.ok(await reportDialog.getByRole("textbox", { name: "报告调整要求", exact: true }).isDisabled());
+  assert.equal(reportSends, 0, "Failed report resolution still sent a message");
+  assert.equal(requests.filter((r) => r.endpoint.includes("/conversations/999")).length, 0, "Client-trusted report conversation ID was used");
+  assert.equal(requests.filter((r) => r.method === "POST" && r.endpoint === "/api/conversations").length, 0, "Resolver failure created an unbound report conversation");
+  await page.keyboard.press("Escape");
+  await reportDialog.waitFor({ state: "hidden" });
+  const previewsBeforeReporter = requests.filter((r) => r.endpoint === "/api/workspace/preview").length;
+  await page.getByRole("button", { name: "调整报告", exact: true }).click();
+  reportDialog = page.getByRole("dialog", { name: "调整漏洞报告", exact: true });
+  await reportDialog.getByText("UI_FIXTURE_EXISTING_REPORT_HISTORY", { exact: true }).waitFor();
+  await eventually(() => requests.filter((r) => r.endpoint === "/api/workspace/preview").length > previewsBeforeReporter, "Report transcript did not inherit its finding identity for screenshot preview");
+  assert.equal(reportResolves, 2, "Reopening the report editor did not revalidate its real binding");
+  await reportDialog.getByRole("textbox", { name: "报告调整要求", exact: true }).fill("仅整理现有证据，不增加测试结论");
+  await reportDialog.getByRole("button", { name: "发送报告调整", exact: true }).click();
+  await reportDialog.getByText("UI_FIXTURE_REPORT_EDIT_ANSWER", { exact: true }).waitFor();
+  assert.equal(reportSends, 1, "Report editing replayed the submitted action");
+  await page.keyboard.press("Escape");
+  await reportDialog.waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: "调整报告", exact: true }).click();
+  reportDialog = page.getByRole("dialog", { name: "调整漏洞报告", exact: true });
+  await reportDialog.getByText("UI_FIXTURE_REPORT_EDIT_ANSWER", { exact: true }).waitFor();
+  assert.equal(reportResolves, 3, "Report editor reused an unchecked cached conversation ID");
+  assert.equal(reportSends, 1, "Reopening a report conversation repeated a send");
+  assert.equal(requests.filter((r) => r.method === "POST" && r.endpoint === "/api/conversations").length, 0);
+  assert.equal(requests.filter((r) => r.endpoint.includes("/conversations/999")).length, 0);
+  await page.keyboard.press("Escape");
+  await reportDialog.waitFor({ state: "hidden" });
+  console.log("PASS report editing resolves a real bound reporter conversation, fails closed, preserves history and never replays sends");
+
+  // The image viewer must reset both scale and pan, not leave a 100% image offscreen.
+  await page.getByRole("button", { name: "放大查看报告截图", exact: true }).first().click({ force: true });
+  const imageDialog = page.getByRole("dialog").filter({ has: page.getByRole("button", { name: "重置图片大小", exact: true }) });
+  await imageDialog.getByRole("button", { name: "放大图片", exact: true }).click();
+  await imageDialog.getByRole("button", { name: "放大图片", exact: true }).click();
+  const transformedImage = imageDialog.getByRole("img", { name: "UI_FIXTURE_SCREENSHOT", exact: true }).locator("..");
+  const panViewport = transformedImage.locator("..");
+  const box = await panViewport.boundingBox();
+  assert.ok(box && box.width > 100 && box.height > 100, "Screenshot pan viewport was unavailable");
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 80, box.y + box.height / 2 + 45, { steps: 3 });
+  await page.mouse.up();
+  assert.match(await transformedImage.evaluate((element) => element.style.transform), /translate\((?!0px,\s*0px)/, "Dragging a zoomed screenshot did not update its pan");
+  await imageDialog.getByRole("button", { name: "重置图片大小", exact: true }).click();
+  await imageDialog.getByText("100%", { exact: true }).waitFor();
+  assert.match(await transformedImage.evaluate((element) => element.style.transform), /translate\(0px,\s*0px\) scale\(1\)/, "Resetting the screenshot left a nonzero pan offset");
+  await page.keyboard.press("Escape");
+  await imageDialog.waitFor({ state: "hidden" });
+  assert.ok(requests.filter((r) => r.endpoint === "/api/workspace/preview").every((r) => r.query.finding_id === "501"));
+  console.log("PASS report, inherited view and transcript screenshots keep finding identity; zoom reset also clears pan");
+
+  // The new packet editor must preserve the old search's visible highlighting.
+  await page.getByRole("button", { name: "查看数据包", exact: true }).click();
+  const packetEditor = page.getByRole("textbox", { name: "HTTP 报文代码", exact: true }).first();
+  await packetEditor.waitFor();
+  await page.getByRole("textbox", { name: "搜索报文内容", exact: true }).first().fill("FIXTURE_PACKET_MATCH");
+  await page.getByText("1 处命中", { exact: true }).first().waitFor();
+  await eventually(async () => await packetEditor.locator(".cm-searchMatch").count() > 0, "Packet search counted matches without highlighting them");
+  console.log("PASS read-only packet search both counts and highlights matches");
+  const sendsBeforeSeed = requests.filter((r) => r.endpoint === "/api/repeater/send").length;
+  await page.getByRole("button", { name: "送入请求重发", exact: true }).first().click();
+  const requestEditor = page.getByRole("textbox", { name: "请求", exact: true });
+  await requestEditor.waitFor();
+  assert.ok((await requestEditor.innerText()).includes("FIXTURE_PACKET_MATCH"), "Saved evidence did not seed the request draft");
+  assert.equal(requests.filter((r) => r.endpoint === "/api/repeater/send").length, sendsBeforeSeed, "Prefilling the repeater transmitted a request");
+  const originalEditor = await requestEditor.elementHandle();
+  await requestEditor.click();
+  await requestEditor.press("ControlOrMeta+End");
+  await requestEditor.press("Enter");
+  await requestEditor.pressSequentially("UI_FIXTURE_UNDO_MARKER");
+  assert.ok((await requestEditor.innerText()).includes("UI_FIXTURE_UNDO_MARKER"));
+  await page.getByRole("button", { name: "切换为不换行", exact: true }).first().click();
+  assert.ok(await originalEditor.evaluate((element) => element.isConnected), "Changing line wrapping destroyed the editor and its history");
+  await requestEditor.click();
+  await requestEditor.press("ControlOrMeta+z");
+  await eventually(async () => !(await requestEditor.innerText()).includes("UI_FIXTURE_UNDO_MARKER"), "Undo history was lost after changing line wrapping");
+  assert.ok((await requestEditor.innerText()).includes("FIXTURE_PACKET_MATCH"), "Undo erased the original evidence draft");
+  assert.equal(requests.filter((r) => r.endpoint === "/api/repeater/send").length, sendsBeforeSeed);
+  console.log("PASS evidence prefill never sends; undo survives packet editor reconfiguration");
   assert.deepEqual(errors, [], "Findings UI raised browser exceptions");
   assert.deepEqual([...unexpected], [], "Unexpected API contract calls");
   assert.deepEqual([...external], [], "Fixture attempted an external connection");

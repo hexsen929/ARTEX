@@ -82,6 +82,24 @@ function packetText(detail: FindingTrafficDetail, side: "request" | "response") 
   return [head, body].filter(Boolean).join("\n\n").trim();
 }
 
+function formatCapturedAt(value: number | string | null | undefined) {
+  if (value === null || value === undefined || value === "") return "";
+  const numeric = typeof value === "number" ? value : Number(value);
+  const date = Number.isFinite(numeric)
+    ? new Date(numeric < 10_000_000_000 ? numeric * 1000 : numeric)
+    : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
 function PacketDisclosure({
   findingId,
   bindingId,
@@ -181,10 +199,13 @@ function PacketDisclosure({
           ) : null}
           {detail ? (
             <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2 text-xs">
+              <div className="flex min-w-0 items-center gap-2 text-xs">
                 <Badge variant="secondary">{detail.binding.snapshot.method}</Badge>
                 <Badge variant="outline">{detail.binding.snapshot.status}</Badge>
-                <span className="break-all text-muted-foreground">{detail.binding.snapshot.url}</span>
+                <span className="min-w-0 flex-1 break-all text-muted-foreground">{detail.binding.snapshot.url}</span>
+                <span className="shrink-0 whitespace-nowrap text-muted-foreground">
+                  {formatCapturedAt(detail.binding.snapshot.captured_at) || "时间未知"}
+                </span>
               </div>
               <div>
                 <p className="mb-1 text-[11px] text-muted-foreground">请求 Request</p>
@@ -246,7 +267,7 @@ export function FindingReproductionPanel({ finding, contextTask }: { finding: Fi
       <CardContent className="space-y-3">
         {overviewSections.map((section) => (
           <div key={section.heading} className="rounded-lg bg-muted/30 px-3 py-2.5 text-sm">
-            <Markdown text={`## ${section.heading}\n\n${section.content}`} />
+            <Markdown screenshotFindingId={finding.id} text={`## ${section.heading}\n\n${section.content}`} />
           </div>
         ))}
         {steps.map((step, index) => {
@@ -262,7 +283,7 @@ export function FindingReproductionPanel({ finding, contextTask }: { finding: Fi
                     <h3 className="min-w-0 break-words font-semibold text-sm leading-5">{step.title}</h3>
                   </div>
                 </div>
-                {step.body ? <Markdown text={step.body} /> : null}
+                {step.body ? <Markdown screenshotFindingId={finding.id} text={step.body} /> : null}
                 <PacketDisclosure findingId={finding.id} bindingId={binding?.id} contextTask={contextTask} />
               </div>
             </div>
@@ -270,9 +291,9 @@ export function FindingReproductionPanel({ finding, contextTask }: { finding: Fi
         })}
         {outcome || rootCause || remediation ? (
           <div className="space-y-3 border-t pt-3">
-            {outcome ? <Markdown text={`## 最终结果\n\n${outcome}`} /> : null}
-            {rootCause ? <Markdown text={`## 根因分析\n\n${rootCause}`} /> : null}
-            {remediation ? <Markdown text={`## 修复建议\n\n${remediation}`} /> : null}
+            {outcome ? <Markdown screenshotFindingId={finding.id} text={`## 最终结果\n\n${outcome}`} /> : null}
+            {rootCause ? <Markdown screenshotFindingId={finding.id} text={`## 根因分析\n\n${rootCause}`} /> : null}
+            {remediation ? <Markdown screenshotFindingId={finding.id} text={`## 修复建议\n\n${remediation}`} /> : null}
           </div>
         ) : null}
       </CardContent>

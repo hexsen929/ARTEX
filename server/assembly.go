@@ -380,6 +380,13 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		if err != nil {
 			return 0, err
 		}
+		if item.Kind == "credential" {
+			// The durable database row is the source of truth; this wake-up only
+			// reduces latency. The recovery ticker handles missed notifications.
+			if agent.CredentialRecorded != nil {
+				agent.CredentialRecorded()
+			}
+		}
 		return item.ID, nil
 	}
 	// Seed the built-in domain tools (first-insert only; DO NOTHING preserves edits).

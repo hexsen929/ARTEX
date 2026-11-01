@@ -11,7 +11,7 @@ if (!process.env.CI || !process.env.ARTEX_PLAYWRIGHT_DIR) throw new Error("Run i
 const { chromium } = require(path.resolve(process.env.ARTEX_PLAYWRIGHT_DIR));
 const output = path.resolve(__dirname, "..", "out");
 const stamp = "2026-10-30T00:00:00Z";
-const state = { recordsFail: true, settingsFail: true, tasksFail: true, secondDetailFail: true, conversationUsageFail: true };
+const state = { recordsFail: true, settingsFail: true, tasksFail: true, secondDetailFail: true, conversationUsageFail: true, metricsMode: "initial" };
 const requests = [], unexpected = new Set(), external = new Set();
 const records = [1, 2].map((id) => ({ id, ts: stamp, model: `UI_FIXTURE_MODEL_${id}`, profile_name: `UI_FIXTURE_PROFILE_${id}`, session_id: `fixture-${id}`, task_id: "42", worker: "worker", latency_ms: 100, input_tokens: 10, output_tokens: 2, cache_read: 0, cache_write: 0, status: "ok" }));
 function json(response, code, value) {
@@ -48,6 +48,18 @@ async function serveAPI(request, response, url) {
   if (endpoint === "/api/llm/records/2") {
     if (state.secondDetailFail) return error(response, "UI_FIXTURE_DETAIL_UNAVAILABLE");
     return json(response, 200, { ...records[1], request_body: "UI_FIXTURE_CURRENT_REQUEST", response_body: "UI_FIXTURE_CURRENT_RESPONSE" });
+  }
+  if (endpoint === "/api/system/metrics") {
+    if (state.metricsMode === "error") return error(response, "UI_FIXTURE_METRICS_UNAVAILABLE");
+    const unsupported = state.metricsMode === "unsupported", system = state.metricsMode === "system";
+    return json(response, 200, {
+      scope: unsupported ? "unsupported" : system ? "system" : "cgroup", supported: !unsupported,
+      timestamp: new Date().toISOString(), container_metrics: !unsupported && !system,
+      cpu: { available: state.metricsMode === "ready", used_bytes: 0, total_bytes: 0, percent: 12.5 },
+      memory: { available: !unsupported && !system, used_bytes: 42, total_bytes: 100, percent: 42 },
+      disk: { available: !unsupported, used_bytes: 17, total_bytes: 100, percent: 17 },
+      data_disk: { available: !unsupported, used_bytes: 17, total_bytes: 100, percent: 17 },
+    });
   }
   if (endpoint === "/api/tasks") return json(response, 200, { tasks: [], active: "" });
   if (endpoint === "/api/exploration/findings") return json(response, 200, []);
@@ -129,6 +141,23 @@ async function main() {
   assert.equal(await page.locator("#llm-rec-toggle").getAttribute("data-state"), "unchecked");
   console.log("PASS failed recorder save keeps prior state and requires refresh");
   await page.goto(origin + "/dashboard/", { waitUntil: "networkidle" });
+  const resources = page.getByTestId("dashboard-system-metrics");
+  await resources.getByTitle("CPU 未知", { exact: true }).waitFor();
+  await resources.getByTitle("内存 42.0%", { exact: true }).waitFor();
+  assert.equal(await resources.getByText("0.0%", { exact: true }).count(), 0);
+  state.metricsMode = "ready";
+  await resources.getByTitle("CPU 12.5%", { exact: true }).waitFor();
+  state.metricsMode = "error";
+  await eventually(async () => (await resources.innerText()) === "资源状态：读取失败，当前值未知", "Failed resource poll retained old values");
+  assert.equal(await resources.getByTitle("CPU 12.5%", { exact: true }).count(), 0);
+  state.metricsMode = "unsupported";
+  await eventually(async () => (await resources.innerText()) === "资源状态：暂不支持", "Unsupported platform was displayed as numeric resource usage");
+  state.metricsMode = "system";
+  await resources.getByText("系统资源", { exact: true }).waitFor();
+  await resources.getByTitle("CPU 未知", { exact: true }).waitFor();
+  await resources.getByTitle("内存 未知", { exact: true }).waitFor();
+  assert.equal(await resources.getByText("容器资源", { exact: true }).count(), 0);
+  console.log("PASS resource metrics distinguish CPU warm-up, read failure, unsupported platforms and disk-only hosts");
   const summary = page.getByTestId("dashboard-token-summary");
   await summary.getByText("未知", { exact: true }).waitFor();
   await page.getByTestId("dashboard-token-usage").getByText(/当前用量未知，不表示零消耗/).waitFor();

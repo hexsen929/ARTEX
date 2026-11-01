@@ -21,6 +21,7 @@ type exportedScreenshot struct {
 	ReportPath  string `json:"report_path"`
 	ArchivePath string `json:"archive_path"`
 	SourcePath  string `json:"-"`
+	taskID      int64
 	CapturedAt  string `json:"captured_at"`
 }
 
@@ -46,7 +47,7 @@ func writeFindingsZipEntries(zw *zip.Writer, findings []*db.DBFinding, stage str
 			name = fmt.Sprintf("%s-%d.md", strings.TrimSuffix(base, ".md"), n+1)
 		}
 		used[base]++
-		reportText, screenshots, err := prepareFindingExportReport(report.SingleFindingMarkdown(f, now), f.ID, workspaceDir)
+		reportText, screenshots, err := prepareFindingExportReport(report.SingleFindingMarkdown(f, now), f, workspaceDir)
 		if err != nil {
 			return err
 		}
@@ -58,7 +59,7 @@ func writeFindingsZipEntries(zw *zip.Writer, findings []*db.DBFinding, stage str
 			return err
 		}
 		for _, screenshot := range screenshots {
-			if err := copyZipFile(zw, screenshot.ArchivePath, screenshot.SourcePath); err != nil {
+			if err := copyScreenshotZipFile(zw, screenshot.ArchivePath, screenshot.SourcePath, workspaceDir, screenshot.taskID); err != nil {
 				return err
 			}
 		}
@@ -155,8 +156,10 @@ func buildFindingsEvidenceZip(path string, findings []*db.DBFinding, stage strin
 	return nil
 }
 
-func copyZipFile(zw *zip.Writer, archivePath, sourcePath string) error {
-	in, err := os.Open(sourcePath)
+func copyScreenshotZipFile(zw *zip.Writer, archivePath, sourcePath, workspaceDir string, taskID int64) error {
+	// Reopen through the same owner capability immediately before copying. A
+	// symlink planted after manifest preparation must never reach the ZIP.
+	in, _, err := openReportScreenshot(workspaceDir, taskID, 0, sourcePath)
 	if err != nil {
 		return err
 	}
@@ -169,7 +172,17 @@ func copyZipFile(zw *zip.Writer, archivePath, sourcePath string) error {
 	return err
 }
 
-func prepareFindingExportReport(markdown string, findingID int64, workspaceDir string) (string, []exportedScreenshot, error) {
+func prepareFindingExportReport(markdown string, finding *db.DBFinding, workspaceDir string) (string, []exportedScreenshot, error) {
+	if finding == nil {
+		return markdown, nil, nil
+	}
+	var taskID int64
+	if finding.TaskID != nil {
+		taskID = *finding.TaskID
+	}
+	// This ZIP builder has no live database authority. Export only screenshots
+	// already materialized inside the finding's task archive, never a naked
+	// report_conversation_id imported from an old archive or untrusted snapshot.
 	var out strings.Builder
 	var screenshots []exportedScreenshot
 	seen := map[string]bool{}
@@ -177,22 +190,26 @@ func prepareFindingExportReport(markdown string, findingID int64, workspaceDir s
 	for _, match := range screenshotMarkdownLink.FindAllStringSubmatchIndex(markdown, -1) {
 		out.WriteString(markdown[last:match[0]])
 		raw := markdown[match[4]:match[5]]
-		source, ok := resolveExportScreenshot(workspaceDir, raw)
-		if !ok {
+		file, source, err := openReportScreenshot(workspaceDir, taskID, 0, raw)
+		if err != nil {
 			out.WriteString(markdown[match[0]:match[1]])
 			last = match[1]
 			continue
 		}
-		archivePath := filepath.ToSlash(fmt.Sprintf("screenshots/%d/%s", findingID, filepath.Base(source)))
+		info, statErr := file.Stat()
+		closeErr := file.Close()
+		if err := errors.Join(statErr, closeErr); err != nil {
+			return "", nil, err
+		}
+		archivePath := filepath.ToSlash(fmt.Sprintf("screenshots/%d/%s", finding.ID, filepath.Base(source)))
 		if !seen[archivePath] {
-			info, statErr := os.Stat(source)
-			if statErr != nil {
-				return "", nil, statErr
-			}
-			screenshots = append(screenshots, exportedScreenshot{ReportPath: raw, ArchivePath: archivePath, SourcePath: source, CapturedAt: info.ModTime().Format("2006-01-02 15:04:05")})
+			screenshots = append(screenshots, exportedScreenshot{
+				ReportPath: raw, ArchivePath: archivePath, SourcePath: source,
+				CapturedAt: reportScreenshotTimestamp(info.ModTime()), taskID: taskID,
+			})
 			seen[archivePath] = true
 		}
-		// Preserve the original alt text and only replace the image URL.
+		// Preserve the original alt text and replace only this finding's image URL.
 		out.WriteString(markdown[match[0]:match[4]])
 		out.WriteString(archivePath)
 		out.WriteString(markdown[match[5]:match[1]])
@@ -200,45 +217,4 @@ func prepareFindingExportReport(markdown string, findingID int64, workspaceDir s
 	}
 	out.WriteString(markdown[last:])
 	return out.String(), screenshots, nil
-}
-
-func resolveExportScreenshot(workspaceDir, raw string) (string, bool) {
-	value := strings.TrimSpace(raw)
-	value = strings.TrimPrefix(value, "workspace://")
-	value = strings.TrimPrefix(value, "file://")
-	if value == "" {
-		return "", false
-	}
-	if filepath.IsAbs(value) {
-		candidate := filepath.Clean(value)
-		base := filepath.Clean(workspaceDir)
-		if candidate != base && !strings.HasPrefix(candidate, base+string(os.PathSeparator)) {
-			return "", false
-		}
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, true
-		}
-		return "", false
-	}
-	rel := filepath.Clean(strings.TrimPrefix(value, "/"))
-	const prefix = "findings" + string(os.PathSeparator) + "screenshots" + string(os.PathSeparator)
-	if rel == "." || !strings.HasPrefix(rel, prefix) || strings.Contains(rel, ".."+string(os.PathSeparator)) {
-		return "", false
-	}
-	matches, err := filepath.Glob(filepath.Join(filepath.Clean(workspaceDir), "sessions", "*", rel))
-	if err != nil || len(matches) == 0 {
-		return "", false
-	}
-	var newest string
-	var newestTime int64
-	for _, candidate := range matches {
-		info, statErr := os.Stat(candidate)
-		if statErr != nil || info.IsDir() {
-			continue
-		}
-		if newest == "" || info.ModTime().UnixNano() > newestTime {
-			newest, newestTime = candidate, info.ModTime().UnixNano()
-		}
-	}
-	return newest, newest != ""
 }

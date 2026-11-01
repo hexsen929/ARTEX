@@ -10,6 +10,7 @@ import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
 import { FindingAutoChat } from "@/components/finding-auto-chat";
+import { FindingReportChat } from "@/components/finding-report-chat";
 import { FindingInlineHistory } from "@/components/finding-inline-history";
 import { FindingReproductionPanel } from "@/components/finding-reproduction-panel";
 import { FindingRetestPanel } from "@/components/finding-retest-panel";
@@ -75,6 +76,7 @@ function FindingDetailInner() {
   const [tab, setTab] = React.useState("overview");
   const [reportGenerating, setReportGenerating] = React.useState(false);
   const [autoChatOpen, setAutoChatOpen] = React.useState(false);
+  const [reportChatOpen, setReportChatOpen] = React.useState(false);
   const scopeKey = JSON.stringify([id, contextTaskId]);
   const activeScope = React.useRef(scopeKey);
   const loadSequence = React.useRef(0);
@@ -227,6 +229,12 @@ function FindingDetailInner() {
             询问 Auto Agent（只读）
           </Button>
           {!canAnalyze ? <span className="text-muted-foreground text-xs">无任务关联，分析入口不可用</span> : null}
+          {!finding.inherited ? (
+            <Button variant="outline" size="sm" onClick={() => setReportChatOpen(true)} disabled={!canAnalyze} title="打开当前发现真实绑定的报告撰写对话">
+              <FileTextIcon data-icon="inline-start" />
+              调整报告
+            </Button>
+          ) : null}
           {finding.inherited && finding.source_task_id && (
             <Badge variant="outline">来源任务 #{finding.source_task_id} · 只读</Badge>
           )}
@@ -314,7 +322,7 @@ function FindingDetailInner() {
                     </Alert>
                   ) : null}
                   {finding.report ? (
-                    <Markdown text={finding.report} />
+                    <Markdown text={finding.report} screenshotFindingId={finding.id} />
                   ) : (
                     <p className="text-sm text-muted-foreground">暂无详细报告。</p>
                   )}
@@ -458,6 +466,17 @@ function FindingDetailInner() {
         open={autoChatOpen}
         onOpenChange={setAutoChatOpen}
       />
+      {!finding.inherited && canAnalyze && reportChatOpen ? (
+        <FindingReportChat
+          key={`report-chat:${scopeKey}`}
+          taskId={analysisTaskId}
+          findingId={finding.id}
+          findingTitle={title}
+          open={reportChatOpen}
+          onOpenChange={setReportChatOpen}
+          onReportUpdated={load}
+        />
+      ) : null}
     </>
   );
 }

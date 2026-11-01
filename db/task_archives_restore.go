@@ -242,6 +242,10 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	if err != nil {
 		return nil, err
 	}
+	remappedTables["findings"], err = normalizeArchivedReportConversations(tx, remappedTables["findings"])
+	if err != nil {
+		return nil, err
+	}
 	remappedTables["findings"], err = normalizeArchivedFindingVersions(remappedTables["findings"])
 	if err != nil {
 		return nil, err
@@ -875,6 +879,44 @@ func credentialArchiveDefaults(raw json.RawMessage) (json.RawMessage, error) {
 		}
 		if len(row["verification_history"]) == 0 || string(row["verification_history"]) == "null" {
 			row["verification_history"] = json.RawMessage(`[]`)
+		}
+	}
+	return json.Marshal(rows)
+}
+
+// Conversations remain separate from cold task archives. Deleting one while a
+// task is cold must not make an otherwise valid finding archive unrestorable.
+func normalizeArchivedReportConversations(tx *sql.Tx, raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return raw, nil
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		var id int64
+		if json.Unmarshal(row["report_conversation_id"], &id) != nil || id <= 0 {
+			row["report_conversation_id"] = json.RawMessage("null")
+			continue
+		}
+		var findingID, taskID int64
+		if json.Unmarshal(row["id"], &findingID) != nil || json.Unmarshal(row["task_id"], &taskID) != nil || findingID <= 0 || taskID <= 0 {
+			row["report_conversation_id"] = json.RawMessage("null")
+			continue
+		}
+		expected, err := json.Marshal(FindingReportBinding{FindingID: findingID, TaskID: taskID, ConversationID: id})
+		if err != nil {
+			return nil, err
+		}
+		var exists bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM conversations c WHERE c.id=$1 AND c.agent_key='reporter'
+ AND EXISTS(SELECT 1 FROM conversation_activities a WHERE a.conversation_id=c.id AND a.kind=$2 AND a.tool=$3 AND a.detail=$4)
+ AND NOT EXISTS(SELECT 1 FROM conversation_activities a WHERE a.conversation_id=c.id AND a.kind=$2 AND a.tool=$3 AND COALESCE(a.detail,'')<>$4))`, id, findingReportBindingKind, findingReportBindingTool, string(expected)).Scan(&exists); err != nil {
+			return nil, err
+		}
+		if !exists {
+			row["report_conversation_id"] = json.RawMessage("null")
 		}
 	}
 	return json.Marshal(rows)
