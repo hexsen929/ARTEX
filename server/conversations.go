@@ -594,6 +594,22 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 	// turns may explain the sealed result; the result tool refuses to overwrite it.
 	finishStatus, finishReason := "failed", "Agent 未能启动"
 	if c.AgentKey == "reporter" {
+		var err error
+		ctx, err = s.findingReportTaskContext(ctx, c)
+		if err != nil {
+			finishReason = err.Error()
+			_, _ = s.m.pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true, Summary: "报告会话未启动：" + finishReason, Detail: finishReason})
+			return
+		}
+		if scope, ok := ctx.Value(findingReportScopeKey{}).(findingReportScope); ok && scope.binding != nil {
+			s.findingCheckTasks.Store(c.ID, strconv.FormatInt(scope.binding.TaskID, 10))
+			msg = fmt.Sprintf("【平台已核实的报告来源】独立漏洞记录 finding_id=%d；探索节点 finding_node_id=%d；来源任务 task_id=%d。仅调整该漏洞报告，先读取现有报告与证据；不要新建漏洞或扩大范围。get_finding_traffic 使用独立记录 ID，update_finding_report 的 finding_id 使用探索节点 ID，并回传读取到的 evidence_version。以下是本轮请求：\n%s", scope.binding.FindingID, scope.binding.NodeID, scope.binding.TaskID, msg)
+			if err := s.reportSourceTaskRunnable(scope.binding.TaskID); err != nil {
+				finishReason = err.Error()
+				_, _ = s.m.pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true, Summary: finishReason, Detail: finishReason})
+				return
+			}
+		}
 		manualReview, err := s.isHistoricalFindingReview(c.ID)
 		if err != nil {
 			finishReason = err.Error()
@@ -842,6 +858,14 @@ func (s *Server) readTriggerBehavior(agentKey string) triggerBehavior {
 // merging by task / all / none); parallel → run each fire in its own concurrent
 // conversation up to trigger_max_parallel. Distinct agents always run concurrently.
 func (s *Server) StartTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string) {
+	s.startTriggeredRun(agentKey, title, message, taskID, mergeable, taskDesc, taskGoal, 0)
+}
+
+func (s *Server) StartTriggeredRunWithConversation(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string, conversationID int64) {
+	s.startTriggeredRun(agentKey, title, message, taskID, mergeable, taskDesc, taskGoal, conversationID)
+}
+
+func (s *Server) startTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string, conversationID int64) {
 	if agentKey == "worker.intranet" || agentKey == db.CredentialAgentKey {
 		log.Printf("[trigger] 专用角色不走通用触发会话，未启动独立运行")
 		return
@@ -863,7 +887,7 @@ func (s *Server) StartTriggeredRun(agentKey, title, message string, taskID int64
 	cfg := s.readTriggerBehavior(agentKey) // DB read BEFORE the lock (never under queueMu)
 	s.queueMu.Lock()
 	s.triggerCfg[agentKey] = cfg
-	s.triggerQ[agentKey] = append(s.triggerQ[agentKey], triggeredRun{agentKey: agentKey, title: title, message: message, taskID: taskID, taskDesc: taskDesc, taskGoal: taskGoal, mergeable: mergeable})
+	s.triggerQ[agentKey] = append(s.triggerQ[agentKey], triggeredRun{conversationID: conversationID, agentKey: agentKey, title: title, message: message, taskID: taskID, taskDesc: taskDesc, taskGoal: taskGoal, mergeable: mergeable})
 	s.pumpLocked(agentKey)
 	s.queueMu.Unlock()
 }
@@ -1076,6 +1100,10 @@ func (s *Server) runTriggeredRun(item triggeredRun) {
 	} else {
 		c, err = pg.CreateConversation(item.agentKey, firstLine(item.title, 60), nil)
 	}
+	if err == nil && c != nil && c.AgentKey != item.agentKey {
+		err = errors.New("触发会话角色与请求不一致")
+		c = nil
+	}
 	if err != nil || c == nil {
 		if item.conversationID > 0 {
 			_, _ = pg.Exec(`UPDATE finding_case_review_runs SET state='failed',error='整理会话不可用' WHERE conversation_id=$1`, item.conversationID)
@@ -1083,14 +1111,19 @@ func (s *Server) runTriggeredRun(item triggeredRun) {
 		log.Printf("[trigger] create conversation for %s failed: %v", item.agentKey, err)
 		return
 	}
+	busyKey := s.convBusyKey(c.ID)
+	s.chatMu.Lock()
+	if s.chatBusy[busyKey] {
+		s.chatMu.Unlock()
+		log.Printf("[trigger] conversation %d already running; duplicate fire not executed", c.ID)
+		return
+	}
+	s.chatBusy[busyKey] = true
+	s.chatMu.Unlock()
 	msg := finalTriggerMessage(item) // prepend the task-context header for single (non-merged) fires
 	if _, err := pg.AppendConvActivity(c.ID, db.Activity{Worker: item.agentKey, Kind: "user", Summary: firstLine(msg, 200), Detail: msg}); err != nil {
 		log.Printf("[trigger] append msg failed: %v", err)
 	}
-	busyKey := s.convBusyKey(c.ID)
-	s.chatMu.Lock()
-	s.chatBusy[busyKey] = true
-	s.chatMu.Unlock()
 	s.runConversationSync(c, msg, busyKey)
 }
 

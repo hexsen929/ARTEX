@@ -2,13 +2,19 @@ package server
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -231,103 +237,467 @@ func (s *Server) wsDownload(w http.ResponseWriter, r *http.Request) {
 // report can render a saved browser screenshot with a normal Markdown image URL.
 func (s *Server) wsPreview(w http.ResponseWriter, r *http.Request) {
 	rawPath := strings.TrimSpace(r.URL.Query().Get("path"))
-	abs, ok := s.wsResolve(rawPath)
-	if filepath.IsAbs(rawPath) {
-		base := filepath.Clean(s.m.dir)
-		candidate := filepath.Clean(rawPath)
-		ok = candidate == base || strings.HasPrefix(candidate, base+string(os.PathSeparator))
-		if ok {
-			abs = candidate
+	var file *os.File
+	var err error
+	if _, portable := reportScreenshotRelative(rawPath); portable {
+		// A portable report link has no session directory. Resolve its native
+		// finding identity, never a newer file in an unrelated session.
+		var findingID int64
+		if value := r.URL.Query().Get("finding_id"); value != "" {
+			findingID, err = strconv.ParseInt(value, 10, 64)
+			if err != nil || findingID <= 0 {
+				writeErr(w, 400, "非法漏洞编号")
+				return
+			}
 		}
-	}
-	if !ok {
-		writeErr(w, 400, "非法路径")
-		return
-	}
-	fi, err := os.Stat(abs)
-	// Reports use the workspace-relative canonical path
-	// findings/screenshots/finding-<node>-step-<n>.png, while the files live
-	// under the per-conversation session directory. Resolve that exact suffix
-	// in the newest matching session so the links stay portable across reports.
-	if (err != nil || fi.IsDir()) && !filepath.IsAbs(rawPath) {
-		if fallback, found := s.findSessionPreview(rawPath); found {
-			abs = fallback
-			fi, err = os.Stat(abs)
+		file, err = s.openPortableReportScreenshot(rawPath, findingID)
+	} else {
+		abs, ok := s.wsResolve(rawPath)
+		if filepath.IsAbs(rawPath) {
+			base, candidate := filepath.Clean(s.m.dir), filepath.Clean(rawPath)
+			ok = candidate == base || strings.HasPrefix(candidate, base+string(os.PathSeparator))
+			if ok {
+				abs = candidate
+			}
 		}
+		if !ok {
+			writeErr(w, 400, "非法路径")
+			return
+		}
+		workspace, openErr := os.OpenRoot(s.m.dir)
+		if openErr != nil {
+			writeErr(w, 404, "文件不存在")
+			return
+		}
+		defer workspace.Close()
+		relative, relErr := filepath.Rel(filepath.Clean(s.m.dir), abs)
+		if relErr != nil {
+			writeErr(w, 404, "文件不存在")
+			return
+		}
+		// Serve a confined handle, not a path reopened by ServeFile.
+		file, err = workspace.Open(relative)
 	}
-	if err != nil || fi.IsDir() {
-		writeErr(w, 404, "文件不存在")
-		return
-	}
-	// Open through a directory capability and serve the resulting handle. A
-	// lexical path check alone would allow a saved screenshot symlink (or a
-	// symlinked session directory) to read files outside the data root.
-	workspace, err := os.OpenRoot(s.m.dir)
-	if err != nil {
-		writeErr(w, 404, "文件不存在")
-		return
-	}
-	defer workspace.Close()
-	relative, err := filepath.Rel(filepath.Clean(s.m.dir), abs)
-	if err != nil {
-		writeErr(w, 404, "文件不存在")
-		return
-	}
-	file, err := workspace.Open(relative)
-	if err != nil {
+	if err != nil || file == nil {
 		writeErr(w, 404, "文件不存在")
 		return
 	}
 	defer file.Close()
-	fi, err = file.Stat()
+	fi, err := file.Stat()
 	if err != nil || !fi.Mode().IsRegular() {
 		writeErr(w, 404, "文件不存在")
 		return
 	}
-	ext := strings.ToLower(filepath.Ext(abs))
-	if ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".webp" && ext != ".gif" {
+	if !isReportImage(rawPath) {
 		writeErr(w, 415, "仅支持图片预览")
 		return
 	}
 	if s.m.pg != nil && s.m.pg.GetBool(settingScreenshotTimestamp, false) {
-		rawRel := filepath.ToSlash(strings.TrimPrefix(strings.TrimSpace(rawPath), "/"))
-		rel := filepath.ToSlash(s.wsRel(abs))
-		if strings.HasPrefix(rawRel, "findings/screenshots/") || strings.HasPrefix(rel, "findings/screenshots/") || strings.Contains(rel, "/findings/screenshots/") {
+		rel := filepath.ToSlash(rawPath)
+		if strings.HasPrefix(rel, "findings/screenshots/") || strings.Contains(rel, "/findings/screenshots/") {
 			w.Header().Set("X-Report-Screenshot-Timestamp", reportScreenshotTimestamp(fi.ModTime()))
 		}
 	}
-	w.Header().Set("Content-Disposition", "inline; filename=\""+sanitizeFilename(filepath.Base(abs))+"\"")
-	http.ServeContent(w, r, filepath.Base(abs), fi.ModTime(), file)
+	name := filepath.Base(rawPath)
+	w.Header().Set("Content-Disposition", "inline; filename=\""+sanitizeFilename(name)+"\"")
+	http.ServeContent(w, r, name, fi.ModTime(), file)
 }
 
 func reportScreenshotTimestamp(t time.Time) string {
 	return t.In(time.FixedZone("CST", 8*60*60)).Format("2006-01-02 15:04:05")
 }
 
-func (s *Server) findSessionPreview(rawPath string) (string, bool) {
-	rel := filepath.Clean(strings.TrimPrefix(strings.TrimSpace(rawPath), "/"))
+func isReportImage(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png", ".jpg", ".jpeg", ".webp", ".gif":
+		return true
+	default:
+		return false
+	}
+}
+
+// reportScreenshotRelative accepts the one portable format documented by the
+// reporter. Do not normalize traversal into an apparently valid report link.
+func reportScreenshotRelative(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.Contains(raw, `\`) || filepath.IsAbs(raw) {
+		return "", false
+	}
+	rel := filepath.FromSlash(raw)
 	const prefix = "findings" + string(os.PathSeparator) + "screenshots" + string(os.PathSeparator)
-	if rel == "." || !strings.HasPrefix(rel, prefix) || strings.Contains(rel, ".."+string(os.PathSeparator)) {
+	if filepath.Clean(rel) != rel || !strings.HasPrefix(rel, prefix) || !isReportImage(rel) {
 		return "", false
 	}
-	base := filepath.Join(filepath.Clean(s.m.dir), "sessions")
-	matches, err := filepath.Glob(filepath.Join(base, "*", filepath.FromSlash(rel)))
-	if err != nil || len(matches) == 0 {
-		return "", false
+	return rel, true
+}
+
+var reportScreenshotNode = regexp.MustCompile(`(?i)^finding-([1-9][0-9]*)-step-[1-9][0-9]*\.(png|jpg|jpeg|webp|gif)$`)
+
+func (s *Server) openPortableReportScreenshot(raw string, findingID int64) (*os.File, error) {
+	if s.m.pg == nil {
+		return nil, os.ErrNotExist
 	}
-	var newest string
-	var newestTime int64
-	for _, candidate := range matches {
-		info, statErr := os.Stat(candidate)
-		if statErr != nil || info.IsDir() {
+	var nodeID int64
+	if findingID <= 0 {
+		// Compatibility for the reporter's original canonical filenames. New
+		// detail views send the native finding ID explicitly, so older arbitrary
+		// screenshot basenames do not need a global-session fallback either.
+		match := reportScreenshotNode.FindStringSubmatch(filepath.Base(raw))
+		if len(match) != 3 {
+			return nil, os.ErrNotExist
+		}
+		var err error
+		nodeID, err = strconv.ParseInt(match[1], 10, 64)
+		if err != nil {
+			return nil, os.ErrNotExist
+		}
+		findingID, err = s.m.pg.FindingIDByNodeID(nodeID)
+		if err != nil || findingID <= 0 {
+			return nil, os.ErrNotExist
+		}
+	}
+	finding, err := s.m.pg.GetFinding(findingID)
+	if err != nil || finding == nil || (nodeID > 0 && (finding.NodeID == nil || *finding.NodeID != nodeID)) {
+		return nil, os.ErrNotExist
+	}
+	var taskID, conversationID int64
+	if finding.TaskID != nil {
+		taskID = *finding.TaskID
+	}
+	if finding.ReportConversationID != nil {
+		// A bare persisted pointer can come from an old archive or an obsolete
+		// writer. Only an exact host binding can authorize session fallback.
+		resolved, resolveErr := s.m.pg.ResolveFindingReportConversation(finding.ID)
+		if resolveErr == nil && resolved != nil && *resolved == *finding.ReportConversationID {
+			conversationID = *resolved
+		}
+	}
+	file, _, err := openReportScreenshot(s.m.dir, taskID, conversationID, raw)
+	return file, err
+}
+
+// openScreenshotDirectoryRoot obtains an independent capability for exactly one
+// task/session. Reject alias directories, including aliases to another task
+// inside the data root; OpenRoot's escape protection alone cannot distinguish
+// those. SameFile also rejects a directory replaced between Lstat and OpenRoot.
+func openScreenshotDirectoryRoot(workspaceDir, collection, name string, create bool) (*os.Root, error) {
+	workspace, err := os.OpenRoot(workspaceDir)
+	if err != nil {
+		return nil, err
+	}
+	defer workspace.Close()
+	openChild := func(parent *os.Root, child string) (*os.Root, error) {
+		if create {
+			if err := parent.Mkdir(child, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+				return nil, err
+			}
+		}
+		before, err := parent.Lstat(child)
+		if err != nil {
+			return nil, err
+		}
+		if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("截图目录不是独立目录")
+		}
+		root, err := parent.OpenRoot(child)
+		if err != nil {
+			return nil, err
+		}
+		after, err := root.Stat(".")
+		if err != nil || !os.SameFile(before, after) {
+			root.Close()
+			return nil, fmt.Errorf("截图目录已变更")
+		}
+		return root, nil
+	}
+	parent, err := openChild(workspace, collection)
+	if err != nil {
+		return nil, err
+	}
+	defer parent.Close()
+	return openChild(parent, name)
+}
+
+func openRegularScreenshot(root *os.Root, rel string) (*os.File, error) {
+	before, err := root.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("截图不是普通文件")
+	}
+	file, err := root.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	after, err := file.Stat()
+	if err != nil || !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		file.Close()
+		return nil, fmt.Errorf("截图文件已变更")
+	}
+	return file, nil
+}
+
+// openReportScreenshot selects only the finding's task archive or authoritative
+// report conversation. Explicit absolute/workspace paths must identify that
+// same owner. No glob, mtime selection, or other-session fallback is permitted.
+// The returned file is already open through the selected owner's capability.
+func openReportScreenshot(workspaceDir string, taskID, conversationID int64, raw string) (*os.File, string, error) {
+	value := strings.TrimSpace(raw)
+	value = strings.TrimPrefix(value, "workspace://")
+	value = strings.TrimPrefix(value, "file://")
+	if filepath.IsAbs(value) {
+		rel, err := filepath.Rel(filepath.Clean(workspaceDir), filepath.Clean(value))
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return nil, "", os.ErrNotExist
+		}
+		value = filepath.ToSlash(rel)
+	}
+	type candidate struct{ collection, name, rel string }
+	var candidates []candidate
+	if rel, portable := reportScreenshotRelative(value); portable {
+		if taskID > 0 {
+			candidates = append(candidates, candidate{"tasks", strconv.FormatInt(taskID, 10), rel})
+		}
+		if conversationID > 0 {
+			candidates = append(candidates, candidate{"sessions", "conv-" + strconv.FormatInt(conversationID, 10), rel})
+		}
+	} else {
+		for _, owner := range []candidate{{"tasks", strconv.FormatInt(taskID, 10), ""}, {"sessions", "conv-" + strconv.FormatInt(conversationID, 10), ""}} {
+			if (owner.collection == "tasks" && taskID <= 0) || (owner.collection == "sessions" && conversationID <= 0) {
+				continue
+			}
+			prefix := owner.collection + "/" + owner.name + "/"
+			if strings.HasPrefix(value, prefix) {
+				if rel, ok := reportScreenshotRelative(strings.TrimPrefix(value, prefix)); ok {
+					owner.rel = rel
+					candidates = append(candidates, owner)
+				}
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		root, err := openScreenshotDirectoryRoot(workspaceDir, candidate.collection, candidate.name, false)
+		if err != nil {
 			continue
 		}
-		mtime := info.ModTime().UnixNano()
-		if newest == "" || mtime > newestTime {
-			newest, newestTime = candidate, mtime
+		file, err := openRegularScreenshot(root, candidate.rel)
+		root.Close()
+		if err == nil {
+			if err = verifyReportSnapshot(file, candidate.rel); err != nil {
+				file.Close()
+				continue
+			}
+			return file, filepath.ToSlash(filepath.Join(candidate.collection, candidate.name, candidate.rel)), nil
 		}
 	}
-	return newest, newest != ""
+	return nil, "", os.ErrNotExist
+}
+
+const maxReportScreenshotSnapshot = 64 << 20 // bounded per-image capture, not an unbounded file buffer
+
+var reportSnapshotPath = regexp.MustCompile(`^findings/screenshots/\.snapshots/([a-f0-9]{64})/[^/]+$`)
+
+func reportSnapshotDigest(rel string) (string, bool) {
+	match := reportSnapshotPath.FindStringSubmatch(filepath.ToSlash(rel))
+	if len(match) != 2 {
+		return "", false
+	}
+	return match[1], true
+}
+
+func verifyReportSnapshot(file *os.File, rel string) error {
+	digest, snapshot := reportSnapshotDigest(rel)
+	if !snapshot {
+		if strings.HasPrefix(filepath.ToSlash(rel), "findings/screenshots/.snapshots/") {
+			return fmt.Errorf("截图快照路径无效")
+		}
+		return nil // old explicit images remain readable, without claiming a digest
+	}
+	hash := sha256.New()
+	size, err := io.Copy(hash, io.LimitReader(file, maxReportScreenshotSnapshot+1))
+	if err != nil {
+		return err
+	}
+	if size > maxReportScreenshotSnapshot || fmt.Sprintf("%x", hash.Sum(nil)) != digest {
+		return fmt.Errorf("截图快照摘要不匹配")
+	}
+	_, err = file.Seek(0, io.SeekStart)
+	return err
+}
+
+// prepareFindingReportScreenshots binds each current capture to immutable bytes,
+// then rewrites the exact Markdown URL that the atomic report transaction saves.
+// A rejected/stale report may leave an unreferenced hash snapshot, but it cannot
+// occupy a mutable basename that a later successful report would accidentally use.
+func (s *Server) prepareFindingReportScreenshots(taskID, conversationID int64, markdown string) (string, error) {
+	if taskID <= 0 {
+		return markdown, nil
+	}
+	var out strings.Builder
+	resolved := map[string]string{}
+	last := 0
+	for _, match := range screenshotMarkdownLink.FindAllStringSubmatchIndex(markdown, -1) {
+		out.WriteString(markdown[last:match[0]])
+		raw := markdown[match[4]:match[5]]
+		rel, portable := reportScreenshotRelative(raw)
+		if !portable {
+			out.WriteString(markdown[match[0]:match[1]])
+			last = match[1]
+			continue
+		}
+		snapshot, cached := resolved[raw]
+		if !cached {
+			file, _, err := openReportScreenshot(s.m.dir, 0, conversationID, raw)
+			if err != nil {
+				// Report edits may retain an already committed immutable URL.
+				// Only such a digest path may reuse task data instead of a fresh
+				// capture; ordinary basenames never prefer a stale task copy.
+				if _, immutable := reportSnapshotDigest(rel); immutable {
+					file, _, err = openReportScreenshot(s.m.dir, taskID, 0, raw)
+				}
+			}
+			if err != nil {
+				out.WriteString(markdown[match[0]:match[1]])
+				last = match[1]
+				continue
+			}
+			snapshot, err = s.saveReportScreenshotSnapshot(taskID, rel, file)
+			closeErr := file.Close()
+			if err := errors.Join(err, closeErr); err != nil {
+				return "", err
+			}
+			resolved[raw] = snapshot
+		}
+		out.WriteString(markdown[match[0]:match[4]])
+		out.WriteString(snapshot)
+		out.WriteString(markdown[match[5]:match[1]])
+		last = match[1]
+	}
+	out.WriteString(markdown[last:])
+	return out.String(), nil
+}
+
+func (s *Server) saveReportScreenshotSnapshot(taskID int64, rel string, in *os.File) (string, error) {
+	info, err := in.Stat()
+	if err != nil {
+		return "", err
+	}
+	data, err := io.ReadAll(io.LimitReader(in, maxReportScreenshotSnapshot+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > maxReportScreenshotSnapshot {
+		return "", fmt.Errorf("截图超过单张 64 MiB 的快照上限")
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(data))
+	snapshotDir := filepath.Join("findings", "screenshots", ".snapshots", digest)
+	snapshot := filepath.Join(snapshotDir, filepath.Base(rel))
+	task, err := openScreenshotDirectoryRoot(s.m.dir, "tasks", strconv.FormatInt(taskID, 10), true)
+	if err != nil {
+		return "", err
+	}
+	defer task.Close()
+	if err := task.MkdirAll(snapshotDir, 0o700); err != nil {
+		return "", err
+	}
+	// Publish only a fully written file. Link is no-replace/atomic, so concurrent
+	// captures of the same bytes cannot expose a partially written snapshot.
+	pending := filepath.Join(snapshotDir, ".pending-"+rand.Text())
+	out, err := task.OpenFile(pending, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer task.Remove(pending)
+	_, writeErr := io.Copy(out, bytes.NewReader(data))
+	err = errors.Join(writeErr, out.Sync(), out.Close())
+	if err != nil {
+		return "", err
+	}
+	if err := task.Chtimes(pending, info.ModTime(), info.ModTime()); err != nil {
+		return "", err
+	}
+	if err := task.Link(pending, snapshot); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", err
+	}
+	// A preexisting digest path is never trusted just because its name matches.
+	existing, err := openRegularScreenshot(task, snapshot)
+	if err != nil {
+		return "", err
+	}
+	verifyErr := verifyReportSnapshot(existing, snapshot)
+	err = errors.Join(verifyErr, existing.Close())
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(snapshot), nil
+}
+
+// archiveFindingScreenshots is the legacy materialization helper. Production
+// report writes use prepareFindingReportScreenshots's immutable rewritten URLs.
+// into its task archive. Caller validates the conversation/finding association;
+// the filesystem capabilities independently enforce both directory boundaries.
+func (s *Server) archiveFindingScreenshots(taskID, conversationID int64, markdown string) error {
+	if taskID <= 0 || conversationID <= 0 {
+		return nil
+	}
+	for _, match := range screenshotMarkdownLink.FindAllStringSubmatch(markdown, -1) {
+		rel, ok := reportScreenshotRelative(match[2])
+		if !ok {
+			continue
+		}
+		in, _, err := openReportScreenshot(s.m.dir, 0, conversationID, filepath.ToSlash(rel))
+		if err != nil {
+			continue
+		}
+		info, statErr := in.Stat()
+		if statErr != nil {
+			in.Close()
+			return statErr
+		}
+		task, err := openScreenshotDirectoryRoot(s.m.dir, "tasks", strconv.FormatInt(taskID, 10), true)
+		if err != nil {
+			in.Close()
+			return err
+		}
+		if err := task.MkdirAll(filepath.Dir(rel), 0o700); err != nil {
+			in.Close()
+			task.Close()
+			return err
+		}
+		out, err := task.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			// Never overwrite historical evidence or follow a planted symlink.
+			existing, openErr := openRegularScreenshot(task, rel)
+			if openErr == nil {
+				existing.Close()
+			}
+			in.Close()
+			task.Close()
+			if openErr != nil {
+				return openErr
+			}
+			continue
+		}
+		if err != nil {
+			in.Close()
+			task.Close()
+			return err
+		}
+		_, copyErr := io.Copy(out, in)
+		err = errors.Join(copyErr, out.Close(), in.Close())
+		if err == nil {
+			err = task.Chtimes(rel, info.ModTime(), info.ModTime())
+		}
+		if err != nil {
+			_ = task.Remove(rel)
+		}
+		task.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // POST /api/workspace/upload?path=<dir> — multipart form field "file" (one or more).

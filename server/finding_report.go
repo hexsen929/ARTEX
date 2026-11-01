@@ -57,21 +57,35 @@ func (s *Server) generateFindingReport(w http.ResponseWriter, r *http.Request) {
 			taskDesc, taskGoal = task.Description, task.Goal
 		}
 	}
+	if taskID <= 0 {
+		writeErr(w, http.StatusConflict, "漏洞未关联真实来源任务")
+		return
+	}
+	if err := s.reportSourceTaskRunnable(taskID); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
 	message := manualFindingReportMessage(f, taskID)
-	s.StartTriggeredRun(
+	conversation, _, err := s.m.pg.EnsureFindingReportConversation(r.Context(), f.ID)
+	if err != nil {
+		writeErr(w, http.StatusConflict, "报告来源会话未就绪: "+err.Error())
+		return
+	}
+	s.StartTriggeredRunWithConversation(
 		"reporter",
 		fmt.Sprintf("人工生成步骤与报告 · finding#%d", f.ID),
 		message,
 		taskID,
 		false,
 		taskDesc,
-		taskGoal,
+		taskGoal, conversation.ID,
 	)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"queued":          true,
 		"agent_key":       "reporter",
 		"finding_id":      f.ID,
 		"finding_node_id": *f.NodeID,
+		"conversation_id": conversation.ID,
 	})
 }
 

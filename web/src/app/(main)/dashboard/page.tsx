@@ -9,6 +9,9 @@ import {
   ArrowUpRightIcon,
   BugIcon,
   ClockIcon,
+  CpuIcon,
+  HardDriveIcon,
+  MemoryStickIcon,
   NetworkIcon,
   ShieldCheckIcon,
   TargetIcon,
@@ -38,6 +41,7 @@ import type {
   Tool,
   TrafficExchange,
   UsageStats,
+  SystemMetrics,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -101,6 +105,41 @@ function statusBg(code: number): string {
   return "bg-red-400";
 }
 
+function SystemResourceStatus({ metrics, error, stale }: { metrics: SystemMetrics | null; error: boolean; stale: boolean }) {
+  if (error || stale) {
+    return <div className="ml-auto text-xs text-muted-foreground" role="status" data-testid="dashboard-system-metrics">资源状态：{error ? "读取失败" : "数据已过期"}，当前值未知</div>;
+  }
+  if (!metrics) {
+    return <div className="ml-auto text-xs text-muted-foreground" role="status" data-testid="dashboard-system-metrics">资源状态：读取中</div>;
+  }
+  if (!metrics.supported) {
+    return <div className="ml-auto text-xs text-muted-foreground" role="status" data-testid="dashboard-system-metrics">资源状态：暂不支持</div>;
+  }
+  const items = [
+    [CpuIcon, "CPU", metrics.cpu],
+    [MemoryStickIcon, "内存", metrics.memory],
+    [HardDriveIcon, "磁盘", metrics.data_disk],
+  ] as const;
+  return (
+    <div className="ml-auto flex min-w-0 items-center justify-end gap-3 text-xs text-muted-foreground" role="status" aria-live="polite" data-testid="dashboard-system-metrics">
+      <span className="shrink-0 font-medium">{metrics.scope === "cgroup" || metrics.scope === "container" ? "Cgroup 资源" : "系统资源"}</span>
+      {items.map(([Icon, label, metric]) => {
+        const available = metric?.available === true && Number.isFinite(metric.percent) && metric.percent >= 0 && metric.percent <= 100;
+        const value = available ? `${metric.percent.toFixed(1)}%` : "未知";
+        return (
+          <div key={label} className="w-24 min-w-0" title={`${label} ${value}`}>
+            <div className="mb-1 flex items-center justify-between gap-1 text-[10px]">
+              <span className="inline-flex items-center gap-1"><Icon className="size-3" aria-hidden="true" />{label}</span>
+              <span className="tabular-nums">{value}</span>
+            </div>
+            {available ? <Progress value={metric.percent} className="h-2 bg-muted [&_[data-slot=progress-indicator]]:bg-slate-500 dark:[&_[data-slot=progress-indicator]]:bg-slate-400" /> : <div className="h-2 rounded bg-muted" aria-hidden="true" />}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── sub-components ────────────────────────────────────────────────────────────
 
 function LiveDot({ className }: { className?: string }) {
@@ -151,6 +190,43 @@ export default function DashboardPage() {
   const [skills, setSkills] = React.useState<SkillItem[]>([]);
   const [tools, setTools] = React.useState<Tool[]>([]);
   const [llmProfiles, setLLMProfiles] = React.useState<LLMProfile[]>([]);
+  const [systemMetrics, setSystemMetrics] = React.useState<SystemMetrics | null>(null);
+  const [systemMetricsError, setSystemMetricsError] = React.useState(false);
+  const [systemMetricsAt, setSystemMetricsAt] = React.useState(0);
+  const [systemMetricsNow, setSystemMetricsNow] = React.useState(0);
+
+  React.useEffect(() => {
+    let alive = true;
+    let loading = false;
+    const load = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        const next = await api.systemMetrics();
+        if (alive) {
+          const now = Date.now();
+          setSystemMetrics(next);
+          setSystemMetricsAt(now);
+          setSystemMetricsNow(now);
+          setSystemMetricsError(false);
+        }
+      } catch {
+        if (alive) {
+          setSystemMetrics(null);
+          setSystemMetricsError(true);
+        }
+      } finally {
+        loading = false;
+      }
+    };
+    void load();
+    const timer = setInterval(() => {
+      // A slow/hung request must not leave old measurements looking current.
+      if (alive) setSystemMetricsNow(Date.now());
+      void load();
+    }, 5000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
 
   // The task list is the most expensive dashboard source. Poll it independently
   // so a large history cannot hold back every other dashboard panel.
@@ -535,9 +611,12 @@ export default function DashboardPage() {
     <div className="flex flex-1 flex-col gap-4 pb-6">
       {/* ── Header ── */}
       <div>
+        <div className="flex items-center gap-6">
         <div>
           <h1 className="text-lg font-semibold tracking-tight">总览</h1>
           <p className="text-xs text-muted-foreground">系统全局状态 · 实时刷新</p>
+        </div>
+          <SystemResourceStatus metrics={systemMetrics} error={systemMetricsError} stale={systemMetricsAt > 0 && systemMetricsNow - systemMetricsAt > 15000} />
         </div>
       </div>
 

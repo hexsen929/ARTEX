@@ -40,35 +40,61 @@ func (s *Server) seedCredentialProcessor() {
 	}
 	_ = s.m.pg.SetBool(flag, true)
 }
+
+const credentialDrainBatch = 16
+
+func wakeCredentialProcessor(wake chan<- struct{}) {
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
 func (s *Server) runCredentialProcessor() {
-	ticker := time.NewTicker(3 * time.Second)
+	// Events coalesce, so every wake drains a bounded batch, not just one row.
+	// The slow ticker is only recovery for missed events and process restarts.
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+	wakeCredentialProcessor(s.credentialWake)
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
+		case <-s.credentialWake:
 		}
+		if s.drainCredentialJobs(s.ctx, credentialDrainBatch) {
+			wakeCredentialProcessor(s.credentialWake)
+		}
+	}
+}
+
+// A full batch schedules its continuation. Bursts cannot strand the remaining
+// rows behind a 30-second-per-record recovery scan, and shutdown stays bounded.
+func (s *Server) drainCredentialJobs(ctx context.Context, limit int) bool {
+	for i := 0; i < limit && ctx.Err() == nil; i++ {
 		if !s.m.pg.GetBool(db.SettingTaskIntelligence, false) || !s.m.pg.GetBool(db.SettingCredentialAgent, false) {
-			continue
+			return false
 		}
 		a, err := s.m.pg.GetAgentByKey(db.CredentialAgentKey)
 		if err != nil || a == nil || !a.Enabled {
-			continue
+			return false
 		}
-		item, err := s.m.pg.ClaimCredentialJob(s.ctx, s.m.pg.GetBool(db.SettingCredentialTraffic, false), 0)
+		item, err := s.m.pg.ClaimCredentialJob(ctx, s.m.pg.GetBool(db.SettingCredentialTraffic, false), 0)
 		if err != nil {
-			if s.ctx.Err() == nil {
+			if ctx.Err() == nil {
 				log.Printf("[credentials] queue: %v", err)
 			}
-			continue
+			return false
 		}
 		if item == nil {
-			continue
+			return false
 		}
-		s.processCredentialJob(s.ctx, item)
+		s.processCredentialJob(ctx, item)
 	}
+	return limit > 0 && ctx.Err() == nil
 }
+
 func (s *Server) processCredentialJob(parent context.Context, item *db.Intelligence) {
 	if !s.m.pg.GetBool(db.SettingTaskIntelligence, false) || !s.m.pg.GetBool(db.SettingCredentialAgent, false) {
 		_ = s.m.pg.FinishCredentialJob(parent, item, *item.Credentials)
@@ -402,6 +428,7 @@ func (s *Server) retryCredentials(w http.ResponseWriter, r *http.Request) {
 		intelligenceError(w, err)
 		return
 	}
+	wakeCredentialProcessor(s.credentialWake)
 	writeJSON(w, 202, map[string]bool{"queued": true})
 }
 

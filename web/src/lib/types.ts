@@ -539,6 +539,7 @@ export interface Finding {
   summary: string;
   evidence: string;
   report?: string; // 详细报告(Markdown);仅详情接口返回,列表为空
+  report_conversation_id?: number;
   intent_id?: string;
   param_id?: string;
   task_id?: string;
@@ -1436,6 +1437,24 @@ export interface Stats {
   roe_enabled: boolean;
   findings_confirmed: number;
   active_task?: Partial<Task>;
+}
+
+export interface SystemMetricValue {
+  available?: boolean;
+  used_bytes: number;
+  total_bytes: number;
+  percent: number;
+}
+
+export interface SystemMetrics {
+  scope: "container" | "unsupported" | string;
+  supported: boolean;
+  timestamp: string;
+  container_metrics: boolean;
+  cpu: SystemMetricValue;
+  memory: SystemMetricValue;
+  disk: SystemMetricValue;
+  data_disk: SystemMetricValue;
 }
 
 // ---- Intercept Rules ----

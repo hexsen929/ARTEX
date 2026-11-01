@@ -446,3 +446,50 @@ WHERE source.source_kind='intent_stage' AND source.source_id=$1`, strconv.Format
 		t.Fatal("new native generation was summarized more than once")
 	}
 }
+
+func TestMemoryExperienceBudgetSkipsDiscoveryBeforeContentBuild(t *testing.T) {
+	f := isolatedExperienceWorkerFixture(t)
+	task := experienceTask(t, f, "discovery-budget")
+	settings, err := f.pg.GetMemorySettings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.MaxJobsPerHour = 1
+	if _, err := f.pg.UpdateMemorySettings(t.Context(), settings, settings.Epoch); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.pg.Exec(`INSERT INTO memory_audit(task_id,action) VALUES($1,'extract_admitted')`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	// An exclusive cache-table lock makes any accidental candidate query fail
+	// its context deadline. Quota preflight must return without touching it.
+	tx, err := f.pg.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`LOCK TABLE memory_discovery_checks IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	if err := f.server.discoverAndQueueMemorySources(ctx); err != nil {
+		t.Fatalf("exhausted quota still queried source content: %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("quota preflight waited for the discovery cache lock")
+	}
+}
+
+func TestMemoryDiscoveryBackoffIsBounded(t *testing.T) {
+	for _, tc := range []struct {
+		failures int
+		want     time.Duration
+	}{
+		{0, time.Minute}, {1, time.Minute}, {2, 2 * time.Minute}, {3, 4 * time.Minute}, {5, 16 * time.Minute}, {100, 16 * time.Minute},
+	} {
+		if got := memoryDiscoveryBackoff(tc.failures); got != tc.want {
+			t.Fatalf("failures=%d delay=%s want=%s", tc.failures, got, tc.want)
+		}
+	}
+}

@@ -112,7 +112,7 @@ export function RepeaterWorkspace() {
         </div>
       </div>
       <div className="flex min-h-10 min-w-0 items-center rounded-md border bg-muted/20 p-1">
-        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+        <div className="scrollbar-none flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
           {workspace.tabs.map((tab) => {
             const selected = tab.id === workspace.activeTabId;
             return (

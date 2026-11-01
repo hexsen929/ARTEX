@@ -23,22 +23,23 @@ type DBFinding struct {
 	ReportEvidenceVersion int64
 	TrafficBindings       []FindingTrafficBinding // populated only for export
 
-	ID                 int64
-	TaskID             *int64
-	NodeID             *int64
-	VulnClass          string
-	Name               string // 漏洞名称(可读标题);为空时前端回退展示 VulnClass
-	Severity           string
-	Summary            string
-	Evidence           string
-	Worker             string
-	AssetIDs           []int64
-	VerificationStatus string
-	VerificationNote   string
-	Status             string
-	Report             string // 详细报告(Markdown);仅 GetFinding 填充,列表查询不带
-	CreatedAt          time.Time
-	TaskDescription    string // populated via LEFT JOIN on tasks
+	ID                   int64
+	TaskID               *int64
+	NodeID               *int64
+	VulnClass            string
+	Name                 string // 漏洞名称(可读标题);为空时前端回退展示 VulnClass
+	Severity             string
+	Summary              string
+	Evidence             string
+	Worker               string
+	AssetIDs             []int64
+	VerificationStatus   string
+	VerificationNote     string
+	Status               string
+	Report               string // 详细报告(Markdown);仅 GetFinding 填充,列表查询不带
+	ReportConversationID *int64 `json:"report_conversation_id,omitempty"`
+	CreatedAt            time.Time
+	TaskDescription      string // populated via LEFT JOIN on tasks
 }
 
 // Finding triage states (findings.status).
@@ -675,13 +676,14 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 	f := &DBFinding{}
 	var aidsJSON string
-	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, '')
+	var reportConv sql.NullInt64
+	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, ''), f.report_conversation_id
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
 		WHERE f.id = $1`, id).Scan(
 		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.VerificationStatus, &f.VerificationNote, &f.Report)
+		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.VerificationStatus, &f.VerificationNote, &f.Report, &reportConv)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -689,6 +691,9 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+	if reportConv.Valid {
+		f.ReportConversationID = &reportConv.Int64
+	}
 	return f, nil
 }
 

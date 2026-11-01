@@ -9,26 +9,55 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { auth } from "@/lib/auth";
 
+// This is rendering context, never an authorization grant. The preview endpoint
+// validates the native finding and only resolves its actual task/conversation.
+export const ReportScreenshotContext = React.createContext<string | number | undefined>(undefined);
+
+function screenshotSource(src: string | undefined, findingId: string | number | undefined) {
+  if (!src?.startsWith("/api/workspace/preview")) return src;
+  try {
+    const url = new URL(src, "http://artex.invalid");
+    if (url.pathname !== "/api/workspace/preview") return src;
+    const id = String(findingId ?? "");
+    if (/^[1-9]\d*$/.test(id) && Number.isSafeInteger(Number(id))) url.searchParams.set("finding_id", id);
+    else url.searchParams.delete("finding_id");
+    return `${url.pathname}${url.search}`;
+  } catch { return undefined; }
+}
+
+
 function AuthenticatedImage({
   src,
   alt,
   ...props
 }: React.ImgHTMLAttributes<HTMLImageElement>) {
   const [objectURL, setObjectURL] = React.useState<string | null>(null);
+  const [loadedSource, setLoadedSource] = React.useState<string | null>(null);
   const [captureTimestamp, setCaptureTimestamp] = React.useState<string | null>(null);
   const [zoomed, setZoomed] = React.useState(false);
   const [zoomScale, setZoomScale] = React.useState(1);
-  const imageSrc = typeof src === "string" ? src : undefined;
+  const [pan, setPan] = React.useState({ x: 0, y: 0 });
+  const dragRef = React.useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+  const screenshotFindingId = React.useContext(ReportScreenshotContext);
+  const imageSrc = screenshotSource(typeof src === "string" ? src : undefined, screenshotFindingId);
 
   React.useEffect(() => {
     let cancelled = false;
     let url: string | null = null;
+    setObjectURL(null);
+    setLoadedSource(null);
+    setCaptureTimestamp(null);
+    setZoomed(false);
+    setZoomScale(1);
+    setPan({ x: 0, y: 0 });
+    dragRef.current = null;
 
     if (!imageSrc || !imageSrc.startsWith("/api/workspace/preview")) {
       setObjectURL(null);
       setCaptureTimestamp(null);
       setZoomed(false);
       setZoomScale(1);
+      setPan({ x: 0, y: 0 });
       return () => {
         cancelled = true;
       };
@@ -41,7 +70,7 @@ function AuthenticatedImage({
       headers: token ? { Authorization: `Bearer ${token}` } : undefined,
     })
       .then((response) => {
-        if (!response.ok) throw new Error(`图片读取失败: ${response.status}`);
+        if (!response.ok || cancelled) throw new Error(`图片读取失败: ${response.status}`);
         setCaptureTimestamp(response.headers.get("X-Report-Screenshot-Timestamp"));
         return response.blob();
       })
@@ -49,6 +78,7 @@ function AuthenticatedImage({
         if (cancelled) return;
         url = URL.createObjectURL(blob);
         setObjectURL(url);
+        setLoadedSource(imageSrc);
       })
       .catch(() => {
         if (!cancelled) setObjectURL(null);
@@ -60,8 +90,12 @@ function AuthenticatedImage({
     };
   }, [imageSrc]);
 
-  const renderedSrc = objectURL ?? imageSrc;
-  const timestamp = captureTimestamp ? (
+  // Never render the previous finding's blob, or issue an unauthenticated
+  // fallback request while the authenticated local preview is pending.
+  const renderedSrc = imageSrc?.startsWith("/api/workspace/preview")
+    ? (loadedSource === imageSrc ? objectURL ?? undefined : undefined)
+    : imageSrc;
+  const timestamp = loadedSource === imageSrc && captureTimestamp ? (
     <span className="pointer-events-none absolute right-3 top-3 whitespace-nowrap rounded-md bg-black/55 px-3 py-1.5 font-mono text-sm font-semibold text-white shadow-lg backdrop-blur-[2px]">
       {captureTimestamp}
     </span>
@@ -74,32 +108,58 @@ function AuthenticatedImage({
         className="relative my-2 inline-block max-w-full cursor-zoom-in rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         onClick={() => renderedSrc && setZoomed(true)}
         aria-label="放大查看报告截图"
+        disabled={!renderedSrc}
       >
-        <img {...props} src={renderedSrc} alt={alt || "报告截图，点击放大"} />
+        <img {...props} src={renderedSrc} alt={alt || "报告截图，点击放大"} draggable={false} onDragStart={(event) => event.preventDefault()} />
         {timestamp}
       </button>
       <Dialog
         open={zoomed}
         onOpenChange={(next) => {
           setZoomed(next);
-          if (!next) setZoomScale(1);
+          if (!next) {
+            setZoomScale(1);
+            setPan({ x: 0, y: 0 });
+            dragRef.current = null;
+          }
         }}
       >
         <DialogContent
           showCloseButton
           className="flex max-h-[96dvh] max-w-[96vw] items-center justify-center overflow-hidden bg-black/85 p-3 backdrop-blur-sm sm:max-w-[96vw]"
         >
-          <div className="relative flex max-h-[90dvh] max-w-full items-center justify-center overflow-auto">
-            <div className="relative inline-block origin-center transition-transform duration-150" style={{ transform: `scale(${zoomScale})` }}>
+          <div
+            className="relative flex h-[90dvh] w-[90vw] max-w-full items-center justify-center overflow-hidden"
+            onPointerDown={(event) => {
+              if (zoomScale <= 1 || event.button !== 0) return;
+              event.currentTarget.setPointerCapture(event.pointerId);
+              dragRef.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y };
+            }}
+            onPointerMove={(event) => {
+              const drag = dragRef.current;
+              if (!drag) return;
+              setPan({ x: drag.panX + event.clientX - drag.x, y: drag.panY + event.clientY - drag.y });
+            }}
+            onPointerUp={(event) => {
+              dragRef.current = null;
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+            }}
+            onPointerCancel={() => { dragRef.current = null; }}
+            style={{ cursor: zoomScale > 1 ? (dragRef.current ? "grabbing" : "grab") : "default" }}
+          >
+            <div className="relative inline-block origin-center" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoomScale})` }}>
               <img
                 src={renderedSrc}
                 alt={alt || "报告截图"}
+                draggable={false}
+                onDragStart={(event) => event.preventDefault()}
                 className="max-h-[90dvh] max-w-[90vw] rounded-md object-contain"
               />
               {timestamp}
             </div>
           </div>
           <div className="absolute top-3 left-3 z-10 flex items-center gap-1 rounded-lg bg-black/60 p-1 backdrop-blur-sm">
+            <span className="px-2 text-xs font-medium text-white tabular-nums">{Math.round(zoomScale * 100)}%</span>
             <Button
               variant="ghost"
               size="icon-sm"
@@ -115,8 +175,8 @@ function AuthenticatedImage({
               variant="ghost"
               size="icon-sm"
               className="text-white hover:bg-white/20 hover:text-white"
-              onClick={() => setZoomScale(1)}
-              disabled={zoomScale === 1}
+              onClick={() => { setZoomScale(1); setPan({ x: 0, y: 0 }); dragRef.current = null; }}
+              disabled={zoomScale === 1 && pan.x === 0 && pan.y === 0}
               title="重置大小"
               aria-label="重置图片大小"
             >
@@ -203,8 +263,10 @@ const components: Components = {
   td: ({ node, ...p }) => <td className="border border-border px-2 py-1 align-top [overflow-wrap:anywhere]" {...p} />,
 };
 
-export function Markdown({ text }: { text: string }) {
+export function Markdown({ text, screenshotFindingId }: { text: string; screenshotFindingId?: string | number }) {
+  const inheritedFinding = React.useContext(ReportScreenshotContext);
   return (
+    <ReportScreenshotContext.Provider value={screenshotFindingId ?? inheritedFinding}>
     <div className="min-w-0 max-w-full break-words [overflow-wrap:anywhere] space-y-1.5 text-sm [&>*:first-child]:mt-0">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
@@ -216,5 +278,6 @@ export function Markdown({ text }: { text: string }) {
         {text}
       </ReactMarkdown>
     </div>
+    </ReportScreenshotContext.Provider>
   );
 }

@@ -136,7 +136,26 @@ import type {
   UsageStats,
   WorkspaceFile,
   WorkspaceListing,
+  SystemMetrics,
 } from "@/lib/types";
+
+/**
+ * Read a download name from Content-Disposition. RFC 5987's filename* is
+ * preferred because it preserves UTF-8 names; older filename remains the
+ * fallback for clients that do not understand it.
+ */
+export function downloadFilename(contentDisposition: string, fallback: string): string {
+  const encoded = contentDisposition.match(/(?:^|;)\s*filename\*\s*=\s*UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded.replace(/^"|"$/g, ""));
+    } catch {
+      // Fall through to the legacy token when a malformed header is received.
+    }
+  }
+  const legacy = contentDisposition.match(/(?:^|;)\s*filename\s*=\s*(?:"([^"]*)"|([^;\s]+))/i);
+  return (legacy?.[1] ?? legacy?.[2] ?? fallback).trim() || fallback;
+}
 
 function getToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -322,6 +341,7 @@ function schedulePayload(input: ScheduleInput) {
 export const api = {
   // 后端应用版本号（release 时由 ldflags 注入，默认 "dev"）。
   health: () => get<{ ok: boolean; service: string; version: string }>("/health"),
+  systemMetrics: () => get<SystemMetrics>("/system/metrics"),
 
   // ---- auth ----
   authStatus: () => get<{ initialized: boolean }>("/auth/status"),
@@ -565,6 +585,7 @@ export const api = {
   },
   workspaceDownload: async (path: string) => {
     let blob: Blob;
+    let contentDisposition = "";
     if (MOCK) {
       blob = new Blob([`（demo）${path} 的下载内容示例。`], { type: "text/plain" });
     } else {
@@ -573,12 +594,13 @@ export const api = {
         headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       });
       if (!r.ok) throw new Error(`下载失败: ${r.status}`);
+      contentDisposition = r.headers.get("Content-Disposition") ?? "";
       blob = await r.blob();
     }
     const objUrl = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = objUrl;
-    a.download = path.split("/").pop() || "download";
+    a.download = downloadFilename(contentDisposition, path.split("/").pop() || "download");
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -734,8 +756,7 @@ export const api = {
     const blob = await r.blob();
     // 文件名优先取后端 Content-Disposition,取不到则用默认名。
     const disp = r.headers.get("Content-Disposition") ?? "";
-    const m = disp.match(/filename="?([^"]+)"?/);
-    const filename = m?.[1] ?? `findings-export`;
+    const filename = downloadFilename(disp, `findings-export`);
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;

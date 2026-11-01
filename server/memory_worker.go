@@ -24,6 +24,10 @@ func (s *Server) wakeMemoryWorker() {
 	}
 }
 
+func memoryDiscoveryBackoff(failures int) time.Duration {
+	return time.Minute * time.Duration(1<<(max(1, min(failures, 5))-1))
+}
+
 func (s *Server) startMemoryWorker() {
 	if s.m == nil || s.m.pg == nil {
 		return
@@ -34,66 +38,107 @@ func (s *Server) startMemoryWorker() {
 		defer s.memoryWG.Done()
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
+		retention := time.NewTicker(time.Hour)
+		defer retention.Stop()
+		prune := func() {
+			pruneCtx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
+			defer cancel()
+			_ = s.m.pg.PruneMemory(pruneCtx)
+		}
+		prune()
+		var nextAttempt time.Time
+		failures := 0
 		// Discover only completed native stages, never individual fact/hint/chat
 		// writes. Historical backfill is explicit and bounded in the API.
 		for {
 			select {
 			case <-s.ctx.Done():
 				return
+			case <-retention.C:
+				prune()
+				continue
 			case <-ticker.C:
 			case <-s.memoryWake:
 			}
-			s.memoryWorkerTick(s.ctx)
+			if time.Now().Before(nextAttempt) {
+				continue
+			}
+			if err := s.memoryWorkerTickResult(s.ctx); err != nil {
+				failures = min(failures+1, 5)
+				delay := memoryDiscoveryBackoff(failures)
+				nextAttempt = time.Now().Add(delay)
+				log.Printf("[memory] discovery deferred after failure; retry in %s", delay)
+			} else {
+				failures = 0
+				nextAttempt = time.Time{}
+			}
 		}
 	}()
 }
 
 func (s *Server) memoryWorkerTick(ctx context.Context) {
-	// Metadata retention is independent of whether new model calls are enabled.
-	if err := s.m.pg.PruneMemory(ctx); err != nil {
-		return
+	_ = s.memoryWorkerTickResult(ctx)
+}
+
+// Admission checks precede source construction, including when the HTTP budget
+// or queue is full. Database work has a separate deadline from model inference.
+func (s *Server) discoverAndQueueMemorySources(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	allowed, err := s.m.pg.MemoryDiscoveryAllowed(ctx)
+	if err != nil || !allowed {
+		return err
 	}
-	settings, err := s.m.pg.GetMemorySettings(ctx)
-	if err != nil || !settings.Enabled || !settings.AutoExtract {
-		return
-	}
-	provider, cfg, err := s.memoryModel(settings)
+	sources, err := s.m.pg.FindMemorySources(ctx, 4)
 	if err != nil {
-		return
-	}
-	sources, err := s.m.pg.FindMemorySources(ctx, 20)
-	if err != nil {
-		log.Printf("[memory] source discovery unavailable; retry on next tick")
-		return
+		return err
 	}
 	for _, source := range sources {
 		if _, err := s.m.pg.QueueMemoryExtraction(ctx, source); err != nil {
-			return
+			return err
 		}
+	}
+	return nil
+}
+
+func (s *Server) memoryWorkerTickResult(ctx context.Context) error {
+	settings, err := s.m.pg.GetMemorySettings(ctx)
+	if err != nil {
+		return err
+	}
+	if !settings.Enabled || !settings.AutoExtract {
+		return nil
+	}
+	provider, cfg, err := s.memoryModel(settings)
+	if err != nil {
+		return nil
+	}
+	if err := s.discoverAndQueueMemorySources(ctx); err != nil {
+		return err
 	}
 	job, err := s.m.pg.ClaimMemoryJob(ctx, 90*time.Second)
 	if err != nil || job == nil {
-		return
+		return nil
 	}
 	if job.SettingsEpoch != settings.Epoch {
 		_ = s.m.pg.FailMemoryJob(ctx, *job, time.Minute)
-		return
+		return nil
 	}
 	// Re-read the versioned source instead of retaining a second plaintext
 	// copy in the queue. Completion validates it again against its fingerprint.
 	source, err := s.m.pg.GetMemorySource(ctx, job.Source.Kind, job.Source.ID)
 	if err != nil || source == nil || source.Fingerprint != job.Source.Fingerprint {
 		_, _ = s.m.pg.CompleteMemoryJob(ctx, *job, nil)
-		return
+		return nil
 	}
 	if _, err := longmemory.SanitizeSource(source.Text); err != nil {
 		_, _ = s.m.pg.CompleteMemoryJob(ctx, *job, nil)
-		return
+		return nil
 	}
 	if s.m.egress != nil {
 		if _, hit := s.m.egress.Check(source.Text); hit {
 			_, _ = s.m.pg.CompleteMemoryJob(ctx, *job, nil)
-			return
+			return nil
 		}
 	}
 	callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
@@ -131,24 +176,24 @@ func (s *Server) memoryWorkerTick(ctx context.Context) {
 	envelope, err := json.Marshal(input)
 	if err != nil {
 		_, _ = s.m.pg.CompleteMemoryJob(ctx, *job, nil)
-		return
+		return nil
 	}
 	if s.m.egress != nil {
 		if _, hit := s.m.egress.Check(string(envelope)); hit {
 			_, _ = s.m.pg.CompleteMemoryJob(ctx, *job, nil)
-			return
+			return nil
 		}
 	}
 	drafts, err := longmemory.Extract(callCtx, provider, cfg.Model, input)
 	if err != nil {
 		if errors.Is(err, longmemory.ErrSensitive) || errors.Is(err, longmemory.ErrInvalid) {
 			_, _ = s.m.pg.CompleteMemoryJob(ctx, *job, nil)
-			return
+			return nil
 		}
 		if ctx.Err() == nil {
 			_ = s.m.pg.FailMemoryJob(ctx, *job, 5*time.Minute)
 		}
-		return
+		return nil
 	}
 	entries := make([]db.MemoryInput, 0, len(drafts))
 	for _, draft := range drafts {
@@ -172,4 +217,5 @@ func (s *Server) memoryWorkerTick(ctx context.Context) {
 	if _, err := s.m.pg.CompleteMemoryJob(ctx, *job, entries); err != nil {
 		log.Printf("[memory] learning result not admitted; source or settings may have changed")
 	}
+	return nil
 }

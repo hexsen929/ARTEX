@@ -47,6 +47,10 @@ type Server struct {
 	m          *Manager
 	engine     *Engine
 	ctx        context.Context
+	dataDir    string
+	metricsMu  sync.Mutex
+	lastCPUUse uint64
+	lastCPUAt  time.Time
 
 	skillDir  string // root directory for skill subdirectories
 	jwtKey    []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
@@ -142,11 +146,12 @@ type Server struct {
 
 	// Cold task archives run through one persistent FIFO worker. The buffered wake
 	// channel coalesces enqueue bursts; the database remains the source of truth.
-	archiveWake chan struct{}
-	archiveWG   sync.WaitGroup
-	side        *sideQuestionState
-	memoryWake  chan struct{}
-	memoryWG    sync.WaitGroup
+	archiveWake    chan struct{}
+	archiveWG      sync.WaitGroup
+	credentialWake chan struct{}
+	side           *sideQuestionState
+	memoryWake     chan struct{}
+	memoryWG       sync.WaitGroup
 }
 
 // provEntry is a cached provider + its config for one LLM profile id.
@@ -178,12 +183,12 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	if err != nil {
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
-	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, keyDir: keyDir, chatBusy: map[string]bool{},
+	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, dataDir: dataDir, jwtKey: key, keyDir: keyDir, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
-		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
+		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1), credentialWake: make(chan struct{}, 1)}
 	s.initSideQuestions()
 	if m.pg != nil {
 		if err := s.basicAuth.load(m.pg); err != nil {
@@ -325,6 +330,12 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()
 	if m.pg != nil {
+		agent.CredentialRecorded = func() {
+			select {
+			case s.credentialWake <- struct{}{}:
+			default:
+			}
+		}
 		s.seedCredentialProcessor()
 		go s.runCredentialProcessor()
 	}
@@ -844,6 +855,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/stats", s.stats)
+	mux.HandleFunc("GET /api/system/metrics", s.systemMetrics)
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("GET /api/logs/history", s.getLogsHistory)
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
@@ -988,6 +1000,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/findings/{id}/lineage", s.findingLineage)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/deepen", s.deepenFinding)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/generate-report", s.generateFindingReport)
+	mux.HandleFunc("POST /api/exploration/findings/{id}/report-conversation", s.findingReportConversation)
 	mux.HandleFunc("GET /api/exploration/findings/{id}/retests", s.listFindingRetests)
 	mux.HandleFunc("GET /api/exploration/findings/retests/active", s.listActiveFindingRetests)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/retests", s.startFindingRetest)
@@ -2621,7 +2634,10 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	stamp := now.Format("20060102-150405")
 	setDownload := func(contentType, filename string) {
 		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+		// Keep an ASCII fallback for older clients and provide the real UTF-8
+		// name through RFC 5987. Browsers otherwise commonly decode Chinese
+		// names using the platform legacy code page.
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, sanitizeFilename(filename), url.PathEscape(filename)))
 	}
 
 	switch format {
