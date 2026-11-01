@@ -17,6 +17,7 @@ type FindingReportBinding struct {
 	FindingID      int64 `json:"finding_id"`
 	TaskID         int64 `json:"task_id"`
 	ExplorationID  int64 `json:"-"`
+	NodeID         int64 `json:"-"`
 	ConversationID int64 `json:"conversation_id"`
 }
 
@@ -120,11 +121,11 @@ func (d *DB) FindingReportBindingForConversation(ctx context.Context, conversati
 	}
 	b := bindings[0]
 	var taskID, expID int64
-	err = d.QueryRowContext(ctx, `SELECT f.task_id,t.exploration_id FROM findings f
+	err = d.QueryRowContext(ctx, `SELECT f.task_id,t.exploration_id,COALESCE(f.node_id,0) FROM findings f
  JOIN tasks t ON t.id=f.task_id JOIN conversations c ON c.id=f.report_conversation_id
  WHERE f.id=$1 AND f.task_id=$2 AND f.report_conversation_id=$3 AND c.agent_key='reporter'
  AND t.deleted_at IS NULL AND t.archived_at IS NULL
- AND NOT EXISTS(SELECT 1 FROM task_archives a WHERE a.task_id=t.id AND a.state IN ('archive_queued','archiving','restore_queued','restoring','delete_queued','deleting'))`, b.FindingID, b.TaskID, conversationID).Scan(&taskID, &expID)
+ AND NOT EXISTS(SELECT 1 FROM task_archives a WHERE a.task_id=t.id AND a.state IN ('archive_queued','archiving','restore_queued','restoring','delete_queued','deleting'))`, b.FindingID, b.TaskID, conversationID).Scan(&taskID, &expID, &b.NodeID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("报告来源已删除、归档或关联已变更，请从漏洞详情重新打开")
 	}
@@ -145,10 +146,10 @@ func (d *DB) EnsureFindingReportConversation(ctx context.Context, findingID int6
 	defer tx.Rollback()
 	b := &FindingReportBinding{FindingID: findingID}
 	var old sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT f.task_id,t.exploration_id,f.report_conversation_id FROM findings f
+	err = tx.QueryRowContext(ctx, `SELECT f.task_id,t.exploration_id,f.report_conversation_id,COALESCE(f.node_id,0) FROM findings f
  JOIN tasks t ON t.id=f.task_id WHERE f.id=$1 AND t.deleted_at IS NULL AND t.archived_at IS NULL
  AND NOT EXISTS(SELECT 1 FROM task_archives a WHERE a.task_id=t.id AND a.state IN ('archive_queued','archiving','restore_queued','restoring','delete_queued','deleting'))
- FOR UPDATE OF f`, findingID).Scan(&b.TaskID, &b.ExplorationID, &old)
+ FOR UPDATE OF f`, findingID).Scan(&b.TaskID, &b.ExplorationID, &old, &b.NodeID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, ErrFindingNotFound
 	}

@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn, copyText } from "@/lib/utils";
+import { countPacketMatches } from "@/lib/packet-search";
 import { PacketCodeEditor } from "@/components/packet-code-editor";
 
 function statusTone(status: number) {
@@ -205,20 +206,6 @@ export function HttpPacketSyntax({
   );
 }
 
-function countMatches(value: string, query: string) {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return 0;
-  const haystack = value.toLowerCase();
-  let count = 0;
-  let cursor = 0;
-  while (cursor <= haystack.length - needle.length) {
-    const index = haystack.indexOf(needle, cursor);
-    if (index < 0) return count;
-    count += 1;
-    cursor = index + needle.length;
-  }
-}
-
 // Empty grid rows have no text, so native selection copying drops their newlines.
 // Map the selected DOM boundaries back to the raw packet instead.
 function selectedPacketText(container: HTMLElement, value: string, lines: string[]): string | null {
@@ -259,7 +246,7 @@ export function HttpCodeBlock({ raw }: { raw: string }) {
   const [query, setQuery] = React.useState("");
   const value = raw || "（空）";
   const lines = value.replaceAll("\r\n", "\n").split("\n");
-  const matches = React.useMemo(() => countMatches(value, query), [value, query]);
+  const matches = React.useMemo(() => countPacketMatches(value, query), [value, query]);
 
   React.useEffect(() => {
     if (!copied) return;

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/intercept"
 )
 
 func writeReportScreenshotFixture(t *testing.T, root, path string, data []byte) string {
@@ -302,5 +303,138 @@ func TestReportScreenshotPreviewUsesFindingTaskAndBoundConversation(t *testing.T
 	}
 	if w := preview(rel, strconv.FormatInt(fa, 10)); w.Code != http.StatusNotFound {
 		t.Fatalf("another finding's reporter authorized screenshot fallback: %d %q", w.Code, w.Body.Bytes())
+	}
+}
+
+func TestReportScreenshotSnapshotsAreImmutableAndKeepDistinctZipEntries(t *testing.T) {
+	root := t.TempDir()
+	s := &Server{m: &Manager{dir: root}}
+	rel := "findings/screenshots/finding-7-step-1.png"
+	first := []byte("first capture at same basename")
+	second := []byte("second capture at same basename")
+	writeReportScreenshotFixture(t, root, "sessions/conv-11/"+rel, first)
+	body := "![步骤](" + rel + ")"
+	one, err := s.prepareFindingReportScreenshots(3, 11, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReportScreenshotFixture(t, root, "sessions/conv-11/"+rel, second)
+	two, err := s.prepareFindingReportScreenshots(3, 11, body)
+	if err != nil || one == two || !strings.Contains(two, "/.snapshots/") {
+		t.Fatalf("new capture reused mutable image URL: one=%q two=%q err=%v", one, two, err)
+	}
+	// Keeping an already committed snapshot URL does not require a recapture.
+	if retained, err := s.prepareFindingReportScreenshots(3, 0, two); err != nil || retained != two {
+		t.Fatalf("immutable snapshot URL was not preserved: %q %v", retained, err)
+	}
+	taskID := int64(3)
+	finding := &db.DBFinding{ID: 7, TaskID: &taskID}
+	_, screenshots, err := prepareFindingExportReport(one+"\n"+two, finding, root)
+	if err != nil || len(screenshots) != 2 || screenshots[0].ArchivePath == screenshots[1].ArchivePath {
+		t.Fatalf("different captures collapsed to one ZIP basename: %+v %v", screenshots, err)
+	}
+	for i, want := range [][]byte{first, second} {
+		file, _, err := openReportScreenshot(root, taskID, 0, screenshots[i].SourcePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := io.ReadAll(file)
+		file.Close()
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("snapshot %d changed contents: %q %v", i, got, err)
+		}
+	}
+	// A matching hash-shaped filename is insufficient if its bytes were altered.
+	corrupt := filepath.Join(root, filepath.FromSlash(screenshots[1].SourcePath))
+	if err := os.WriteFile(corrupt, []byte("corrupt existing snapshot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.prepareFindingReportScreenshots(3, 11, body); err == nil {
+		t.Fatal("reused a corrupted snapshot just because its digest path existed")
+	}
+	if file, _, err := openReportScreenshot(root, taskID, 0, screenshots[1].SourcePath); err == nil {
+		file.Close()
+		t.Fatal("preview/export opened a snapshot whose contents no longer match its digest")
+	}
+}
+
+func TestReportScreenshotStaleWriteCannotPoisonLaterAcceptedCapture(t *testing.T) {
+	s, recorded, _ := trafficEvidenceServer(t)
+	finding, err := s.m.pg.GetFinding(recorded.FindingID)
+	if err != nil || finding == nil || finding.TaskID == nil {
+		t.Fatal("missing screenshot report fixture", finding, err)
+	}
+	conversation, _, err := s.m.pg.EnsureFindingReportConversation(t.Context(), finding.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.m.pg.DeleteConversation(conversation.ID) })
+	ctx := intercept.WithConvID(t.Context(), conversation.ID)
+	rel := fmt.Sprintf("findings/screenshots/finding-%d-step-1.png", recorded.NodeID)
+	capturePath := fmt.Sprintf("sessions/conv-%d/%s", conversation.ID, rel)
+	body := "## 报告\n\n![步骤](" + rel + ")"
+	stale := []byte("\x89PNG\r\n\x1a\nstale unaccepted capture")
+	writeReportScreenshotFixture(t, s.m.dir, capturePath, stale)
+	workflowCall(t, ctx, s.toolUpdateFindingReport(), map[string]any{
+		"finding_id": recorded.NodeID, "report": body, "evidence_version": finding.EvidenceVersion + 1,
+	}, true)
+	after, err := s.m.pg.GetFinding(finding.ID)
+	if err != nil || after.Report != finding.Report {
+		t.Fatal("stale report modified persisted body", after, err)
+	}
+	// A failed preparation must not occupy the old mutable task basename.
+	legacy := filepath.Join(s.m.dir, "tasks", strconv.FormatInt(*finding.TaskID, 10), filepath.FromSlash(rel))
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("stale report polluted the reusable task basename: %v", err)
+	}
+	var previous string
+	for _, want := range [][]byte{
+		[]byte("\x89PNG\r\n\x1a\naccepted second capture"),
+		[]byte("\x89PNG\r\n\x1a\naccepted third capture"),
+	} {
+		writeReportScreenshotFixture(t, s.m.dir, capturePath, want)
+		workflowCall(t, ctx, s.toolUpdateFindingReport(), map[string]any{
+			"finding_id": recorded.NodeID, "report": body, "evidence_version": finding.EvidenceVersion,
+		}, false)
+		after, err = s.m.pg.GetFinding(finding.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		match := screenshotMarkdownLink.FindStringSubmatch(after.Report)
+		if len(match) != 3 || match[2] == rel || match[2] == previous || !strings.Contains(match[2], "/.snapshots/") {
+			t.Fatalf("accepted report did not name its exact new capture: %q", after.Report)
+		}
+		previous = match[2]
+		request := "/api/workspace/preview?path=" + url.QueryEscape(match[2]) + "&finding_id=" + strconv.FormatInt(finding.ID, 10)
+		preview := httptest.NewRecorder()
+		s.wsPreview(preview, httptest.NewRequest(http.MethodGet, request, nil))
+		if preview.Code != http.StatusOK || !bytes.Equal(preview.Body.Bytes(), want) {
+			t.Fatalf("accepted report displayed rejected/earlier capture: %d %q", preview.Code, preview.Body.Bytes())
+		}
+		_, images, err := prepareFindingExportReport(after.Report, after, s.m.dir)
+		if err != nil || len(images) != 1 {
+			t.Fatalf("accepted snapshot not exportable: %+v %v", images, err)
+		}
+		var archive bytes.Buffer
+		zw := zip.NewWriter(&archive)
+		if err := copyScreenshotZipFile(zw, images[0].ArchivePath, images[0].SourcePath, s.m.dir, images[0].taskID); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		zr, err := zip.NewReader(bytes.NewReader(archive.Bytes()), int64(archive.Len()))
+		if err != nil || len(zr.File) != 1 {
+			t.Fatalf("invalid accepted screenshot ZIP: %v", err)
+		}
+		reader, err := zr.File[0].Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, readErr := io.ReadAll(reader)
+		reader.Close()
+		if readErr != nil || !bytes.Equal(got, want) {
+			t.Fatalf("accepted report ZIP reused stale capture: %q %v", got, readErr)
+		}
 	}
 }

@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -482,13 +484,157 @@ func openReportScreenshot(workspaceDir string, taskID, conversationID int64, raw
 		file, err := openRegularScreenshot(root, candidate.rel)
 		root.Close()
 		if err == nil {
+			if err = verifyReportSnapshot(file, candidate.rel); err != nil {
+				file.Close()
+				continue
+			}
 			return file, filepath.ToSlash(filepath.Join(candidate.collection, candidate.name, candidate.rel)), nil
 		}
 	}
 	return nil, "", os.ErrNotExist
 }
 
-// archiveFindingScreenshots copies only the currently verified report session
+const maxReportScreenshotSnapshot = 64 << 20 // bounded per-image capture, not an unbounded file buffer
+
+var reportSnapshotPath = regexp.MustCompile(`^findings/screenshots/\.snapshots/([a-f0-9]{64})/[^/]+$`)
+
+func reportSnapshotDigest(rel string) (string, bool) {
+	match := reportSnapshotPath.FindStringSubmatch(filepath.ToSlash(rel))
+	if len(match) != 2 {
+		return "", false
+	}
+	return match[1], true
+}
+
+func verifyReportSnapshot(file *os.File, rel string) error {
+	digest, snapshot := reportSnapshotDigest(rel)
+	if !snapshot {
+		if strings.HasPrefix(filepath.ToSlash(rel), "findings/screenshots/.snapshots/") {
+			return fmt.Errorf("截图快照路径无效")
+		}
+		return nil // old explicit images remain readable, without claiming a digest
+	}
+	hash := sha256.New()
+	size, err := io.Copy(hash, io.LimitReader(file, maxReportScreenshotSnapshot+1))
+	if err != nil {
+		return err
+	}
+	if size > maxReportScreenshotSnapshot || fmt.Sprintf("%x", hash.Sum(nil)) != digest {
+		return fmt.Errorf("截图快照摘要不匹配")
+	}
+	_, err = file.Seek(0, io.SeekStart)
+	return err
+}
+
+// prepareFindingReportScreenshots binds each current capture to immutable bytes,
+// then rewrites the exact Markdown URL that the atomic report transaction saves.
+// A rejected/stale report may leave an unreferenced hash snapshot, but it cannot
+// occupy a mutable basename that a later successful report would accidentally use.
+func (s *Server) prepareFindingReportScreenshots(taskID, conversationID int64, markdown string) (string, error) {
+	if taskID <= 0 {
+		return markdown, nil
+	}
+	var out strings.Builder
+	resolved := map[string]string{}
+	last := 0
+	for _, match := range screenshotMarkdownLink.FindAllStringSubmatchIndex(markdown, -1) {
+		out.WriteString(markdown[last:match[0]])
+		raw := markdown[match[4]:match[5]]
+		rel, portable := reportScreenshotRelative(raw)
+		if !portable {
+			out.WriteString(markdown[match[0]:match[1]])
+			last = match[1]
+			continue
+		}
+		snapshot, cached := resolved[raw]
+		if !cached {
+			file, _, err := openReportScreenshot(s.m.dir, 0, conversationID, raw)
+			if err != nil {
+				// Report edits may retain an already committed immutable URL.
+				// Only such a digest path may reuse task data instead of a fresh
+				// capture; ordinary basenames never prefer a stale task copy.
+				if _, immutable := reportSnapshotDigest(rel); immutable {
+					file, _, err = openReportScreenshot(s.m.dir, taskID, 0, raw)
+				}
+			}
+			if err != nil {
+				out.WriteString(markdown[match[0]:match[1]])
+				last = match[1]
+				continue
+			}
+			snapshot, err = s.saveReportScreenshotSnapshot(taskID, rel, file)
+			closeErr := file.Close()
+			if err := errors.Join(err, closeErr); err != nil {
+				return "", err
+			}
+			resolved[raw] = snapshot
+		}
+		out.WriteString(markdown[match[0]:match[4]])
+		out.WriteString(snapshot)
+		out.WriteString(markdown[match[5]:match[1]])
+		last = match[1]
+	}
+	out.WriteString(markdown[last:])
+	return out.String(), nil
+}
+
+func (s *Server) saveReportScreenshotSnapshot(taskID int64, rel string, in *os.File) (string, error) {
+	info, err := in.Stat()
+	if err != nil {
+		return "", err
+	}
+	data, err := io.ReadAll(io.LimitReader(in, maxReportScreenshotSnapshot+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > maxReportScreenshotSnapshot {
+		return "", fmt.Errorf("截图超过单张 64 MiB 的快照上限")
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(data))
+	snapshotDir := filepath.Join("findings", "screenshots", ".snapshots", digest)
+	snapshot := filepath.Join(snapshotDir, filepath.Base(rel))
+	task, err := openScreenshotDirectoryRoot(s.m.dir, "tasks", strconv.FormatInt(taskID, 10), true)
+	if err != nil {
+		return "", err
+	}
+	defer task.Close()
+	if err := task.MkdirAll(snapshotDir, 0o700); err != nil {
+		return "", err
+	}
+	// Publish only a fully written file. Link is no-replace/atomic, so concurrent
+	// captures of the same bytes cannot expose a partially written snapshot.
+	pending := filepath.Join(snapshotDir, ".pending-"+rand.Text())
+	out, err := task.OpenFile(pending, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer task.Remove(pending)
+	_, writeErr := io.Copy(out, bytes.NewReader(data))
+	err = errors.Join(writeErr, out.Sync(), out.Close())
+	if err != nil {
+		return "", err
+	}
+	if err := task.Chtimes(pending, info.ModTime(), info.ModTime()); err != nil {
+		return "", err
+	}
+	if err := task.Link(pending, snapshot); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", err
+	}
+	// A preexisting digest path is never trusted just because its name matches.
+	existing, err := openRegularScreenshot(task, snapshot)
+	if err != nil {
+		return "", err
+	}
+	verifyErr := verifyReportSnapshot(existing, snapshot)
+	err = errors.Join(verifyErr, existing.Close())
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(snapshot), nil
+}
+
+// archiveFindingScreenshots is the legacy materialization helper. Production
+// report writes use prepareFindingReportScreenshots's immutable rewritten URLs.
 // into its task archive. Caller validates the conversation/finding association;
 // the filesystem capabilities independently enforce both directory boundaries.
 func (s *Server) archiveFindingScreenshots(taskID, conversationID int64, markdown string) error {

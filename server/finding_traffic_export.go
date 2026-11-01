@@ -201,7 +201,13 @@ func prepareFindingExportReport(markdown string, finding *db.DBFinding, workspac
 		if err := errors.Join(statErr, closeErr); err != nil {
 			return "", nil, err
 		}
-		archivePath := filepath.ToSlash(fmt.Sprintf("screenshots/%d/%s", finding.ID, filepath.Base(source)))
+		archiveName := filepath.Base(source)
+		if _, suffix, found := strings.Cut(filepath.ToSlash(source), "/findings/screenshots/"); found && strings.HasPrefix(suffix, ".snapshots/") {
+			// Different immutable captures may share the same original basename.
+			// Preserve the digest directory rather than collapsing their ZIP URLs.
+			archiveName = suffix
+		}
+		archivePath := filepath.ToSlash(fmt.Sprintf("screenshots/%d/%s", finding.ID, archiveName))
 		if !seen[archivePath] {
 			screenshots = append(screenshots, exportedScreenshot{
 				ReportPath: raw, ArchivePath: archivePath, SourcePath: source,

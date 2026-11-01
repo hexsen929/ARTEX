@@ -490,9 +490,11 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 					return actool.Errorf(err.Error()), nil
 				}
 				if f, err := s.m.pg.GetFinding(fid); err == nil && f != nil && f.TaskID != nil {
-					if err := s.archiveFindingScreenshots(*f.TaskID, intercept.ConvIDFromContext(ctx), a.Report); err != nil {
+					report, err := s.prepareFindingReportScreenshots(*f.TaskID, intercept.ConvIDFromContext(ctx), a.Report)
+					if err != nil {
 						return actool.Errorf("归档报告截图失败: " + err.Error()), nil
 					}
+					a.Report = report
 				}
 			}
 			n, err := s.m.pg.SetFindingReportVersionAndConversationByNodeID(ctx, nodeID, a.Report, a.EvidenceVersion, intercept.ConvIDFromContext(ctx))

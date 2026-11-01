@@ -26,16 +26,18 @@ const findings = ["unverified", "confirmed"].map((verification_status, index) =>
 }));
 const requests = [], unexpected = new Set(), external = new Set(), sideItems = [];
 // These are saved synthetic packets, never an instruction to contact fixture.invalid.
+// Keep the original query unique; the second double marker deliberately ends the packet.
+const packetRequestBody = "FIXTURE_PACKET_MATCH\nsecond line\nFIXTURE_DOUBLE\nliteral .*[x](a)\nFIXTURE_DOUBLE";
 const binding = {
   id: "701", finding_id: "501", snapshot_id: "801", role: "proof", note: "UI_FIXTURE_BOUND_PACKET", position: 0, created_at: stamp,
   snapshot: { id: "801", source_traffic_id: "601", captured_at: 1793246400,
     url: "https://fixture.invalid/demo", method: "POST", status: 200, content_type: "text/plain",
     req_head: "POST /demo HTTP/1.1\nHost: fixture.invalid\nContent-Type: text/plain", resp_head: "HTTP/1.1 200 OK\nContent-Type: text/plain",
-    req_hash: "fixture-request-hash", resp_hash: "fixture-response-hash", req_len: 33, resp_len: 19 },
+    req_hash: "fixture-request-hash", resp_hash: "fixture-response-hash", req_len: Buffer.byteLength(packetRequestBody), resp_len: 19 },
 };
 const packet = {
   binding,
-  request: { content: "FIXTURE_PACKET_MATCH\nsecond line", offset: 0, total: 33, next_offset: 33, truncated: false, binary: false },
+  request: { content: packetRequestBody, offset: 0, total: Buffer.byteLength(packetRequestBody), next_offset: Buffer.byteLength(packetRequestBody), truncated: false, binary: false },
   response: { content: "UI_FIXTURE_RESPONSE", offset: 0, total: 19, next_offset: 19, truncated: false, binary: false },
 };
 const reportItems = [{ seq: 1, worker: "reporter", ts: stamp, kind: "text", summary: "UI_FIXTURE_EXISTING_REPORT_HISTORY", detail: "UI_FIXTURE_EXISTING_REPORT_HISTORY\n\n" + screenshotMarkdown }];
@@ -345,7 +347,19 @@ async function main() {
   await page.getByRole("textbox", { name: "搜索报文内容", exact: true }).first().fill("FIXTURE_PACKET_MATCH");
   await page.getByText("1 处命中", { exact: true }).first().waitFor();
   await eventually(async () => await packetEditor.locator(".cm-searchMatch").count() > 0, "Packet search counted matches without highlighting them");
-  console.log("PASS read-only packet search both counts and highlights matches");
+  const packetSearch = page.getByRole("textbox", { name: "搜索报文内容", exact: true }).first();
+  await packetSearch.fill("UI_FIXTURE_ABSENT_98765");
+  await page.getByText("0 处命中", { exact: true }).first().waitFor();
+  await eventually(async () => await packetEditor.locator(".cm-searchMatch").count() === 0, "Absent packet query left stale highlights");
+  await packetSearch.fill("FIXTURE_DOUBLE");
+  await page.getByText("2 处命中", { exact: true }).first().waitFor();
+  await eventually(async () => await packetEditor.locator(".cm-searchMatch").count() === 2, "Repeated packet query or match at document end was counted/highlighted incorrectly");
+  await packetSearch.fill(".*[x](a)");
+  await page.getByText("1 处命中", { exact: true }).first().waitFor();
+  await eventually(async () => await packetEditor.locator(".cm-searchMatch").count() === 1, "Packet query regex metacharacters were not searched literally");
+  await packetSearch.fill("");
+  await eventually(async () => await packetEditor.locator(".cm-searchMatch").count() === 0, "Clearing packet search left stale highlights");
+  console.log("PASS read-only packet search counts and highlights unique/repeated/end/literal queries and clears absent matches");
   const sendsBeforeSeed = requests.filter((r) => r.endpoint === "/api/repeater/send").length;
   await page.getByRole("button", { name: "送入请求重发", exact: true }).first().click();
   const requestEditor = page.getByRole("textbox", { name: "请求", exact: true });

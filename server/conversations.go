@@ -603,6 +603,7 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 		}
 		if scope, ok := ctx.Value(findingReportScopeKey{}).(findingReportScope); ok && scope.binding != nil {
 			s.findingCheckTasks.Store(c.ID, strconv.FormatInt(scope.binding.TaskID, 10))
+			msg = fmt.Sprintf("【平台已核实的报告来源】独立漏洞记录 finding_id=%d；探索节点 finding_node_id=%d；来源任务 task_id=%d。仅调整该漏洞报告，先读取现有报告与证据；不要新建漏洞或扩大范围。get_finding_traffic 使用独立记录 ID，update_finding_report 的 finding_id 使用探索节点 ID，并回传读取到的 evidence_version。以下是本轮请求：\n%s", scope.binding.FindingID, scope.binding.NodeID, scope.binding.TaskID, msg)
 			if err := s.reportSourceTaskRunnable(scope.binding.TaskID); err != nil {
 				finishReason = err.Error()
 				_, _ = s.m.pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true, Summary: finishReason, Detail: finishReason})
