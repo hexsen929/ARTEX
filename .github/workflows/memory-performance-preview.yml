@@ -1,0 +1,71 @@
+name: memory performance preview
+on:
+  pull_request:
+    paths:
+      - 'db/memory*.go'
+      - 'db/schema.sql'
+      - 'server/memory*.go'
+      - '.github/workflows/memory-performance-preview.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: memory-preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    uses: ./.github/workflows/tests.yml
+
+  package:
+    needs: verify
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build tested Mac ARM64 preview without publishing a release
+        env:
+          ARTEX_BUILD_VERSION: 2.4.7-memory-perf.${{ github.run_number }}
+          ARTEX_RELEASE_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
+          ARTEX_COMPRESS: '0'
+          ARTEX_PACKAGE: '1'
+          ARTEX_PACKAGE_DIR: dist
+        run: ./build.sh --target darwin/arm64
+      - name: Record exact tested source and package digests
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          root = pathlib.Path('dist')
+          packages = list(root.glob('*.zip'))
+          assert len(packages) == 1, 'expected one Mac ARM64 package'
+          manifest = {
+              'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'source_tree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+              'run_id': int(os.environ['GITHUB_RUN_ID']),
+              'platform': 'darwin/arm64',
+              'archive': packages[0].name,
+              'sha256': hashlib.sha256(packages[0].read_bytes()).hexdigest(),
+              'release_published': False,
+          }
+          (root / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps(manifest, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memory-perf-darwin-arm64
+          path: |
+            dist/*.zip
+            dist/build-manifest.json
+          if-no-files-found: error
+          retention-days: 7

@@ -21,7 +21,8 @@ const memoryDiscoverySQL = `SELECT live.source_kind,live.source_id,live.origin_t
 	AND ($1 OR NOT EXISTS(SELECT 1 FROM memory_discovery_checks checked
 	  WHERE checked.source_kind=live.source_kind AND checked.source_id=live.source_id
 	  AND checked.source_version=live.source_version AND checked.native_version=live.native_version
-	  AND checked.source_state=live.source_state AND checked.source_updated_at=live.source_updated_at AND checked.checked))
+	  AND checked.source_state=live.source_state AND checked.source_updated_at=live.source_updated_at AND checked.checked
+	  AND checked.checked_at>now()-interval '15 minutes'))
 	AND NOT EXISTS(SELECT 1 FROM memory_jobs job WHERE job.source_ref=source.id
 	  AND job.source_version=live.source_version AND job.settings_epoch=$4
 	  AND job.extractor_version=1 AND job.state IN ('queued','running'))
@@ -87,8 +88,10 @@ func (d *DB) discoverMemorySources(ctx context.Context, taskID int64, limit int,
 		var token int64
 		if !historical {
 			// This body-free marker is visible to the existing source invalidation
-			// triggers. A concurrent edit deletes it; stale work cannot acknowledge
-			// a later revision, including when the phase had no previous source row.
+			// triggers. Edits that observe the marker delete it, and tokens prevent
+			// stale acknowledgement. A bounded expiry is also necessary: a writer
+			// whose statement snapshot predates marker registration may commit late
+			// without observing it. Negative caching must never hide learning forever.
 			err = d.QueryRowContext(ctx, `INSERT INTO memory_discovery_checks
 			  (source_kind,source_id,origin_task_id,source_version,native_version,source_state,source_updated_at)
 			  VALUES($1,$2,$3,$4,$5,$6,$7)

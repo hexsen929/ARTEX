@@ -290,3 +290,46 @@ func TestMemoryDiscoveryEmptyCacheTracksAnchorAndAssetChanges(t *testing.T) {
 		})
 	}
 }
+
+func TestMemoryDiscoveryNegativeCacheHasLateCommitBackstop(t *testing.T) {
+	d := memoryFixtureDB(t)
+	memoryEnableIncrementalHistory(t, d)
+	task := memoryFixtureTask(t, d)
+	intent, facts := memoryFixtureIntent(t, d, task, "running", 1)
+	if _, err := d.Exec(`UPDATE exploration_nodes SET payload=jsonb_set(payload,'{preconditions}','{"unsupported":true}'::jsonb) WHERE id=$1`, facts[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Exploration(task.ExplorationID).SetIntentState(intent, "done"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`UPDATE exploration_nodes SET completed_at=now()-interval '31 seconds' WHERE id=$1`, intent); err != nil {
+		t.Fatal(err)
+	}
+	// This writer's invalidation runs before the discovery marker exists. Its
+	// eventual commit is not visible to the source snapshot built below.
+	tx, err := d.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE exploration_nodes SET payload=payload-'preconditions',content_version=content_version+1 WHERE id=$1`, facts[0]); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := d.FindMemorySources(t.Context(), 100); err != nil || len(found) != 0 {
+		t.Fatalf("uncommitted content escaped snapshot: %+v %v", found, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// Explicit history is immediately fresh, while automatic empty-cache work
+	// has a bounded quiet period rather than a permanent missed invalidation.
+	if found, err := d.FindMemoryHistorySources(t.Context(), task.ID, 50); err != nil || len(found) != 1 {
+		t.Fatalf("explicit history was stale: %+v %v", found, err)
+	}
+	if _, err := d.Exec(`UPDATE memory_discovery_checks SET checked_at=now()-interval '16 minutes' WHERE source_kind='intent_stage' AND source_id=$1`, fmt.Sprint(intent)); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := d.FindMemorySources(t.Context(), 100); err != nil || len(found) != 1 {
+		t.Fatalf("late commit remained hidden after expiry: %+v %v", found, err)
+	}
+}
