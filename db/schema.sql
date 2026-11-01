@@ -2107,8 +2107,32 @@ CREATE INDEX IF NOT EXISTS idx_memory_phase_task_id ON tasks((id::text));
 -- All effective fact members affect identity; only <=8 complete <=600-byte
 -- summaries enter the bounded model input. No brief, instructions, raw evidence,
 -- intelligence, credentials, fact.detail or worker_result.message are projected.
-CREATE OR REPLACE VIEW memory_stage_sources AS
-WITH stages AS NOT MATERIALIZED (
+-- Discovery reads only cheap native metadata. Never join a global content view
+-- before selecting the bounded set of identities to build.
+CREATE OR REPLACE VIEW memory_stage_metadata AS
+SELECT 'intent_stage'::text AS source_kind,intent.id::text AS source_id,
+  task.id AS origin_task_id,intent.memory_completion_generation+1 AS source_version,
+  intent.content_version::bigint AS native_version,intent.state AS source_state,
+  intent.completed_at AS source_updated_at
+FROM exploration_nodes intent JOIN tasks task ON task.exploration_id=intent.exploration_id
+WHERE intent.kind='intent' AND intent.state IN ('done','blocked','exhausted','stopped')
+  AND intent.completed_at IS NOT NULL AND intent.completed_at<=now()-interval '30 seconds'
+  AND task.deleted_at IS NULL AND task.archived_at IS NULL
+UNION ALL
+SELECT 'task_stage',task.id::text,task.id,task.memory_completion_generation+1,
+  0::bigint,task.status,task.completed_at FROM tasks task
+WHERE task.status IN ('done','failed','timeout') AND task.completed_at IS NOT NULL
+  AND task.completed_at<=now()-interval '30 seconds'
+  AND task.deleted_at IS NULL AND task.archived_at IS NULL;
+
+-- SET search_path deliberately prevents SQL-function inlining. Only one native
+-- phase is materialized; both fingerprint and model projection reuse its members.
+CREATE OR REPLACE FUNCTION memory_build_stage_source(kind_arg text,id_arg text)
+RETURNS TABLE(source_kind text,source_id text,source_version bigint,source_fingerprint text,
+ origin_task_id bigint,origin_conversation_id bigint,agent_key text,session_id text,
+ source_state text,source_updated_at timestamptz,content_text text)
+LANGUAGE sql STABLE ROWS 1 SET search_path=public,pg_temp AS $$
+WITH stages AS MATERIALIZED (
     SELECT 'intent_stage'::text AS source_kind,intent.id::text AS source_id,
       intent.memory_completion_generation+1 AS source_version,task.id AS origin_task_id,
       intent.exploration_id,intent.id AS intent_id,
@@ -2117,15 +2141,15 @@ WITH stages AS NOT MATERIALIZED (
       CASE WHEN COALESCE(intent.payload#>>'{worker_result,code}','') ~ '^[a-z0-9_:-]{0,64}$'
         THEN COALESCE(intent.payload#>>'{worker_result,code}','') ELSE '' END AS termination_code
     FROM exploration_nodes intent JOIN tasks task ON task.exploration_id=intent.exploration_id
-    WHERE intent.kind='intent' AND intent.state IN ('done','blocked','exhausted','stopped')
+    WHERE kind_arg='intent_stage' AND intent.id=id_arg::bigint AND intent.kind='intent' AND intent.state IN ('done','blocked','exhausted','stopped')
       AND intent.completed_at IS NOT NULL AND intent.completed_at<=now()-interval '30 seconds'
       AND task.deleted_at IS NULL AND task.archived_at IS NULL
     UNION ALL
     SELECT 'task_stage',task.id::text,task.memory_completion_generation+1,
       task.id,task.exploration_id,0::bigint,'mainagent',task.status,task.completed_at,0::bigint,''
-    FROM tasks task WHERE task.status IN ('done','failed','timeout') AND task.completed_at IS NOT NULL
+    FROM tasks task WHERE kind_arg='task_stage' AND task.id=id_arg::bigint AND task.status IN ('done','failed','timeout') AND task.completed_at IS NOT NULL
       AND task.completed_at<=now()-interval '30 seconds' AND task.deleted_at IS NULL AND task.archived_at IS NULL
-), members AS NOT MATERIALIZED (
+), members AS MATERIALIZED (
     SELECT stage.source_kind,stage.source_id,fact.id,fact.content_version,fact.state,fact.payload,
       memory_stage_anchor_signature(fact.id) AS anchor_signature,
       memory_stage_targets(fact.payload,fact.id) AS targets,
@@ -2169,6 +2193,14 @@ JOIN LATERAL (
         AND octet_length(to_jsonb(candidate.observation::text)::text)<=9000
       ORDER BY candidate.id DESC LIMIT 8) chosen
 ) included ON included.count>0;
+$$;
+
+CREATE OR REPLACE VIEW memory_stage_sources AS
+SELECT meta.source_kind,meta.source_id,built.source_version,built.source_fingerprint,
+ built.origin_task_id,built.origin_conversation_id,built.agent_key,built.session_id,
+ built.source_state,built.source_updated_at,built.content_text
+FROM memory_stage_metadata meta
+CROSS JOIN LATERAL memory_build_stage_source(meta.source_kind,meta.source_id) built;
 
 CREATE OR REPLACE VIEW memory_live_sources AS
 SELECT * FROM memory_stage_sources
@@ -2178,10 +2210,36 @@ UPDATE memory_jobs SET state='skipped',result='skipped',lease_token='',lease_unt
 WHERE state IN ('queued','running','failed') AND source_ref IN (
   SELECT id FROM memory_sources WHERE source_kind IN ('node','conversation_activity'));
 
+-- Body-free negative discovery cache. A marker is installed BEFORE reading
+-- content, and every existing source invalidation also covers these markers.
+-- Deletion on mutation prevents an old reader from acknowledging a new revision.
+CREATE TABLE IF NOT EXISTS memory_discovery_checks (
+ id BIGSERIAL PRIMARY KEY,
+ source_kind TEXT NOT NULL CHECK (source_kind IN ('intent_stage','task_stage')),
+ source_id TEXT NOT NULL,
+ origin_task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ source_version BIGINT NOT NULL,
+ native_version BIGINT NOT NULL,
+ source_state TEXT NOT NULL,
+ source_updated_at TIMESTAMPTZ NOT NULL,
+ checked BOOLEAN NOT NULL DEFAULT false,
+ checked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(source_kind,source_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_discovery_task ON memory_discovery_checks(origin_task_id);
+CREATE INDEX IF NOT EXISTS idx_memory_discovery_age ON memory_discovery_checks(checked_at,id);
+CREATE OR REPLACE VIEW memory_tracked_sources AS
+SELECT id,source_kind,source_id,origin_task_id FROM memory_sources
+UNION ALL
+SELECT -checked.id,checked.source_kind,checked.source_id,checked.origin_task_id
+FROM memory_discovery_checks checked WHERE NOT EXISTS(
+ SELECT 1 FROM memory_sources source WHERE source.source_kind=checked.source_kind AND source.source_id=checked.source_id);
+
 CREATE OR REPLACE FUNCTION memory_invalidate_source(source_kind_arg text,source_id_arg text,clear_body boolean)
 RETURNS void LANGUAGE plpgsql AS $$
 DECLARE source_ref_id bigint;
 BEGIN
+    DELETE FROM memory_discovery_checks WHERE source_kind=source_kind_arg AND source_id=source_id_arg;
     UPDATE memory_sources SET valid=false,source_updated_at=now(),updated_at=now()
       WHERE source_kind=source_kind_arg AND source_id=source_id_arg RETURNING id INTO source_ref_id;
     IF source_ref_id IS NULL THEN RETURN; END IF;
@@ -2255,7 +2313,7 @@ DECLARE source_row record;
 BEGIN
     IF TG_OP='DELETE' OR (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
        OR (NEW.archived_at IS NOT NULL AND OLD.archived_at IS NULL) THEN
-      FOR source_row IN SELECT source_kind,source_id FROM memory_sources WHERE origin_task_id=OLD.id ORDER BY id LOOP
+      FOR source_row IN SELECT source_kind,source_id FROM memory_tracked_sources WHERE origin_task_id=OLD.id ORDER BY id LOOP
         PERFORM memory_invalidate_source(source_row.source_kind,source_row.source_id,true);
       END LOOP;
       UPDATE memory_entries SET state='source_invalid',title='',content='',content_hash='',
@@ -2295,7 +2353,7 @@ BEGIN
     ELSE affects_fact:=nkind='fact' AND OLD.state<>'origin' AND memory_source_text_field(OLD.payload,'summary') IS NOT NULL;
     END IF;
     FOR source_row IN
-      SELECT source_kind,source_id FROM memory_sources source WHERE
+      SELECT source_kind,source_id FROM memory_tracked_sources source WHERE
         (source.source_kind='node' AND source.source_id=nid::text)
         OR (source.source_kind='intent_stage' AND ((nkind='intent' AND source.source_id=nid::text)
           OR (affects_fact AND EXISTS(SELECT 1 FROM exploration_edges edge WHERE edge.exploration_id=expid
@@ -2327,7 +2385,7 @@ BEGIN
       IF NEW.rel='yields' THEN new_src:=NEW.src_id; END IF;
     END IF;
     IF old_src=0 AND new_src=0 THEN RETURN NULL; END IF;
-    FOR source_row IN SELECT source_kind,source_id FROM memory_sources source WHERE
+    FOR source_row IN SELECT source_kind,source_id FROM memory_tracked_sources source WHERE
       (source.source_kind='intent_stage' AND source.source_id IN (old_src::text,new_src::text))
       OR (source.source_kind='task_stage' AND EXISTS(SELECT 1 FROM tasks task
         WHERE task.exploration_id IN (old_exp,new_exp) AND task.id::text=source.source_id))
@@ -2354,7 +2412,7 @@ CREATE OR REPLACE FUNCTION memory_invalidate_fact_stage_set(node_ids_arg bigint[
 RETURNS void LANGUAGE plpgsql AS $$
 DECLARE source_row record;
 BEGIN
-    FOR source_row IN SELECT source_kind,source_id FROM memory_sources source WHERE
+    FOR source_row IN SELECT source_kind,source_id FROM memory_tracked_sources source WHERE
       (source.source_kind='intent_stage' AND EXISTS(SELECT 1 FROM exploration_edges edge
         WHERE edge.dst_id=ANY(node_ids_arg) AND edge.rel='yields' AND edge.src_id::text=source.source_id))
       OR (source.source_kind='task_stage' AND EXISTS(SELECT 1 FROM exploration_nodes fact JOIN tasks task

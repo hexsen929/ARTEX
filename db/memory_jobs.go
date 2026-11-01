@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -74,8 +75,17 @@ func scanMemorySource(row memoryScanner) (MemorySource, error) {
 }
 
 func getMemorySource(ctx context.Context, q memoryQueryer, kind, id string) (*MemorySource, error) {
-	source, err := scanMemorySource(q.QueryRowContext(ctx, `SELECT `+memorySourceCols+`
-		FROM memory_live_sources live WHERE live.source_kind=$1 AND live.source_id=$2`, kind, id))
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	query := `SELECT ` + memorySourceCols + ` FROM memory_live_sources live WHERE live.source_kind=$1 AND live.source_id=$2`
+	if isMemoryStage(kind) {
+		n, err := strconv.ParseInt(id, 10, 64)
+		if err != nil || n < 1 || strconv.FormatInt(n, 10) != id {
+			return nil, nil
+		}
+		query = `SELECT ` + memorySourceCols + ` FROM memory_build_stage_source($1,$2) live`
+	}
+	source, err := scanMemorySource(q.QueryRowContext(ctx, query, kind, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -106,48 +116,7 @@ func (d *DB) FindMemoryHistorySources(ctx context.Context, taskID int64, limit i
 }
 
 func (d *DB) findMemorySources(ctx context.Context, taskID int64, limit int, historical bool) ([]MemorySource, error) {
-	maxLimit := 100
-	if historical {
-		maxLimit = 50
-	}
-	if limit < 1 || limit > maxLimit {
-		limit = maxLimit
-	}
-	settings, err := d.GetMemorySettings(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if !settings.Enabled || !settings.AutoExtract {
-		return []MemorySource{}, nil
-	}
-	rows, err := d.QueryContext(ctx, `SELECT `+memorySourceCols+` FROM memory_live_sources live
-		LEFT JOIN memory_sources source ON source.source_kind=live.source_kind AND source.source_id=live.source_id
-		WHERE ($1 OR live.source_updated_at>$2) AND ($3=0 OR live.origin_task_id=$3)
-		AND live.source_kind IN ('intent_stage','task_stage')
-		AND source.suppressed_at IS NULL
-		AND ($1 OR source.last_completed_version IS DISTINCT FROM live.source_version)
-		AND ($1 OR source.last_attempted_version IS DISTINCT FROM live.source_version)
-		AND NOT (COALESCE(source.valid,false) AND source.last_completed_fingerprint=live.source_fingerprint)
-		AND NOT EXISTS(SELECT 1 FROM memory_entries entry WHERE entry.source_ref=source.id
-		  AND entry.source_fingerprint=live.source_fingerprint AND entry.state IN ('active','disabled'))
-		AND NOT EXISTS(SELECT 1 FROM memory_jobs job WHERE job.source_ref=source.id
-		  AND job.source_fingerprint=live.source_fingerprint AND job.settings_epoch=$4 AND job.extractor_version=1
-		  AND (NOT $1 OR job.state IN ('queued','running')))
-		ORDER BY live.source_updated_at,live.source_kind,live.source_id LIMIT $5`, historical, settings.LearnAfter, taskID, settings.Epoch, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []MemorySource{}
-	for rows.Next() {
-		source, err := scanMemorySource(rows)
-		if err != nil {
-			return nil, err
-		}
-		source.SettingsEpoch, source.Historical = settings.Epoch, historical
-		out = append(out, source)
-	}
-	return out, rows.Err()
+	return d.discoverMemorySources(ctx, taskID, limit, historical)
 }
 
 func sameMemorySource(a, b MemorySource) bool {
@@ -644,6 +613,11 @@ func (d *DB) PruneMemory(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_jobs WHERE id IN (
 		SELECT id FROM memory_jobs WHERE state IN ('done','skipped') AND updated_at<now()-($1*interval '1 day')
 		ORDER BY updated_at,id LIMIT 1000 FOR UPDATE SKIP LOCKED)`, days); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_discovery_checks WHERE id IN (
+        SELECT id FROM memory_discovery_checks WHERE checked_at<now()-($1*interval '1 day')
+        ORDER BY checked_at,id LIMIT 1000 FOR UPDATE SKIP LOCKED)`, days); err != nil {
 		return err
 	}
 	return tx.Commit()
