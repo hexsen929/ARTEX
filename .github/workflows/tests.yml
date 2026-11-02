@@ -145,8 +145,19 @@ jobs:
           go-version-file: go.mod
       - name: PostgreSQL 18 Unicode checkpoint round-trip regressions
         run: |
-          go test -race ./db -run 'Test(JsonbClean|SideSnapshotRawUnicodeJSONBRoundTrip|JSONBNormalizationAcceptsUnicodeBoundaries)' -count=1 -timeout=5m
-          go test -race ./server -run '^TestTaskDeleteCheckpoint' -count=1 -timeout=5m
+          set -euo pipefail
+          db_log="$RUNNER_TEMP/checkpoint-pg18-db.log"
+          server_log="$RUNNER_TEMP/checkpoint-pg18-server.log"
+          go test -race -v ./db -run 'Test(JsonbClean|SideSnapshotRawUnicodeJSONBRoundTrip|JSONBNormalizationAcceptsUnicodeBoundaries)' -count=1 -timeout=5m | tee "$db_log"
+          go test -race -v ./server -run '^TestTaskDeleteCheckpoint' -count=1 -timeout=5m | tee "$server_log"
+          # A fixture that skipped because database/schema setup failed is not
+          # evidence of PostgreSQL 18 acceptance. Require real PASS events.
+          for name in TestSideSnapshotRawUnicodeJSONBRoundTrip TestJSONBNormalizationAcceptsUnicodeBoundaries; do
+            grep -q -- "^--- PASS: $name " "$db_log"
+          done
+          for name in TestTaskDeleteCheckpointPermanentFailureDoesNotBlockExplicitDeletion TestTaskDeleteCheckpointDatabaseFailurePreservesUnsavedState TestTaskDeleteCheckpointStopWaitsForActualSideRunExit TestTaskDeleteCheckpointLateInFlightSaveCannotReviveCommittedDeletion; do
+            grep -q -- "^--- PASS: $name " "$server_log"
+          done
 
   # Run frontend checks independently: backend compilation failures must not
   # hide TypeScript or UI regressions during a cross-cutting source port.
