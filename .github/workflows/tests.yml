@@ -115,12 +115,49 @@ jobs:
           go test -race ./server -run 'Test(LazyMCP|MCPSlotQueue|LeasedMCP|ManagerClose)' -count=1 -timeout=3m
           go test -race ./traffic -run 'TestSharedProxy' -count=1 -timeout=3m
           go test -race ./agent -run 'Test(ChatProxyOverride|ChatPreservesParent|ConcurrentTaskChats)' -count=1 -timeout=3m
-          go test -race ./server -run 'TestSideCheckpoint' -count=1 -timeout=3m
+          go test -race ./server -run 'Test(SideCheckpoint|TaskDeleteCheckpoint|SideTaskDrain)' -count=1 -timeout=3m
           go test -race ./agent -run 'Test(TaskAssociatedVerifierSideCapture|SideCaptureParent)' -count=1 -timeout=3m
           go test -race ./agent ./llmguard -run 'Test(ResponsesError|StructuredProviderError|StructuredStatus|OnlyConcreteTransport|CancellationWinsOverStructured)' -count=1 -timeout=3m
           go test -race ./server -run 'Test(RuntimeMerge|MergeScreenshot|MergeAutoTitle|MergeFindingSide)' -count=1 -timeout=3m
           go test -race ./guard -run 'Test(Extract|RoE)' -count=1 -timeout=3m
           go test -race ./server -run 'Test(ChatProfileWiring|TaskAgentBindingWiring|RuntimeControlRoutes|RoESettings|InstalledSkillDefaultsStartup|SkillDefaultsPending|NotifierSettingsWiring)' -count=1 -timeout=5m
+
+  checkpoint-postgres-18:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: artex_test
+          POSTGRES_PASSWORD: artex_test
+          POSTGRES_DB: artex_checkpoint_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U artex_test -d artex_checkpoint_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      ARTEX_PG_DSN: postgres://artex_test:artex_test@127.0.0.1:5432/artex_checkpoint_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: PostgreSQL 18 Unicode checkpoint round-trip regressions
+        run: |
+          set -euo pipefail
+          db_log="$RUNNER_TEMP/checkpoint-pg18-db.log"
+          server_log="$RUNNER_TEMP/checkpoint-pg18-server.log"
+          go test -race -v ./db -run 'Test(JsonbClean|SideSnapshotRawUnicodeJSONBRoundTrip|JSONBNormalizationAcceptsUnicodeBoundaries)' -count=1 -timeout=5m | tee "$db_log"
+          go test -race -v ./server -run '^TestTaskDeleteCheckpoint' -count=1 -timeout=5m | tee "$server_log"
+          # A fixture that skipped because database/schema setup failed is not
+          # evidence of PostgreSQL 18 acceptance. Require real PASS events.
+          for name in TestSideSnapshotRawUnicodeJSONBRoundTrip TestJSONBNormalizationAcceptsUnicodeBoundaries; do
+            grep -q -- "^--- PASS: $name " "$db_log"
+          done
+          for name in TestTaskDeleteCheckpointPermanentFailureDoesNotBlockExplicitDeletion TestTaskDeleteCheckpointDatabaseFailurePreservesUnsavedState TestTaskDeleteCheckpointStopWaitsForActualSideRunExit TestTaskDeleteCheckpointLateInFlightSaveCannotReviveCommittedDeletion; do
+            grep -q -- "^--- PASS: $name " "$server_log"
+          done
 
   # Run frontend checks independently: backend compilation failures must not
   # hide TypeScript or UI regressions during a cross-cutting source port.

@@ -32,35 +32,93 @@ func utf8Clean(s string) string {
 	return strings.ToValidUTF8(s, "�")
 }
 
-// jsonbClean makes marshaled JSON safe for a PostgreSQL jsonb column. json.Marshal
-// faithfully encodes a NUL byte (U+0000) as the 6-byte escape sequence \u0000; the
-// json type stores it, but jsonb rejects it with "unsupported Unicode escape
-// sequence" (SQLSTATE 22P05). Captured HTTP/tool bytes can carry NULs, so drop the
-// escape — this also covers NULs nested inside json.RawMessage fields, which are
-// copied verbatim into the output. Only a *real* escape is stripped: a \u0000 is
-// genuine when preceded by an even number of backslashes, so an escaped-backslash
-// run such as \\u0000 (the literal text u0000) is left intact.
+// jsonbClean normalizes JSON string encodings that PostgreSQL jsonb cannot
+// represent. Ordinary Go strings are already normalized by json.Marshal, but
+// json.RawMessage can retain isolated UTF-16 surrogate escapes: Go accepts their
+// JSON syntax while PostgreSQL rejects them with SQLSTATE 22P02. Actual NUL
+// escapes are also unsupported by jsonb (22P05) and retain the existing policy
+// of being dropped. Isolated surrogates become U+FFFD, matching Go's decoding.
+//
+// Scan the original string tokens instead of decoding/re-encoding the document:
+// valid pairs, escaped-backslash literals, number precision/lexemes, object order
+// and duplicate keys remain byte-for-byte unchanged. In particular, removing a
+// NUL between two isolated surrogates must not join them into a new valid pair.
 func jsonbClean(b []byte) []byte {
-	if !bytes.Contains(b, []byte("\\u0000")) {
+	if !bytes.Contains(b, []byte(`\u`)) {
 		return b
 	}
-	out := make([]byte, 0, len(b))
-	bs := 0 // consecutive backslashes already emitted before position i
-	for i := 0; i < len(b); i++ {
-		if b[i] == '\\' && bs%2 == 0 && i+5 < len(b) &&
-			b[i+1] == 'u' && b[i+2] == '0' && b[i+3] == '0' && b[i+4] == '0' && b[i+5] == '0' {
-			i += 5 // skip the whole \u0000
-			bs = 0
+	var out []byte
+	start := 0
+	inString := false
+	for i := 0; i < len(b); {
+		if !inString {
+			if b[i] == '"' {
+				inString = true
+			}
+			i++
 			continue
 		}
-		if b[i] == '\\' {
-			bs++
-		} else {
-			bs = 0
+		if b[i] == '"' {
+			inString = false
+			i++
+			continue
 		}
-		out = append(out, b[i])
+		if b[i] != '\\' {
+			i++
+			continue
+		}
+		code, ok := jsonUTF16EscapeAt(b, i)
+		if !ok {
+			// Skip ordinary escapes as a pair. This includes \\, so a literal
+			// \\udc00 cannot accidentally become an actual Unicode escape.
+			i += 2
+			continue
+		}
+		if code >= 0xd800 && code <= 0xdbff {
+			if low, ok := jsonUTF16EscapeAt(b, i+6); ok && low >= 0xdc00 && low <= 0xdfff {
+				i += 12 // Preserve a valid original high/low pair, including hex case.
+				continue
+			}
+		} else if code != 0 && (code < 0xdc00 || code > 0xdfff) {
+			i += 6
+			continue
+		}
+		if out == nil {
+			out = make([]byte, 0, len(b))
+		}
+		out = append(out, b[start:i]...)
+		if code != 0 {
+			out = append(out, `\ufffd`...)
+		}
+		i += 6
+		start = i
 	}
-	return out
+	if out == nil {
+		return b
+	}
+	return append(out, b[start:]...)
+}
+
+func jsonUTF16EscapeAt(b []byte, offset int) (uint16, bool) {
+	if offset+6 > len(b) || b[offset] != '\\' || b[offset+1] != 'u' {
+		return 0, false
+	}
+	var value uint16
+	for _, c := range b[offset+2 : offset+6] {
+		var nibble byte
+		switch {
+		case c >= '0' && c <= '9':
+			nibble = c - '0'
+		case c >= 'a' && c <= 'f':
+			nibble = c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			nibble = c - 'A' + 10
+		default:
+			return 0, false
+		}
+		value = value<<4 | uint16(nibble)
+	}
+	return value, true
 }
 
 // Node is a typed reasoning node (= old task_nodes). kind ∈ goal|intent|finding|hint.
