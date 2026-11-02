@@ -1,10 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -281,5 +284,159 @@ func TestSideCheckpointClassificationAndLogRedaction(t *testing.T) {
 		if strings.Contains(sideCheckpointErrorLabel(err), "private") {
 			t.Fatal("raw failure content entered the diagnostic label")
 		}
+	}
+}
+
+func taskCheckpointRetryFixture(taskID, intentID int64) sidequestion.Snapshot {
+	return sidequestion.Snapshot{Parent: sidequestion.Parent{TaskID: taskID, ExplorationID: taskID + 100, IntentID: intentID}, RunID: 11, Version: 3}
+}
+
+func TestSideCheckpointTaskScopedFlushDoesNotWaitForUnrelatedSave(t *testing.T) {
+	state := &sideQuestionState{}
+	other, target := taskCheckpointRetryFixture(1, 0), taskCheckpointRetryFixture(17, 0)
+	state.publishCheckpoint(other)
+	state.publishCheckpoint(target)
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	go func() {
+		defer close(done)
+		state.flushCheckpoints(time.Now, func(ctx context.Context, snap sidequestion.Snapshot) error {
+			if snap.Parent.TaskID != other.Parent.TaskID {
+				return errors.New("background must not claim the task while it is queued behind another save")
+			}
+			close(started)
+			select {
+			case <-release:
+				return context.DeadlineExceeded
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}, nil)
+	}()
+	<-started
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	s := &Server{side: state}
+	if err := s.stopTaskSideQuestions(ctx, "17"); err != nil {
+		t.Fatalf("unrelated persistence held task admission: %v", err)
+	}
+	calls := 0
+	if err := state.flushCheckpointsMatching(ctx, time.Now, func(saveCtx context.Context, snap sidequestion.Snapshot) error {
+		calls++
+		if snap.Parent != target.Parent {
+			t.Fatal("targeted flush touched another task")
+		}
+		deadline, ok := saveCtx.Deadline()
+		parentDeadline, _ := ctx.Deadline()
+		if !ok || deadline.After(parentDeadline) {
+			t.Fatal("target save escaped caller deadline")
+		}
+		return nil
+	}, nil, func(p sidequestion.Parent) bool { return p.TaskID == 17 }, true); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	_, targetPending := state.pending[target.Parent.Key()]
+	_, otherPending := state.pending[other.Parent.Key()]
+	state.mu.Unlock()
+	if calls != 1 || targetPending || !otherPending {
+		t.Fatal("scoped flush did not preserve unrelated context")
+	}
+	once.Do(func() { close(release) })
+	<-done
+	if _, pending := state.pending[target.Parent.Key()]; pending {
+		t.Fatal("the old global key list reintroduced the task after its scoped save")
+	}
+}
+
+func TestSideCheckpointScopedFlushUsesRemainingDeadline(t *testing.T) {
+	state := &sideQuestionState{}
+	for _, iid := range []int64{1, 2} {
+		state.publishCheckpoint(taskCheckpointRetryFixture(17, iid))
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	calls := 0
+	err := state.flushCheckpointsMatching(ctx, time.Now, func(saveCtx context.Context, _ sidequestion.Snapshot) error {
+		calls++
+		ownDeadline, _ := saveCtx.Deadline()
+		callerDeadline, _ := ctx.Deadline()
+		if ownDeadline.After(callerDeadline) {
+			t.Fatal("database save ignored the archive deadline")
+		}
+		<-saveCtx.Done()
+		return saveCtx.Err()
+	}, nil, func(p sidequestion.Parent) bool { return p.TaskID == 17 }, true)
+	if !errors.Is(err, context.DeadlineExceeded) || calls != 1 || len(state.pending) != 2 || len(state.saving) != 0 {
+		t.Fatalf("deadline did not retain both attempted and unattempted snapshots: err=%v calls=%d pending=%d saving=%d", err, calls, len(state.pending), len(state.saving))
+	}
+}
+
+func TestSideCheckpointArchiveDoesNotMistakeInFlightSaveForPersistence(t *testing.T) {
+	state := &sideQuestionState{}
+	snap := taskCheckpointRetryFixture(17, 0)
+	state.publishCheckpoint(snap)
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	go func() {
+		defer close(done)
+		state.flushCheckpoints(time.Now, func(context.Context, sidequestion.Snapshot) error { close(started); <-release; return nil }, nil)
+	}()
+	<-started
+	s := &Server{side: state, m: &Manager{}}
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	if err := s.drainTaskSideQuestions(ctx, "17"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("archive passed a still-running save: %v", err)
+	}
+	state.mu.Lock()
+	_, pending := state.pending[snap.Parent.Key()]
+	_, saving := state.saving[snap.Parent.Key()]
+	state.mu.Unlock()
+	if !pending || !saving {
+		t.Fatal("in-flight checkpoint became invisible to archive")
+	}
+	once.Do(func() { close(release) })
+	<-done
+	if len(state.pending) != 0 || len(state.saving) != 0 {
+		t.Fatal("successful save did not release pending/in-flight state")
+	}
+}
+
+func TestSideCheckpointPermanentArchiveErrorIsActionableAndRedacted(t *testing.T) {
+	state := &sideQuestionState{}
+	snap := taskCheckpointRetryFixture(17, 0)
+	state.publishCheckpoint(snap)
+	state.flushCheckpoints(time.Now, func(context.Context, sidequestion.Snapshot) error {
+		return &pgconn.PgError{Code: "22P02", Message: "private-request-canary", Detail: "secret-credential-canary"}
+	}, nil)
+	s := &Server{side: state, m: &Manager{}}
+	err := s.drainTaskSideQuestions(t.Context(), "17")
+	if err == nil || !strings.Contains(err.Error(), "22P02") || !strings.Contains(err.Error(), "已停止自动重试") || !strings.Contains(err.Error(), "归档未执行") || strings.Contains(err.Error(), "请重试") || strings.Contains(err.Error(), "canary") {
+		t.Fatalf("permanent failure remained an unhelpful retry instruction or leaked content: %v", err)
+	}
+}
+
+func TestSideCheckpointFailureLogsSafeParentRunAndVersion(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	s := &Server{}
+	snap := taskCheckpointRetryFixture(17, 19)
+	s.reportSideCheckpointFailure(sideCheckpointFailure{Err: &pgconn.PgError{Code: "22P02", Message: "private-request-canary", Detail: "secret-credential-canary"}, Parent: snap.Parent, RunID: snap.RunID, Version: snap.Version, Permanent: true})
+	text := output.String()
+	for _, wanted := range []string{snap.Parent.Key(), "task=17", "intent=19", "run=11", "version=3", "SQLSTATE 22P02", "retries stopped"} {
+		if !strings.Contains(text, wanted) {
+			t.Fatalf("diagnostic lacks safe identity %q: %s", wanted, text)
+		}
+	}
+	if strings.Contains(text, "canary") {
+		t.Fatal("request/credential content leaked into checkpoint log")
+	}
+	if strings.Contains(sideCheckpointErrorLabel(&pgconn.PgError{Code: "22P02-secret-canary"}), "canary") {
+		t.Fatal("malformed SQLSTATE leaked arbitrary content")
 	}
 }

@@ -167,7 +167,7 @@ func (s *Server) pgDeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.drainTaskSideQuestions(drainCtx, id); err != nil {
+	if err := s.stopTaskSideQuestions(drainCtx, id); err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -181,6 +181,7 @@ func (s *Server) pgDeleteTask(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &committed) {
 			// PostgreSQL is already gone. Complete runtime teardown and return the
 			// auditable counts together with the post-commit cleanup warning.
+			s.commitTaskSideQuestionDelete(id)
 			s.engine.StopTask(id)
 			s.taskAgentMu.Lock()
 			delete(s.taskAgents, id)
@@ -195,6 +196,7 @@ func (s *Server) pgDeleteTask(w http.ResponseWriter, r *http.Request) {
 	// Manager has removed the task from the registry, so no new API operation can
 	// resolve it. Now stop and join every task-owned Engine goroutine and clear its
 	// lifecycle maps before releasing the delete barrier.
+	s.commitTaskSideQuestionDelete(id)
 	s.engine.StopTask(id)
 	s.taskAgentMu.Lock()
 	delete(s.taskAgents, id)

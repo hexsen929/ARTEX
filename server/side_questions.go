@@ -37,6 +37,8 @@ type sideQuestionState struct {
 	latest       map[string]sidequestion.Snapshot
 	seen         map[string][2]int64
 	checkpoints  map[string]sideCheckpointRetry
+	saving       map[string]sideCheckpointSave
+	deletedTasks map[int64]struct{} // committed permanent deletions only
 	runs         map[string]sideRun
 	done         chan struct{}
 	outputTokens int
@@ -106,13 +108,15 @@ func (s *Server) flushSideSnapshots(forceTransient ...bool) {
 	if s.side == nil || s.m.pg == nil {
 		return
 	}
-	s.side.flushCheckpoints(time.Now, s.m.pg.SaveSideSnapshot, func(failure sideCheckpointFailure) {
-		if failure.Permanent {
-			log.Printf("[btw] checkpoint persistence: %s; retries stopped for this run; checkpoint remains unsaved", sideCheckpointErrorLabel(failure.Err))
-			return
-		}
-		log.Printf("[btw] checkpoint persistence: %s; retry after %s", sideCheckpointErrorLabel(failure.Err), failure.RetryAfter)
-	}, forceTransient...)
+	s.side.flushCheckpoints(time.Now, s.m.pg.SaveSideSnapshot, s.reportSideCheckpointFailure, forceTransient...)
+}
+
+func (s *Server) reportSideCheckpointFailure(failure sideCheckpointFailure) {
+	if failure.Permanent {
+		log.Printf("[btw] checkpoint persistence: %s; %s; retries stopped for this run; checkpoint remains unsaved", failure.identityLabel(), sideCheckpointErrorLabel(failure.Err))
+		return
+	}
+	log.Printf("[btw] checkpoint persistence: %s; %s; retry after %s", failure.identityLabel(), sideCheckpointErrorLabel(failure.Err), failure.RetryAfter)
 }
 
 func (s *Server) sideSnapshot(ctx context.Context, p sidequestion.Parent) (*sidequestion.Snapshot, error) {
@@ -203,14 +207,34 @@ func (s *Server) cancelSideWhere(match func(sidequestion.Parent) bool) []<-chan 
 	return done
 }
 
-// Called after the task admission barrier closes and the main loops drain.
-// Wait for final answer/usage writes before taking the archive snapshot.
-func (s *Server) drainTaskSideQuestions(ctx context.Context, taskID string) error {
+// stopTaskSideQuestions runs after the admission barrier and main loops drain.
+// Explicit hard deletion needs runtime quiescence, not preservation of a snapshot
+// whose parent is about to be deleted. No checkpoint state is discarded here.
+func (s *Server) stopTaskSideQuestions(ctx context.Context, taskID string) error {
 	if s.side == nil {
 		return nil
 	}
-	id, _ := strconv.ParseInt(taskID, 10, 64)
-	s.side.commands.Lock()
+	id, err := strconv.ParseInt(taskID, 10, 64)
+	if err != nil || id <= 0 {
+		return errors.New("任务 id 无效")
+	}
+	// commands is held only by short side admission/clear operations. Wait in a
+	// cancellable way rather than ignoring the caller's remaining drain budget.
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if s.side.commands.TryLock() {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
 	done := s.cancelSideWhere(func(p sidequestion.Parent) bool { return p.TaskID == id })
 	s.side.commands.Unlock()
 	for _, ch := range done {
@@ -220,16 +244,123 @@ func (s *Server) drainTaskSideQuestions(ctx context.Context, taskID string) erro
 			return ctx.Err()
 		}
 	}
-	s.flushSideSnapshots()
-	// A failed flush must not silently leave the latest checkpoint out of archive.
+	return ctx.Err()
+}
+
+// Archives preserve resumable context and therefore still require every latest
+// task checkpoint to be saved. Only this task is flushed, with the archive's
+// remaining deadline; unrelated background database writes do not hold commands.
+func (s *Server) drainTaskSideQuestions(ctx context.Context, taskID string) error {
+	if err := s.stopTaskSideQuestions(ctx, taskID); err != nil {
+		return err
+	}
+	if s.side == nil {
+		return nil
+	}
+	id, err := strconv.ParseInt(taskID, 10, 64)
+	if err != nil || id <= 0 {
+		return errors.New("任务 id 无效")
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if s.m != nil && s.m.pg != nil {
+			if err := s.side.flushCheckpointsMatching(ctx, time.Now, s.m.pg.SaveSideSnapshot, s.reportSideCheckpointFailure, func(p sidequestion.Parent) bool { return p.TaskID == id }, true); err != nil {
+				return err
+			}
+		}
+		s.side.mu.Lock()
+		var waiting <-chan struct{}
+		for _, save := range s.side.saving {
+			if save.Snapshot.Parent.TaskID == id {
+				waiting = save.Done
+				break
+			}
+		}
+		var pending bool
+		label := ""
+		permanent := false
+		for key, snap := range s.side.pending {
+			if snap.Parent.TaskID != id {
+				continue
+			}
+			pending = true
+			retry := s.side.checkpoints[key]
+			if retry.RunID == snap.RunID && retry.Parent == snap.Parent {
+				if retry.ErrorLabel != "" {
+					label = retry.ErrorLabel
+				}
+				if retry.Permanent {
+					permanent = true
+					label = retry.ErrorLabel
+					break
+				}
+			}
+		}
+		s.side.mu.Unlock()
+		if waiting != nil {
+			select {
+			case <-waiting:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		if !pending {
+			return nil
+		}
+		if permanent {
+			if label == "" {
+				label = "检查点数据或存储结构错误"
+			}
+			return fmt.Errorf("任务 %d 的旁路上下文保存失败（%s，已停止自动重试）；归档未执行", id, label)
+		}
+		if label != "" {
+			return fmt.Errorf("任务 %d 的旁路上下文尚未保存（%s）；归档未执行，请稍后重试", id, label)
+		}
+		return fmt.Errorf("任务 %d 的旁路上下文尚未保存；归档未执行，请稍后重试", id)
+	}
+}
+
+// Called only after the database delete has committed (including a committed
+// cleanup-warning result). Failed deletion keeps all pending context for retry.
+// A task-level tombstone also rejects late publications with a different run ID.
+func (s *Server) commitTaskSideQuestionDelete(taskID string) {
+	if s.side == nil {
+		return
+	}
+	id, err := strconv.ParseInt(taskID, 10, 64)
+	if err != nil || id <= 0 {
+		return
+	}
 	s.side.mu.Lock()
 	defer s.side.mu.Unlock()
-	for _, snap := range s.side.pending {
+	s.side.ensureCheckpointMaps()
+	s.side.deletedTasks[id] = struct{}{}
+	for key, snap := range s.side.pending {
 		if snap.Parent.TaskID == id {
-			return errors.New("旁路上下文尚未保存，请重试")
+			delete(s.side.pending, key)
 		}
 	}
-	return nil
+	for key, snap := range s.side.latest {
+		if snap.Parent.TaskID == id {
+			delete(s.side.latest, key)
+		}
+	}
+	for key, retry := range s.side.checkpoints {
+		if retry.Parent.TaskID == id {
+			delete(s.side.checkpoints, key)
+		}
+	}
+	prefix := fmt.Sprintf("task-%d-exp-", id)
+	for key := range s.side.seen {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.side.seen, key)
+		}
+	}
+	// In-flight saves keep their completion channels until finishCheckpoint.
+	// Its tombstone check prevents either success or failure from reviving data.
 }
 
 func (s *Server) cancelWorkerSide(taskID string, expID, iid int64) {
