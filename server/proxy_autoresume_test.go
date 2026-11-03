@@ -17,6 +17,50 @@ func proxyTestManager(t *testing.T) *Manager {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
 	t.Cleanup(func() { _ = m.Close() })
+	// All server tests share a package database. Proxy fixtures must restore
+	// both values and absence: a leaked concurrency=true queues unrelated
+	// metadata/archive fixtures during New's background reconciliation.
+	keys := []string{
+		settingConcurrencyOn, settingConcurrencyLimit,
+		settingGlobalProxy, settingProxyPool, settingProxyPoolActive,
+		settingProxyReconnectMax, settingProxyReconnectInterval,
+		settingProxyRotateTimed, settingProxyRotateInterval,
+		settingProxyRotateFailure, settingProxyRotateStrategy,
+		settingProxyHealthThreshold, settingProxyHealthCooldown, settingProxyHealthInterval,
+	}
+	values := map[string]string{}
+	present := map[string]bool{}
+	for _, key := range keys {
+		value, ok, err := m.pg.GetSetting(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		values[key], present[key] = value, ok
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		tx, err := m.pg.BeginTx(ctx, nil)
+		if err != nil {
+			t.Errorf("restore proxy fixture settings: %v", err)
+			return
+		}
+		defer tx.Rollback()
+		for _, key := range keys {
+			if present[key] {
+				_, err = tx.ExecContext(ctx, `INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`, key, values[key])
+			} else {
+				_, err = tx.ExecContext(ctx, `DELETE FROM settings WHERE key=$1`, key)
+			}
+			if err != nil {
+				t.Errorf("restore proxy fixture setting %s: %v", key, err)
+				return
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			t.Errorf("restore proxy fixture settings: %v", err)
+		}
+	})
 	return m
 }
 
@@ -496,5 +540,40 @@ func TestProxyReconnectSettingsSuccessGuardsGenerationZero(t *testing.T) {
 	}
 	if after.ReconnectGeneration != before.ReconnectGeneration || after.ReconnectNextAt != before.ReconnectNextAt || after.ReconnectLastError != before.ReconnectLastError {
 		t.Fatalf("generation-zero stale settings success wiped state: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestProxyFixtureRestoresSettingsBeforeUnrelatedLifecycleTests(t *testing.T) {
+	outer := proxyTestManager(t)
+	keys := []string{settingConcurrencyOn, settingConcurrencyLimit, settingGlobalProxy, settingProxyPool, settingProxyReconnectMax}
+	// Explicitly exercise absence as well as stored false: absent is not a
+	// permission to leave a new fixture's concurrency or proxy values behind.
+	if err := outer.pg.DeleteSetting(settingProxyReconnectMax); err != nil {
+		t.Fatal(err)
+	}
+	values, present := map[string]string{}, map[string]bool{}
+	for _, key := range keys {
+		value, ok, err := outer.pg.GetSetting(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		values[key], present[key] = value, ok
+	}
+	t.Run("fixture mutates shared settings", func(t *testing.T) {
+		fixture := proxyTestManager(t)
+		if err := fixture.SetConcurrency(true, 1); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{settingGlobalProxy, settingProxyPool, settingProxyReconnectMax} {
+			if err := fixture.pg.SetSetting(key, "fixture-value"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	for _, key := range keys {
+		value, ok, err := outer.pg.GetSetting(key)
+		if err != nil || ok != present[key] || value != values[key] {
+			t.Errorf("proxy fixture leaked setting %s: value=%q present=%v err=%v", key, value, ok, err)
+		}
 	}
 }

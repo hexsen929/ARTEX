@@ -83,32 +83,39 @@ func TestHealthGateAndResponse(t *testing.T) {
 
 func TestVersionRequiresAuthentication(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		gate   bool
-		basic  bool
-		token  string
-		cookie bool
-		want   int
+		name       string
+		gate       bool
+		basic      bool
+		token      string
+		cookie     bool // legacy access-token cookie must never authorize an API call
+		gateCookie bool // Basic Auth gate cookie, separate from the Bearer header
+		want       int
 	}{
 		{name: "anonymous", want: http.StatusUnauthorized},
 		{name: "invalid JWT", token: "invalid", want: http.StatusUnauthorized},
 		{name: "valid JWT", token: "valid", want: http.StatusOK},
-		{name: "valid JWT cookie", token: "valid", cookie: true, want: http.StatusOK},
+		{name: "legacy JWT cookie is not API authentication", token: "valid", cookie: true, want: http.StatusUnauthorized},
 		{name: "gate anonymous", gate: true, want: http.StatusUnauthorized},
 		{name: "gate Basic Auth only", gate: true, basic: true, want: http.StatusUnauthorized},
 		{name: "gate JWT only", gate: true, token: "valid", want: http.StatusUnauthorized},
-		{name: "gate invalid JWT", gate: true, basic: true, token: "invalid", want: http.StatusUnauthorized},
-		{name: "gate both credentials", gate: true, basic: true, token: "valid", cookie: true, want: http.StatusOK},
+		{name: "gate invalid JWT", gate: true, gateCookie: true, token: "invalid", want: http.StatusUnauthorized},
+		{name: "Basic Auth plus legacy JWT cookie does not grant API access", gate: true, basic: true, token: "valid", cookie: true, want: http.StatusUnauthorized},
+		{name: "gate cookie and Bearer JWT", gate: true, gateCookie: true, token: "valid", want: http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, _ := basicAuthTestServer(t)
+			var gateCookie *http.Cookie
 			if tc.gate {
 				w := saveBasicAuthForTest(s, `{"enabled":true,"username":"entry","password":"test-pass"}`)
 				if w.Code != http.StatusOK {
 					t.Fatalf("enable gate: %d %s", w.Code, w.Body.String())
 				}
+				gateCookie = w.Result().Cookies()[0]
 			}
 			r := httptest.NewRequest(http.MethodGet, "/api/version", nil)
+			if tc.gateCookie {
+				r.AddCookie(gateCookie)
+			}
 			if tc.basic {
 				r.SetBasicAuth("entry", "test-pass")
 			}

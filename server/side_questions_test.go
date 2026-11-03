@@ -415,16 +415,20 @@ func TestSideTaskContextModelUnavailableIsDistinct(t *testing.T) {
 	}
 	id, _ := strconv.ParseInt(task.ID, 10, 64)
 	t.Cleanup(func() { _ = f.m.pg.DeleteTask(id) })
-	var profileID int64
-	var originalAPIKey string
-	if err := f.m.pg.QueryRow(`SELECT id, COALESCE(api_key, '') FROM llm_profiles WHERE is_default=true ORDER BY id LIMIT 1`).Scan(&profileID, &originalAPIKey); err != nil {
+	// New installations and package-isolated CI databases need not have an
+	// active profile. Disable whichever configured route exists, rather than
+	// assuming another test has created a default row.
+	active, err := f.m.pg.ActiveProfile()
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_, _ = f.m.pg.Exec(`UPDATE llm_profiles SET api_key=$1 WHERE id=$2`, originalAPIKey, profileID)
-	})
-	if _, err := f.m.pg.Exec(`UPDATE llm_profiles SET api_key='' WHERE id=$1`, profileID); err != nil {
-		t.Fatal(err)
+	if active != nil {
+		t.Cleanup(func() {
+			_, _ = f.m.pg.Exec(`UPDATE llm_profiles SET api_key=$1 WHERE id=$2`, active.APIKey, active.ID)
+		})
+		if _, err := f.m.pg.Exec(`UPDATE llm_profiles SET api_key='' WHERE id=$1`, active.ID); err != nil {
+			t.Fatal(err)
+		}
 	}
 	f.s.cfgMu.Lock()
 	f.s.llmOn = false
@@ -436,6 +440,11 @@ func TestSideTaskContextModelUnavailableIsDistinct(t *testing.T) {
 	w := f.call(t, "POST", path, map[string]string{"question": "配置是否可用？", "client_request_id": "model-error"}, 409)
 	if strings.Contains(w.Body.String(), "任务上下文") || !strings.Contains(w.Body.String(), "模型配置不可用") {
 		t.Fatalf("wrong model error: %s", w.Body.String())
+	}
+	select {
+	case <-f.provider.started:
+		t.Fatal("unavailable model silently sent through the fixture provider")
+	default:
 	}
 }
 
