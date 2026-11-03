@@ -13,6 +13,8 @@ import {
   memorySourceLabel,
   memorySharingLabel,
   memoryLearningOutcome,
+  memoryLearningOutcomeIsError,
+  MEMORY_LEARNING_RESULT_LABELS,
   memoryTime,
   validateMemoryEntryInput,
 } from "./memory-types.ts";
@@ -107,14 +109,39 @@ test("only three experience kinds can be shared and target notes require task ow
   assert.equal(memorySharingLabel({ kind: "target", share_scope: "source_only", origin_task_id: 0, origin_conversation_id: 0 }), "不跨任务（来源未登记）");
 });
 
-test("learning state snapshots distinguish stage waiting, budget, unavailable and a successful empty summary", () => {
+test("learning snapshots distinguish classified outcomes from legacy records without inventing zero telemetry", () => {
   const snapshot = { status: "waiting_stage", message: "等待阶段结束", queued: 0, running: 0, failed: 0, processed: 0, starts_last_hour: 0, attempts_last_hour: 0, max_calls_per_hour: 3 };
+  // Older APIs lack the new telemetry; omission remains an explicit unknown.
+  assert.doesNotThrow(() => assertMemoryLearning(snapshot));
   for (const status of ["disabled", "model_unavailable", "waiting_stage", "queued", "running", "budget_wait", "retry_wait", "idle"]) assert.doesNotThrow(() => assertMemoryLearning({ ...snapshot, status }));
-  assert.doesNotThrow(() => assertMemoryLearning({ ...snapshot, processed: 2, last_result: "no_experience", last_completed_at: "2026-10-30T05:00:00Z" }));
-  assert.match(memoryLearningOutcome("no_experience"), /未发现值得保存的通用经验/);
-  assert.match(memoryLearningOutcome("no_experience"), /不是学习失败/);
+  const outcomes = Object.keys(MEMORY_LEARNING_RESULT_LABELS);
+  assert.deepEqual(outcomes.sort(), ["saved", "empty", "duplicate", "input_invalid", "input_sensitive", "output_invalid", "output_truncated", "output_rejected", "output_sensitive", "source_changed", "settings_changed", "cleared", "budget_deferred", "provider_error", "timeout", "storage_error", "lease_expired", "no_experience", "failed", "skipped", "legacy_unknown"].sort());
+  for (const result of outcomes) {
+    assert.doesNotThrow(() => assertMemoryLearning({ ...snapshot, last_result: result, outcome_counts: { [result]: 1 } }));
+    assert.equal(typeof memoryLearningOutcome(result), "string");
+    assert.notEqual(memoryLearningOutcome(result).length, 0);
+  }
+  assert.doesNotThrow(() => assertMemoryLearning({ ...snapshot, retryable_failed: 0, stopped_failed: 0, entry_count: 0, outcome_counts: {}, next_budget_at: "2026-11-03T14:18:49Z" }));
+  assert.match(memoryLearningOutcome("no_experience"), /历史未细分/);
+  assert.doesNotMatch(memoryLearningOutcome("no_experience"), /这不是学习失败|没有值得保留|未发现值得保存的通用经验/);
+  assert.match(memoryLearningOutcome("empty"), /合法空结果（\[\]）/);
+  assert.match(memoryLearningOutcome("empty"), /不代表其他目标无需测试/);
+  assert.match(memoryLearningOutcome("saved"), /曾保存.*以记忆列表为准/);
+  assert.match(memoryLearningOutcome("output_invalid"), /输出格式不合格/);
+  assert.match(memoryLearningOutcome("output_truncated"), /输出被截断/);
+  assert.match(memoryLearningOutcome("budget_deferred"), /本轮未发送请求/);
   assert.doesNotMatch(memoryLearningOutcome(undefined), /已保存经验|已经学习|已学会/);
-  for (const override of [{ status: "error" }, { processed: -1 }, { queued: undefined }, { max_calls_per_hour: 0 }, { last_result: "learned" }, { last_completed_at: "invalid" }]) assert.throws(() => assertMemoryLearning({ ...snapshot, ...override }));
+  for (const result of ["output_invalid", "output_truncated", "provider_error", "timeout", "storage_error", "lease_expired", "failed"]) assert.equal(memoryLearningOutcomeIsError(result), true, result);
+  for (const result of [undefined, "saved", "empty", "duplicate", "input_sensitive", "output_sensitive", "output_rejected", "budget_deferred", "no_experience", "legacy_unknown"]) assert.equal(memoryLearningOutcomeIsError(result), false, String(result));
+  for (const override of [
+    { status: "error" }, { processed: -1 }, { queued: undefined }, { max_calls_per_hour: 0 },
+    { last_result: "learned" }, { last_result: ["empty"] }, { last_result: null }, { status: ["idle"] }, { last_completed_at: "invalid" }, { next_budget_at: "invalid" }, { next_budget_at: null },
+    { retryable_failed: -1 }, { stopped_failed: "0" }, { entry_count: null }, { entry_count: 0.5 },
+    { outcome_counts: null }, { outcome_counts: [] }, { outcome_counts: { learned: 1 } },
+    { outcome_counts: { saved: -1 } }, { outcome_counts: { empty: "1" } },
+    { outcome_counts: { output_invalid: 1.5 } }, { outcome_counts: { no_experience: undefined } },
+    { outcome_counts: { legacy_unknown: Number.MAX_SAFE_INTEGER + 1 } },
+  ]) assert.throws(() => assertMemoryLearning({ ...snapshot, ...override }));
 });
 
 test("memory center and settings are fully wired without an approval queue or shared API mutations", () => {

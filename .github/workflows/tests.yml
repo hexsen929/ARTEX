@@ -119,6 +119,7 @@ jobs:
           go test -race ./server -run 'Test(Proxy|DynamicForward|DialHTTPConnect|SideTaskContext|SideTaskSynthetic|SideTaskFallback|HealthGate|VersionRequires)' -count=1 -timeout=5m
           go test -race ./agent ./guard ./intercept/... ./llmhttp -run 'Test(DeepSeek|Jev|NewClient|Review|Confidence)' -count=1 -timeout=5m
           go test -race ./db -run 'Test(JevProfile|ActiveProfileActivation|ActiveLLMProfileLock)' -count=1 -timeout=5m
+          go test -race -p=1 ./memory ./db ./server -run 'Test(MemoryOutcome|MemoryResult|MemoryExplicit|MemoryDuplicate|MemorySettingsClear|MemorySettingsFailure|MemorySkipUnreadable|MemoryLate|MemoryFailureMetadata|MemoryThird|MemoryBudgetRelease|MemoryClosed|MemoryLearning|MemoryWorker|MemoryExperienceLearning|ExtractDetailed|DiagnosticCode|AuthorizationPlaceholder|BareTargetAliases)' -count=1 -timeout=5m
           go test -race ./agent -run 'Test(TaskAssociatedVerifierSideCapture|SideCaptureParent)' -count=1 -timeout=3m
           go test -race ./agent ./llmguard -run 'Test(ResponsesError|StructuredProviderError|StructuredStatus|OnlyConcreteTransport|CancellationWinsOverStructured)' -count=1 -timeout=3m
           go test -race ./server -run 'Test(RuntimeMerge|MergeScreenshot|MergeAutoTitle|MergeFindingSide)' -count=1 -timeout=3m
@@ -161,6 +162,15 @@ jobs:
           for name in TestTaskDeleteCheckpointPermanentFailureDoesNotBlockExplicitDeletion TestTaskDeleteCheckpointDatabaseFailurePreservesUnsavedState TestTaskDeleteCheckpointStopWaitsForActualSideRunExit TestTaskDeleteCheckpointLateInFlightSaveCannotReviveCommittedDeletion; do
             grep -q -- "^--- PASS: $name " "$server_log"
           done
+
+      - name: PostgreSQL 18 memory outcomes and abandoned leases
+        run: |
+          set -euo pipefail
+          memory_log="$RUNNER_TEMP/memory-outcomes-pg18.log"
+          go test -race -v ./db -run '^TestMemory(ResultClosed|ExplicitOutcomes|DuplicateOutcome|SettingsClear|LateOutcome|FailureMetadata|ThirdExpiredLease|BudgetRelease|ClosedOutcomeCategories|SkipUnreadable|SettingsFailure|LearningSnapshot)' -count=1 -timeout=5m | tee "$memory_log"
+          grep -q -- '^--- PASS: TestMemoryExplicitOutcomesAreDistinctFromLegacyAndUnknown ' "$memory_log"
+          grep -q -- '^--- PASS: TestMemoryBudgetReleaseWaitsForBothWindowsAndLoweredLimit ' "$memory_log"
+          grep -q -- '^--- PASS: TestMemoryThirdExpiredLeaseTerminatesWithoutFourthAttempt ' "$memory_log"
 
   # Run frontend checks independently: backend compilation failures must not
   # hide TypeScript or UI regressions during a cross-cutting source port.

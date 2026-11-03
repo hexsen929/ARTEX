@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { memoryAPI } from "@/lib/memory-api";
-import { MEMORY_LEARNING_LABELS, memoryLearningOutcome, memoryTime, type MemoryLearningSnapshot } from "@/lib/memory-types";
+import { MEMORY_LEARNING_LABELS, MEMORY_LEARNING_RESULT_LABELS, memoryLearningOutcome, memoryLearningOutcomeIsError, memoryTime, type MemoryLearningResult, type MemoryLearningSnapshot } from "@/lib/memory-types";
 
 export function MemoryLearningStatus({ embedded = false }: { embedded?: boolean }) {
   const [snapshot, setSnapshot] = React.useState<MemoryLearningSnapshot | null>(null);
@@ -77,10 +77,25 @@ export function MemoryLearningStatus({ embedded = false }: { embedded?: boolean 
             <Badge variant="outline">待总结阶段 {snapshot.queued}</Badge>
             <Badge variant="outline">总结中 {snapshot.running}</Badge>
             <Badge variant="outline">已处理阶段 {snapshot.processed}</Badge>
-            <Badge variant="outline">失败阶段 {snapshot.failed}</Badge>
+            <Badge variant="outline">未完成总结记录 {snapshot.failed}</Badge>
+            {snapshot.retryable_failed !== undefined ? <Badge variant="outline">待有限重试 {snapshot.retryable_failed}</Badge> : null}
+            {snapshot.stopped_failed !== undefined ? <Badge variant="outline">已终止或不再重试 {snapshot.stopped_failed}</Badge> : null}
+            {snapshot.entry_count !== undefined ? <Badge variant="outline">未删除记忆条目 {snapshot.entry_count}</Badge> : null}
           </div>
-          <p className="text-muted-foreground text-xs">近一小时：领取阶段 {snapshot.starts_last_hour} / {snapshot.max_calls_per_hour}；实际 HTTP 尝试 {snapshot.attempts_last_hour} / {snapshot.max_calls_per_hour}。任一计数达到上限时，待处理阶段等待下一预算窗口；有限重试也计入实际请求尝试。</p>
-          <p className={snapshot.last_result === "failed" ? "text-destructive text-sm" : "text-muted-foreground text-sm"}>{memoryLearningOutcome(snapshot.last_result)}</p>
+          <p className="text-muted-foreground text-xs">已处理及未完成计数是保留中的总结作业记录，不等于当前记忆条目数、API 错误次数或渗透任务成功率；后续重试成功和保留清理会改变计数。未删除条目包含停用、失效及到期记录，有效状态以列表为准。</p>
+          {snapshot.retryable_failed === undefined || snapshot.stopped_failed === undefined || snapshot.entry_count === undefined ? <p className="text-muted-foreground text-xs">服务未提供完整的重试分类或当前条目计数；缺失数据未显示为零。</p> : null}
+          <div className="space-y-2" aria-label="阶段结果分类">
+            <p className="font-medium text-xs">阶段结果分类（保留记录）</p>
+            {snapshot.outcome_counts === undefined ? <p className="text-muted-foreground text-xs">服务未提供阶段结果分类；缺失分类未显示为零。</p> : (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {Object.entries(snapshot.outcome_counts).filter(([, count]) => (count ?? 0) > 0).map(([result, count]) => <Badge key={result} variant="outline">{MEMORY_LEARNING_RESULT_LABELS[result as MemoryLearningResult]} {count}</Badge>)}
+                {Object.values(snapshot.outcome_counts).every((count) => count === 0) ? <span className="text-muted-foreground">当前没有已分类的阶段结果。</span> : null}
+              </div>
+            )}
+          </div>
+          <p className="text-muted-foreground text-xs">滚动近一小时：领取阶段 {snapshot.starts_last_hour} / {snapshot.max_calls_per_hour}；实际 HTTP 尝试 {snapshot.attempts_last_hour} / {snapshot.max_calls_per_hour}。任一计数达到上限时等待预算恢复；不是整点重置，有限重试也计入实际请求尝试。</p>
+          {snapshot.next_budget_at ? <p className="text-muted-foreground text-xs">最早释放一个预算名额：{memoryTime(snapshot.next_budget_at)}。是否开始调用仍取决于队列、模型和来源有效性。</p> : snapshot.status === "budget_wait" ? <p className="text-muted-foreground text-xs">服务未提供预算恢复时间；未推测整点恢复或承诺届时自动调用。</p> : null}
+          <p className={memoryLearningOutcomeIsError(snapshot.last_result) ? "text-destructive text-sm" : "text-muted-foreground text-sm"}>{memoryLearningOutcome(snapshot.last_result)}</p>
           {snapshot.last_completed_at ? <p className="text-muted-foreground text-xs">最近阶段处理时间：{memoryTime(snapshot.last_completed_at)}</p> : null}
         </>
       ) : !loading && !error ? <p className="text-muted-foreground text-sm">页面可见时读取；等待阶段结束与状态读取失败会分别显示。</p> : null}

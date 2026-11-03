@@ -124,44 +124,56 @@ Return ONLY one JSON array with at most 3 objects. Each object has EXACTLY these
 {"title":"short descriptive title","content":"concise transferable experience","kind":"environment|procedure|lesson","target":"","applicability":"only referenced conditions and limits","tags":[],"evidence_ids":["an actual facts.id"]}
 No other source IDs, task IDs, status, confidence, verification fields, markdown prose or extra keys. All fields are required; target is empty and tags may be empty. Use the source language. Never remove a negation or a version distinction.`
 
-// Extract makes one bounded completion without tools or history. It does not
-// activate entries or decide sharing. The host should use a metadata-only
-// recorder context and revalidate source/settings/lease before persisting drafts.
+// Extract retains the original caller contract. New background-job callers use
+// ExtractDetailed so rejected drafts are not confused with an explicit [].
 func Extract(ctx context.Context, provider llm.Provider, model string, input Input) ([]Draft, error) {
+	result, err := ExtractDetailed(ctx, provider, model, input)
+	if errors.Is(err, errEmptyStage) {
+		return []Draft{}, nil
+	}
+	return result.Drafts, err
+}
+
+var errEmptyStage = errors.New("memory stage has no complete facts")
+
+// ExtractDetailed makes one bounded completion without tools or history. It
+// returns fixed diagnostic categories, never provider/source/response text.
+// Source/settings/lease validation and entry activation belong to the host.
+func ExtractDetailed(ctx context.Context, provider llm.Provider, model string, input Input) (ExtractionResult, error) {
 	if ctx == nil {
-		return nil, fmt.Errorf("%w: missing context", ErrInvalid)
+		return ExtractionResult{}, inputDiagnostic(fmt.Errorf("%w: missing context", ErrInvalid))
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return ExtractionResult{}, err
 	}
 	if provider == nil {
-		return nil, ErrUnavailable
+		return ExtractionResult{}, diagnostic("provider_error", ErrUnavailable)
 	}
-	// Model selection belongs to the supplied provider. This parameter remains
-	// explicit for callers' attribution; it is not interpolated into source data.
+	// Model selection belongs to the supplied provider, not source data.
 	if strings.TrimSpace(model) == "" || !validField(model, 256) {
-		return nil, fmt.Errorf("%w: model identifier", ErrInvalid)
+		return ExtractionResult{}, inputDiagnostic(fmt.Errorf("%w: model identifier", ErrInvalid))
 	}
 	prepared, err := prepareInput(input)
 	if err != nil {
-		return nil, err
+		return ExtractionResult{}, inputDiagnostic(err)
 	}
 	projection, err := parseStageProjection(prepared)
 	if err != nil {
-		return nil, err
+		return ExtractionResult{}, inputDiagnostic(err)
 	}
 	if len(projection.Facts) == 0 {
-		return []Draft{}, nil
+		return ExtractionResult{}, inputDiagnostic(fmt.Errorf("%w: %w", ErrInvalid, errEmptyStage))
 	}
 	projection, data, err := fitStageEnvelope(prepared, projection)
 	if err != nil {
-		return nil, err
+		return ExtractionResult{}, inputDiagnostic(err)
 	}
 	callCtx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
 	if err := callCtx.Err(); err != nil {
-		return nil, err
+		return ExtractionResult{}, err
 	}
+
 	temperature := 0.0
 	message, stop, _, err := provider.Complete(callCtx, llm.CompletionRequest{
 		System:      []string{extractionInstruction},
@@ -172,32 +184,33 @@ func Extract(ctx context.Context, provider llm.Provider, model string, input Inp
 		Thinking:    "disabled",
 	})
 	if callCtx.Err() != nil {
-		return nil, callCtx.Err()
+		return ExtractionResult{}, callCtx.Err()
 	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			return nil, context.Canceled
+			return ExtractionResult{}, context.Canceled
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, context.DeadlineExceeded
+			return ExtractionResult{}, context.DeadlineExceeded
 		}
-		// Provider errors may contain echoed request bodies or endpoint secrets.
-		// Keep classification, not their raw text, in background-job diagnostics.
-		return nil, ErrUnavailable
+		// Provider errors may echo request bodies or endpoint credentials.
+		return ExtractionResult{}, diagnostic("provider_error", ErrUnavailable)
 	}
 	switch strings.ToLower(strings.TrimSpace(stop)) {
-	case "max_tokens", "length", "tool_use", "tool_calls":
-		return nil, fmt.Errorf("%w: incomplete or tool response", ErrInvalid)
+	case "max_tokens", "length":
+		return ExtractionResult{}, diagnostic("output_truncated", fmt.Errorf("%w: incomplete response", ErrInvalid))
+	case "tool_use", "tool_calls":
+		return ExtractionResult{}, diagnostic("output_invalid", fmt.Errorf("%w: tool response", ErrInvalid))
 	}
 	if message.Role != llm.RoleAssistant {
-		return nil, fmt.Errorf("%w: response role", ErrInvalid)
+		return ExtractionResult{}, diagnostic("output_invalid", fmt.Errorf("%w: response role", ErrInvalid))
 	}
 	for _, block := range message.Content {
 		if block.Type != llm.BlockText && block.Type != llm.BlockThinking {
-			return nil, fmt.Errorf("%w: unexpected response block", ErrInvalid)
+			return ExtractionResult{}, diagnostic("output_invalid", fmt.Errorf("%w: unexpected response block", ErrInvalid))
 		}
 	}
-	return parseDrafts(message.Text(), projection)
+	return parseDraftsDetailed(message.Text(), projection)
 }
 
 func validField(text string, maxBytes int) bool {
@@ -369,34 +382,39 @@ type wireDraft struct {
 }
 
 func parseDrafts(text string, source StageProjection) ([]Draft, error) {
+	result, err := parseDraftsDetailed(text, source)
+	return result.Drafts, err
+}
+
+func parseDraftsDetailed(text string, source StageProjection) (ExtractionResult, error) {
 	if !utf8.ValidString(text) || len(text) > MaxOutputBytes {
-		return nil, fmt.Errorf("%w: response size or encoding", ErrInvalid)
+		return ExtractionResult{}, diagnostic("output_invalid", fmt.Errorf("%w: response size or encoding", ErrInvalid))
 	}
 	text = strings.TrimSpace(text)
 	if strings.HasPrefix(text, "```") {
 		lines := strings.Split(text, "\n")
 		if len(lines) < 3 || (strings.TrimSpace(lines[0]) != "```" && strings.ToLower(strings.TrimSpace(lines[0])) != "```json") || strings.TrimSpace(lines[len(lines)-1]) != "```" {
-			return nil, fmt.Errorf("%w: response fence", ErrInvalid)
+			return ExtractionResult{}, diagnostic("output_invalid", fmt.Errorf("%w: response fence", ErrInvalid))
 		}
 		text = strings.Join(lines[1:len(lines)-1], "\n")
 		if strings.Contains(text, "```") {
-			return nil, fmt.Errorf("%w: nested response fence", ErrInvalid)
+			return ExtractionResult{}, diagnostic("output_invalid", fmt.Errorf("%w: nested response fence", ErrInvalid))
 		}
 	}
 	if err := validateJSON(text); err != nil {
-		return nil, fmt.Errorf("%w: response JSON", ErrInvalid)
+		return ExtractionResult{}, diagnostic("output_invalid", fmt.Errorf("%w: response JSON", ErrInvalid))
 	}
 	decoder := json.NewDecoder(strings.NewReader(text))
 	decoder.DisallowUnknownFields()
 	var records []wireDraft
 	if err := decoder.Decode(&records); err != nil || records == nil || len(records) > MaxDrafts {
-		return nil, fmt.Errorf("%w: response records", ErrInvalid)
+		return ExtractionResult{}, diagnostic("output_invalid", fmt.Errorf("%w: response records", ErrInvalid))
 	}
 	result := make([]Draft, 0, len(records))
 	seen := map[string]bool{}
 	for _, record := range records {
 		if record.Title == nil || record.Content == nil || record.Kind == nil || record.Target == nil || record.Applicability == nil || record.Tags == nil || record.EvidenceIDs == nil {
-			return nil, fmt.Errorf("%w: required response fields", ErrInvalid)
+			return ExtractionResult{}, diagnostic("output_invalid", fmt.Errorf("%w: required response fields", ErrInvalid))
 		}
 		draft := Draft{Title: *record.Title, Content: *record.Content, Kind: *record.Kind, Target: *record.Target, Applicability: *record.Applicability, Tags: *record.Tags, EvidenceIDs: *record.EvidenceIDs}
 		bound, err := bindDraft(draft, source)
@@ -404,7 +422,7 @@ func parseDrafts(text string, source StageProjection) ([]Draft, error) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return ExtractionResult{}, err
 		}
 		draft = bound
 		// Exact identity only; no case, whitespace, Unicode or fuzzy folding.
@@ -414,39 +432,45 @@ func parseDrafts(text string, source StageProjection) ([]Draft, error) {
 			result = append(result, draft)
 		}
 	}
-	return result, nil
+	outcome := "drafts"
+	if len(records) == 0 {
+		outcome = "empty"
+	} else if len(result) == 0 {
+		outcome = "output_rejected"
+	}
+	return ExtractionResult{Drafts: result, Outcome: outcome}, nil
 }
 
 func validateDraft(draft Draft) error {
 	switch draft.Kind {
 	case "environment", "procedure", "lesson":
 	default:
-		return fmt.Errorf("%w: memory kind", ErrInvalid)
+		return diagnostic("output_invalid", fmt.Errorf("%w: memory kind", ErrInvalid))
 	}
 	if strings.TrimSpace(draft.Title) == "" || strings.TrimSpace(draft.Content) == "" || strings.TrimSpace(draft.Applicability) == "" || !validField(draft.Title, MaxDraftTitleBytes) || !validField(draft.Content, MaxDraftContentBytes) || !validField(draft.Applicability, MaxDraftApplicabilityBytes) || !validField(draft.Target, MaxDraftTargetBytes) || len(draft.Tags) > MaxDraftTags {
-		return fmt.Errorf("%w: response field limits", ErrInvalid)
+		return diagnostic("output_invalid", fmt.Errorf("%w: response field limits", ErrInvalid))
 	}
 	if draft.Target != "" {
-		return fmt.Errorf("%w: target history is not shared experience", ErrInvalid)
+		return diagnostic("output_rejected", fmt.Errorf("%w: target history is not shared experience", ErrInvalid))
 	}
 	readable := []string{draft.Title, draft.Content, draft.Target, draft.Applicability}
 	for _, field := range readable {
 		if err := validateStableText(field); err != nil {
-			return err
+			return outputSafetyDiagnostic(field, err)
 		}
 		if unsafeGeneralization(field) {
-			return fmt.Errorf("%w: unsupported generalization", ErrInvalid)
+			return diagnostic("output_rejected", fmt.Errorf("%w: unsupported generalization", ErrInvalid))
 		}
 	}
 	for _, tag := range draft.Tags {
 		if strings.TrimSpace(tag) == "" || !validField(tag, MaxDraftTagBytes) {
-			return fmt.Errorf("%w: response tags", ErrInvalid)
+			return diagnostic("output_invalid", fmt.Errorf("%w: response tags", ErrInvalid))
 		}
 		if err := validateStableText(tag); err != nil {
-			return err
+			return outputSafetyDiagnostic(tag, err)
 		}
 		if unsafeGeneralization(tag) {
-			return fmt.Errorf("%w: unsupported generalization", ErrInvalid)
+			return diagnostic("output_rejected", fmt.Errorf("%w: unsupported generalization", ErrInvalid))
 		}
 		readable = append(readable, tag)
 	}
@@ -454,11 +478,11 @@ func validateDraft(draft Draft) error {
 	// a vulnerability was independently verified. Do not copy that conclusion
 	// into another truth store, including tags or applicability fields.
 	if confirmationClaim.MatchString(strings.Join(readable, "\n")) {
-		return fmt.Errorf("%w: unsupported confirmation", ErrInvalid)
+		return diagnostic("output_rejected", fmt.Errorf("%w: unsupported confirmation", ErrInvalid))
 	}
 	encoded, err := json.Marshal(draft)
 	if err != nil || len(encoded) > MaxDraftBytes {
-		return fmt.Errorf("%w: complete record budget", ErrInvalid)
+		return diagnostic("output_invalid", fmt.Errorf("%w: complete record budget", ErrInvalid))
 	}
 	return nil
 }
@@ -470,7 +494,7 @@ func bindDraft(draft Draft, source StageProjection) (Draft, error) {
 		return Draft{}, err
 	}
 	if len(draft.EvidenceIDs) < 1 || len(draft.EvidenceIDs) > MaxEvidenceIDs {
-		return Draft{}, fmt.Errorf("%w: evidence references", ErrInvalid)
+		return Draft{}, diagnostic("output_rejected", fmt.Errorf("%w: evidence references", ErrInvalid))
 	}
 	byID := make(map[string]StageFact, len(source.Facts))
 	for _, fact := range source.Facts {
@@ -479,7 +503,7 @@ func bindDraft(draft Draft, source StageProjection) (Draft, error) {
 	selected := map[string]bool{}
 	for _, id := range draft.EvidenceIDs {
 		if _, ok := byID[id]; !ok || selected[id] {
-			return Draft{}, fmt.Errorf("%w: unknown or duplicate evidence", ErrInvalid)
+			return Draft{}, diagnostic("output_rejected", fmt.Errorf("%w: unknown or duplicate evidence", ErrInvalid))
 		}
 		selected[id] = true
 	}
@@ -489,7 +513,7 @@ func bindDraft(draft Draft, source StageProjection) (Draft, error) {
 	// host-owned conditions and ordinary tool/scope policy remain separate.
 	targetFacts := append(append([]StageFact(nil), source.Facts...), StageFact{Targets: source.knownTargets})
 	if containsTargetDetails(readable, targetFacts) {
-		return Draft{}, fmt.Errorf("%w: target detail in shared experience", ErrInvalid)
+		return Draft{}, diagnostic("output_rejected", fmt.Errorf("%w: target detail in shared experience", ErrInvalid))
 	}
 	conditions, factsText := []string{}, []string{}
 	seenCondition := map[string]bool{}
@@ -514,7 +538,7 @@ func bindDraft(draft Draft, source StageProjection) (Draft, error) {
 		unknown = unknown || !known
 	}
 	if unsupportedTechnicalClaims(readable, factsText) {
-		return Draft{}, fmt.Errorf("%w: unsupported technical condition", ErrInvalid)
+		return Draft{}, diagnostic("output_rejected", fmt.Errorf("%w: unsupported technical condition", ErrInvalid))
 	}
 	// Preserve a supported qualifier extracted from the fact summary, such as
 	// an administrator-session requirement, even when conditions[] was absent.

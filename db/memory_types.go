@@ -164,6 +164,11 @@ type MemoryLearningSnapshot struct {
 	Running          int64                  `json:"running"`
 	RetryableFailed  int64                  `json:"retryable_failed"`
 	Failed           int64                  `json:"failed"`
+	StoppedFailed    int64                  `json:"stopped_failed"`
+	OutcomeCounts    map[string]int64       `json:"outcome_counts"`
+	EntryCount       int64                  `json:"entry_count"`
+	NextBudgetAt     *time.Time             `json:"next_budget_at,omitempty"`
+	BudgetLimit      int                    `json:"budget_limit"`
 	Done             int64                  `json:"done"`
 	StartsLastHour   int64                  `json:"starts_last_hour"`
 	AttemptsLastHour int64                  `json:"attempts_last_hour"`

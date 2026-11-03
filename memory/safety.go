@@ -25,10 +25,15 @@ var sensitivePatterns = []*regexp.Regexp{
 }
 
 var (
-	sensitiveAssignment = regexp.MustCompile(`(?i)(?:\b(?:api[ _-]?key|access[ _-]?token|refresh[ _-]?token|client[ _-]?secret|secret[ _-]?key|password|passwd|pwd|cookie|set-cookie|session[ _-]?cookie|authorization|proxy-authorization)\b|密码|口令|令牌|私钥)["']?\s*[:=：]\s*["']?([^\s,;"'<>}\]]+)`)
-	bearerValue         = regexp.MustCompile(`(?i)\bBearer\s+([^\s,;"'<>}\]]{8,})`)
-	basicValue          = regexp.MustCompile(`(?i)\bBasic\s+([A-Za-z0-9+/]+={0,2})`)
-	internalMarker      = regexp.MustCompile(`(?i)(?:<\s*/?\s*(?:system|developer|assistant|memory|memory_context|memory-context|system-reminder)(?:\s|>|/)|\[\s*(?:/?INST|/?SYSTEM|/?DEVELOPER|/?MEMORY|im_start|im_end)\s*\]|<<\s*/?SYS\s*>>)`)
+	sensitiveAssignment  = regexp.MustCompile(`(?i)(?:\b(?:api[ _-]?key|access[ _-]?token|refresh[ _-]?token|client[ _-]?secret|secret[ _-]?key|password|passwd|pwd|cookie|set-cookie|session[ _-]?cookie|authorization|proxy-authorization)\b|密码|口令|令牌|私钥)["']?\s*[:=：]\s*["']?([^\s,;"'<>}\]]+)`)
+	authAssignmentPrefix = regexp.MustCompile(`(?i)^(?:authorization|proxy-authorization)["']?\s*[:=：]\s*["']?$`)
+	// Bare host aliases use a word boundary, not substring matching inside a
+	// methodological word such as testing/hosting. Domains, paths and numeric
+	// IP representations deliberately retain the stricter existing behavior.
+	bareTargetAlias = regexp.MustCompile(`(?i)^[a-z0-9_-]*[a-z][a-z0-9_-]*$`)
+	bearerValue     = regexp.MustCompile(`(?i)\bBearer\s+([^\s,;"'<>}\]]{8,})`)
+	basicValue      = regexp.MustCompile(`(?i)\bBasic\s+([A-Za-z0-9+/]+={0,2})`)
+	internalMarker  = regexp.MustCompile(`(?i)(?:<\s*/?\s*(?:system|developer|assistant|memory|memory_context|memory-context|system-reminder)(?:\s|>|/)|\[\s*(?:/?INST|/?SYSTEM|/?DEVELOPER|/?MEMORY|im_start|im_end)\s*\]|<<\s*/?SYS\s*>>)`)
 	// Scope/instruction changes of ARTEX are not the same thing as describing
 	// a target's authorization flaw. Do not reject ordinary testing terminology.
 	authorityChange   = regexp.MustCompile(`(?is)(?:(?:ignore|override|disregard)\b.{0,48}\b(?:instructions?|system\s+rules?|developer\s+rules?)|(?:bypass|disable|remove|expand|extend|override)\b.{0,32}\b(?:platform|artex|agent|task|allowed|registered|approved|authorized)\b.{0,24}\b(?:scope|permissions?|approval|guard|authorization|rules?|restrictions?)|(?:disable|remove|bypass)\b.{0,16}\b(?:scope\s+(?:checks?|enforcement)|tool\s+approvals?|safety\s+guards?)|(?:忽略|覆盖|无视).{0,12}(?:此前|先前|所有|系统|开发者|更高优先级).{0,12}(?:指令|规则|提示词)|(?:忽略|覆盖|绕过|关闭|取消|扩大|扩展).{0,16}(?:平台|系统|ARTEX|本任务|当前任务|代理|Agent|已授权|登记|已批准).{0,24}(?:指令|授权|范围|审批|规则|权限|限制)|(?:扩大|扩展|取消|关闭).{0,8}(?:授权范围|范围校验|范围限制|工具审批|审批校验|安全限制|安全检查)|(?:用户|管理员)(?:长期偏好|偏好|身份变更)|\b(?:user|operator|admin)\s+(?:always\s+prefers?|prefers?)\b|(?:^|\n)\s*(?:you\s+are\b|your\s+(?:role|identity)\b|你(?:现在)?是|你的(?:身份|角色)))`)
@@ -105,7 +110,7 @@ func containsTargetDetails(fields []string, facts []StageFact) bool {
 		for _, identifier := range identifiers {
 			// Use boundaries for short names so a parameter 'id' does not match
 			// unrelated words such as 'validation'. Native target names stay exact.
-			if len(identifier) <= 3 {
+			if len(identifier) <= 3 || bareTargetAlias.MatchString(identifier) {
 				pattern := regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])` + regexp.QuoteMeta(identifier) + `(?:$|[^a-z0-9_])`)
 				if pattern.MatchString(text) {
 					return true
@@ -273,10 +278,11 @@ func containsSensitive(text string) bool {
 			return true
 		}
 	}
-	for _, match := range sensitiveAssignment.FindAllStringSubmatch(text, -1) {
-		if !placeholder(match[1]) {
-			return true
+	for _, match := range sensitiveAssignment.FindAllStringSubmatchIndex(text, -1) {
+		if placeholder(text[match[2]:match[3]]) || authorizationPlaceholder(text, match) {
+			continue
 		}
+		return true
 	}
 	for _, match := range bearerValue.FindAllStringSubmatch(text, -1) {
 		if !placeholder(match[1]) {
@@ -290,6 +296,45 @@ func containsSensitive(text string) bool {
 		}
 	}
 	return false
+}
+
+// authorizationPlaceholder recognizes only a literal header scheme followed
+// by an existing, complete placeholder. It does not allow password=Bearer or
+// arbitrary scheme values, and it never treats a token prefix as a placeholder.
+// The value must end at an explicit line/JSON/quoted-code delimiter, not merely
+// be the first word before another possible credential on the same line.
+func authorizationPlaceholder(text string, match []int) bool {
+	if len(match) != 4 || !authAssignmentPrefix.MatchString(text[match[0]:match[2]]) {
+		return false
+	}
+	scheme := text[match[2]:match[3]]
+	if !strings.EqualFold(scheme, "Bearer") && !strings.EqualFold(scheme, "Basic") {
+		return false
+	}
+	tail := text[match[3]:]
+	if tail == "" || (tail[0] != ' ' && tail[0] != '\t') {
+		return false
+	}
+	tail = strings.TrimLeft(tail, " \t")
+	end := len(tail)
+	for i, r := range tail {
+		if unicode.IsSpace(r) || strings.ContainsRune(",;\"'`}", r) {
+			end = i
+			break
+		}
+	}
+	value, rest := tail[:end], strings.TrimLeft(tail[end:], " \t")
+	if value == "" || !placeholder(value) {
+		return false
+	}
+	// Preserve the original placeholder vocabulary, but require paired wrappers
+	// here rather than accepting a token accidentally followed by a bracket.
+	if strings.ContainsAny(value, "[]<>") &&
+		!((strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]")) ||
+			(strings.HasPrefix(value, "<") && strings.HasSuffix(value, ">"))) {
+		return false
+	}
+	return rest == "" || strings.ContainsRune("\r\n,;\"'`}", rune(rest[0]))
 }
 
 func placeholder(value string) bool {
