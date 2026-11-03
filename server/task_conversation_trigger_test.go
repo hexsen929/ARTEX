@@ -55,7 +55,7 @@ func TestTaskConversationGenericTriggerRejectsBeforeCreatingConversationOrBody(t
 	for _, rejection := range []string{"deleted_owner", "runtime_missing", "closing"} {
 		t.Run(rejection, func(t *testing.T) {
 			s, _, parent, calls := taskConversationReviewFixture(t)
-			key := "synthetic-trigger-" + parent.ID
+			key := "synthetic_trigger_" + parent.ID
 			taskConversationTriggerAgent(t, s, key)
 			title := "Rejected synthetic trigger " + parent.ID
 			t.Cleanup(func() { _, _ = s.m.pg.Exec(`DELETE FROM conversations WHERE agent_key=$1 AND title=$2`, key, title) })
@@ -90,7 +90,7 @@ func TestTaskConversationGenericTriggerRegistersInflightBeforeFirstBodyInsert(t 
 			s, _, parent, calls := taskConversationReviewFixture(t)
 			key := role
 			if role == "custom" {
-				key = "synthetic-admitted-" + parent.ID
+				key = "synthetic_admitted_" + parent.ID
 			}
 			taskConversationTriggerAgent(t, s, key)
 			title := "Admitted synthetic trigger " + parent.ID
