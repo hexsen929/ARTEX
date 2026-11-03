@@ -174,11 +174,17 @@ type chatVars struct{ DataDir, Now string }
 // tool_use / tool_result / text / result), tagged with the agent key as the
 // worker lane.
 func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message string, maxTurns int, maxDuration time.Duration, webSearch bool, emit func(db.Activity)) (string, error) {
+	// Parent task attribution is not an exploration capability for Chat.
+	ctx = WithoutTaskToolSet(ctx)
 	if agentKey == "worker.intranet" {
 		return "", fmt.Errorf("worker.intranet 是 worker 的任务提示词变体，请从任务运行，不支持独立对话执行")
 	}
-	proxyAddr, proxyCACert := c.proxyForChat(ctx)
-	restricted := agentKey == db.CredentialAgentKey || agentKey == "goals" || agentKey == "asset_mapper"
+	explanationOnly := ExplanationOnly(ctx)
+	proxyAddr, proxyCACert := "", ""
+	if !explanationOnly {
+		proxyAddr, proxyCACert = c.proxyForChat(ctx)
+	}
+	restricted := explanationOnly || agentKey == db.CredentialAgentKey || agentKey == "goals" || agentKey == "asset_mapper"
 	// gate the global web-search opts by this agent's own flag.
 	ws := c.webSearch
 	if !webSearch || restricted {
@@ -196,21 +202,35 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	// have no tools-table rows, so they always pass through.
 	// Only the server's catalog may supply asset_mapper's two domain queries.
 	// Do not even construct an implicit SDK filesystem/shell base for that role.
-	base := []actool.CoreTool{}
-	if agentKey != "asset_mapper" {
-		base = actool.DefaultTools()
-	}
 	runInfo := RunInfoFrom(ctx)
 	runInfo.SessionID = sessionID
 	ctx = WithRunInfo(ctx, runInfo)
-	base = append(base, deepSeekTools(ws)...)
-	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
+	tools := []actool.CoreTool{} // non-nil: never request SDK defaults
+	def := DeferredInfo{}
+	cleanup := func() {}
+	if !explanationOnly {
+		base := []actool.CoreTool{}
+		if agentKey != "asset_mapper" {
+			base = actool.DefaultTools()
+		}
+		base = append(base, deepSeekTools(ws)...)
+		tools, def, cleanup = AugmentTools(ctx, agentKey, base)
+	}
 	defer cleanup()
 	if def.AssemblyError != nil {
 		return "", fmt.Errorf("本轮工具装配未完成，未请求模型: %w", def.AssemblyError)
 	}
 
-	system, boundary := deferredSystem(chatSystem(agentKey, c.workDir, sessionWorkDir), def)
+	var prompt string
+	if explanationOnly {
+		// Keep the chosen role's editable prompt, but do not add execution/workdir
+		// guidance to a historical explanation that has no execution capabilities.
+		prompt = renderSystem(agentKey, DefaultAssistantPrompt, chatVars{DataDir: c.workDir, Now: nowStr()}) +
+			"\n\n【历史解释模式】本轮仅解释已有会话记录及用户问题。不执行或恢复测试，不调用工具、Skill、MCP、网络搜索、文件或后台任务，不登记新的验证结果，也不把历史记录视为新证据。缺少资料时明确说明，不自行补做操作。"
+	} else {
+		prompt = chatSystem(agentKey, c.workDir, sessionWorkDir)
+	}
+	system, boundary := deferredSystem(prompt, def)
 	opts := agentcore.Options{
 		Provider:        c.prov,
 		SystemPrompt:    system,
@@ -248,7 +268,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		opts.Todos = nil
 		opts.DisableBackgroundTasks = true
 		limit := 8
-		if agentKey == db.CredentialAgentKey {
+		if explanationOnly || agentKey == db.CredentialAgentKey {
 			limit = 1
 		}
 		if opts.MaxTurns <= 0 || opts.MaxTurns > limit {
@@ -271,8 +291,10 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	if !restricted {
 		enableNoa(&opts, c.noaEnabledFn, c.workDir, "chat-"+sessionID, noaWarn("chat-"+sessionID))
 	}
-	ctx = attachSideCapture(ctx, &opts)
-	ctx = attachMemory(ctx, &opts, agentKey)
+	if !explanationOnly {
+		ctx = attachSideCapture(ctx, &opts)
+		ctx = attachMemory(ctx, &opts, agentKey)
+	}
 	s := agentcore.NewSession(opts)
 	defer s.Close()
 	// reload prior conversation so the agent has context across turns (each Chat is
@@ -282,7 +304,9 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	}
 	// re-unlock skill-gated MCPs from prior Skill() calls in the reloaded history so
 	// revealed tools stay callable across the fresh session.
-	seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
+	if !explanationOnly {
+		seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
+	}
 	text, _, err := captureRunSession(ctx, s, message, func(r db.Activity) {
 		if emit != nil {
 			r.Worker = agentKey

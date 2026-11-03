@@ -146,6 +146,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
 	base := append(tsx.DropCoverageTools(tsx.MainAgentTools()), actool.DefaultTools()...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
+	ctx = WithTaskToolSet(ctx, "mainagent", tsx)
 	base = append(base, deepSeekTools(m.webSearch)...)
 	tools, def, cleanup := AugmentTools(ctx, "mainagent", base)
 	defer cleanup()

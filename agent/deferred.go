@@ -31,26 +31,77 @@ func deferredSystem(sysText string, def DeferredInfo) (system []string, boundary
 	return system, boundary
 }
 
-// seedUnlockFromHistory replays prior Skill() invocations in the conversation so
-// their skill-gated MCPs are re-unlocked on a resumed session (design doc C2). The
-// main agent builds a fresh session each turn; its in-memory unlock set would
-// otherwise reset, leaving the model able to see a skill-revealed tool name yet
-// unable to call it. No-op when unlockSkill is nil (no deferred tools).
+// seedUnlockFromHistory replays only successfully completed Skill() calls. A
+// tool-use is an intention, not proof that the Skill loaded: failed, denied,
+// interrupted or unpaired calls must not unlock dependencies after resume.
+// unlockSkill still checks this run's current authorized Skill registry. Plain
+// model/user text, including a copied "Skill loaded" message, is not evidence.
 func seedUnlockFromHistory(msgs []llm.Message, unlockSkill func(string)) {
 	if unlockSkill == nil {
 		return
 	}
-	for _, m := range msgs {
-		for _, b := range m.ToolUses() {
-			if b.Name != "Skill" {
-				continue
+	type pendingCall struct {
+		name      string
+		remaining int
+		ambiguous bool
+	}
+	pending := map[string]*pendingCall{}
+	for _, message := range msgs {
+		if message.Role == llm.RoleAssistant {
+			for _, block := range message.ToolUses() {
+				if block.ID == "" {
+					continue
+				}
+				if prior := pending[block.ID]; prior != nil {
+					prior.remaining++
+					prior.ambiguous = true // duplicate in this round or unfinished overlap
+					continue
+				}
+				call := &pendingCall{remaining: 1}
+				pending[block.ID] = call
+				if block.Name != "Skill" {
+					continue
+				}
+				// Match the SDK's complete argument decoding, not just name.
+				// The metered Skill tool trims names before its real lookup.
+				var input struct {
+					Name string `json:"name"`
+					Args string `json:"args"`
+				}
+				if json.Unmarshal(block.Input, &input) == nil {
+					call.name = strings.TrimSpace(input.Name)
+				}
 			}
-			var in struct {
-				Name string `json:"name"`
-			}
-			if json.Unmarshal(b.Input, &in) == nil && in.Name != "" {
-				unlockSkill(in.Name)
+			continue
+		}
+		if message.Role != llm.RoleUser {
+			continue
+		}
+		// A duplicate result in one host response is ambiguous even if the
+		// first block says success. Do not depend on its block ordering.
+		resultCounts := map[string]int{}
+		for _, block := range message.Content {
+			if block.Type == llm.BlockToolResult && block.ToolUseID != "" {
+				resultCounts[block.ToolUseID]++
 			}
 		}
+		for _, block := range message.Content {
+			if block.Type != llm.BlockToolResult || block.ToolUseID == "" {
+				continue
+			}
+			call := pending[block.ToolUseID]
+			if call == nil {
+				continue // orphan results and plain text never prove a load
+			}
+			call.remaining--
+			if call.remaining == 0 {
+				delete(pending, block.ToolUseID)
+			}
+			if !call.ambiguous && resultCounts[block.ToolUseID] == 1 && !block.IsError && call.name != "" {
+				unlockSkill(call.name)
+			}
+		}
+		// Completed pairs are consumed. Some compatible providers reuse IDs
+		// on later turns; a later failure must not erase an earlier real load.
 	}
 }

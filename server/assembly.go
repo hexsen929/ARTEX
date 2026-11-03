@@ -201,6 +201,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 			if err != nil {
 				return []actool.CoreTool{}, agent.DeferredInfo{AssemblyError: fmt.Errorf("读取 MCP 目录失败，未装配工具")}, cleanup
 			}
+			warnings = append(warnings, skillMCPDependencyWarnings(reg, all, want, separateSkillRole, baseSkillMCPs)...)
 			for _, m := range all {
 				if !m.Enabled {
 					continue
@@ -522,6 +523,23 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 				if !ok {
 					continue // not a domain tool; custom/host tools are injected via hostTools()
 				}
+				if agent.IsTaskDomainReadTool(row.Key) {
+					// A catalog grant selects a capability, not a global task.
+					// Native readers must come from this exact configured run.
+					if !row.System || row.Kind != "builtin" {
+						agent.AddToolAssemblyWarning(ctx, "已省略原生任务读工具 "+row.Key+"：工具定义类型不一致，未替换其自定义实现。")
+						continue
+					}
+					local, _, err := agent.TaskDomainTool(ctx, agentKey, row.Key)
+					if err != nil {
+						return agent.ToolAssemblyFailure(err)
+					}
+					if local == nil {
+						agent.AddToolAssemblyWarning(ctx, "工具 "+row.Key+" 需要原生任务探索图；当前会话已省略，不改用其它任务。")
+						continue
+					}
+					inst = local
+				}
 				out = append(out, resolve(inst, row))
 			}
 		}
@@ -594,11 +612,11 @@ func contains(ss []string, v string) bool {
 // domain tools into agents (Auto, custom) that don't own a per-task ToolSet.
 // nil as → returns nil (no injection, graceful degradation).
 //
-// The nil ExplorationStore is deliberate — these instances are task-less by
-// construction — so every tool here must tolerate it. Asset/company tools do
-// (they only need the AssetStore); the exploration-graph tools refuse with a
-// clear message via ToolSet.needExploration. Binding one of them to a task-less
-// agent in the tools table is therefore a useless tool, not a crash.
+// The nil ExplorationStore is deliberate. Asset/company handlers can use this
+// registry directly, but optional exploration readers are resolved from the
+// native run's ToolSet. A taskless Chat omits those readers with a bounded
+// assembly warning. The prototype nil-store guard remains defense in depth;
+// the shared registry is never rebound to an active or inferred task.
 func buildDomainReg(as *db.AssetStore) map[string]actool.CoreTool {
 	if as == nil {
 		return nil

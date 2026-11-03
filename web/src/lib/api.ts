@@ -849,9 +849,10 @@ export const api = {
       `/exploration/findings/${id}/traffic/order${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
       { method: "PUT", body: JSON.stringify({ binding_ids, version }) },
     ),
-  findingTrafficDetail: (id: string, bindingId: string, contextTask?: string) =>
-    get<FindingTrafficDetail>(
+  findingTrafficDetail: (id: string, bindingId: string, contextTask?: string, signal?: AbortSignal) =>
+    http<FindingTrafficDetail>(
       `/exploration/findings/${id}/traffic/${bindingId}${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { signal },
     ),
   repeaterSend: (req: RepeaterSendRequest) => post<RepeaterSendResponse>("/repeater/send", req),
   findingTrafficBody: (
@@ -1034,7 +1035,8 @@ export const api = {
         (opts.sort ? `&sort=${encodeURIComponent(opts.sort)}` : "") +
         (opts.order ? `&order=${encodeURIComponent(opts.order)}` : ""),
     ),
-  trafficExchange: (id: string) => get<TrafficDetail>(`/traffic/exchange?id=${encodeURIComponent(id)}`),
+  trafficExchange: (id: string, signal?: AbortSignal) =>
+    http<TrafficDetail>(`/traffic/exchange?id=${encodeURIComponent(id)}`, { signal }),
   trafficHosts: (taskId?: string) =>
     get<{ hosts: TrafficHost[] }>(`/traffic/hosts${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
   trafficDeleteHost: (host: string) => del<{ deleted: number }>(`/traffic?host=${encodeURIComponent(host)}`),
