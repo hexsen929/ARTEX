@@ -195,7 +195,7 @@ async function main() {
       ["budget_deferred", "等待发送预算", /本轮未发送请求；不是提供方或 API 失败/],
       ["provider_error", "模型调用错误", /上次模型调用发生错误/],
       ["timeout", "总结超时", /上次阶段总结超时/],
-      ["storage_error", "结果保存错误", /上次阶段结果保存发生错误/],
+      ["storage_error", "存储读取或保存错误", /上次阶段结果保存发生错误/],
       ["lease_expired", "处理租约过期", /上次阶段处理租约已过期/],
       ["legacy_unknown", "历史结果未分类", /上次历史结果未分类/],
     ];
