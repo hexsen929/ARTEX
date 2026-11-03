@@ -85,7 +85,7 @@ async function main() {
   release("finding:701"); await settle(page); assert.ok(page.url().includes("id=503")); assert.deepEqual(await workspace(page), baseline);
   assert.ok(await page.evaluate(() => window.__seedSignalAborts.some((event) => event.marker === "finding:701" && event.provided && event.aborted)), "Finding scope cleanup did not cancel the read signal");
   await page.evaluate(() => history.pushState(null, "", "/function/findings/detail?id=501")); await page.getByRole("heading", { name: "FINDING_SCOPE_501", exact: true }).waitFor();
-  await page.getByRole("button", { name: "送入请求重发", exact: true }).click(); await page.waitForURL("**/function/repeater*"); await eventually(async () => (await workspace(page)).tabs.some((tab) => tab.body === "FIXTURE_EVIDENCE_BODY"), "Current finding failed to import");
+  await page.getByRole("button", { name: "送入请求重发", exact: true }).click(); await page.waitForURL((url) => url.pathname.replace(/\/$/, "") === "/function/repeater", { waitUntil: "domcontentloaded" }); await eventually(async () => (await workspace(page)).tabs.some((tab) => tab.body === "FIXTURE_EVIDENCE_BODY"), "Current finding failed to import");
   console.log("PASS finding change ignores delayed evidence without losing the current import or sending a request");
 
   delayed.add("traffic:601"); await page.goto(origin + "/function/tasks/detail?id=101&tab=traffic", { waitUntil: "networkidle" }); await page.getByRole("checkbox", { name: "选择本页流量", exact: true }).waitFor();
@@ -95,7 +95,7 @@ async function main() {
   assert.equal(await page.evaluate(() => window.__fixtureDocument), taskDocument); release("traffic:601"); await settle(page); assert.ok(page.url().includes("id=202")); assert.deepEqual(await workspace(page), baseline);
   assert.ok(await page.evaluate(() => window.__seedSignalAborts.some((event) => event.marker === "traffic:601" && event.provided && event.aborted)), "Task scope cleanup did not cancel the read signal");
   assert.equal(requests.filter((item) => item.endpoint === "/api/traffic/exchange" && item.query.id === "602").length, 0, "Stale batch continued to the next packet");
-  await page.getByRole("checkbox", { name: "选择本页流量", exact: true }).check(); await page.getByRole("button", { name: "送入请求重发", exact: true }).click(); await page.waitForURL("**/function/repeater*"); await eventually(async () => (await workspace(page)).tabs.some((tab) => tab.body === "FIXTURE_BODY_603"), "New task remained locked after the prior import was cancelled");
+  await page.getByRole("checkbox", { name: "选择本页流量", exact: true }).check(); await page.getByRole("button", { name: "送入请求重发", exact: true }).click(); await page.waitForURL((url) => url.pathname.replace(/\/$/, "") === "/function/repeater", { waitUntil: "domcontentloaded" }); await eventually(async () => (await workspace(page)).tabs.some((tab) => tab.body === "FIXTURE_BODY_603"), "New task remained locked after the prior import was cancelled");
   console.log("PASS task change cancels the old batch, clears prior selection and keeps the new task import usable");
 
   delayed.add("traffic:602"); await page.goto(origin + "/function/tasks/detail?id=101&tab=traffic", { waitUntil: "networkidle" }); await page.getByRole("checkbox", { name: "选择本页流量", exact: true }).waitFor(); await page.evaluate(() => { window.__ignoreSeedAbort = true; });

@@ -435,7 +435,7 @@ func execPython(ctx context.Context, interp, key, code string, params map[string
 	output := &customToolOutput{}
 	c.Stdout, c.Stderr = output, output
 	c.WaitDelay = 2 * time.Second
-	err := c.Run()
+	err = c.Run()
 	body := output.String()
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		body += "\n... [超时终止] ..."
@@ -507,7 +507,7 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 	for k, v := range spec.Headers {
 		req.Header.Set(k, renderTemplate(v, params, identity))
 	}
-	tr, reportPlatformFailure, err := s.customHTTPTransport(ctx, spec, tc, req.URL.Scheme)
+	tr, reportPlatformFailure, err := s.customHTTPTransport(runCtx, spec, tc, req.URL.Scheme)
 	if err != nil {
 		return actool.Errorf(err.Error()), nil
 	}

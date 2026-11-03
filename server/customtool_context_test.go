@@ -307,3 +307,25 @@ func TestCustomHTTPEnvironmentKeysRespectProtocolAndExplicitEmpty(t *testing.T) 
 		t.Fatal("an explicit empty host route did not remain direct")
 	}
 }
+
+// A stalled route lookup must obey the same timeout as the HTTP operation,
+// rather than spending the manager's longer route deadline before noticing it.
+type customHTTPBlockedRoute struct{}
+
+func (customHTTPBlockedRoute) ListByTask(ctx context.Context, _ int64) ([]*db.TunnelRecord, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestCustomHTTPRouteLookupSharesRequestDeadline(t *testing.T) {
+	m := &Manager{globalProxy: "http://127.0.0.1:1"}
+	m.taskProxy = newTaskProxyManager(t.TempDir(), customHTTPBlockedRoute{}, m.GlobalProxy, 0, 0)
+	defer m.taskProxy.Close()
+	s := &Server{m: m}
+	ctx := agent.WithRunInfo(t.Context(), agent.RunInfo{TaskID: 1, ExplorationID: 1})
+	started := time.Now()
+	res := customHTTPFixture(t, s, ctx, "http://fixture.invalid/", httpExec{UseRecordingProxy: true, TimeoutMs: 50}, nil)
+	if !res.IsError || time.Since(started) > 3*time.Second {
+		t.Fatal("route lookup escaped the custom HTTP request deadline")
+	}
+}
