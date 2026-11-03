@@ -93,15 +93,28 @@ func (s *Server) applyTaskControl(t *Task, action string) (taskControlResult, er
 	return s.applyTaskControlWithCause(t, action, agent.AbortPausedByUser)
 }
 
-func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause error) (taskControlResult, error) {
+func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause error) (out taskControlResult, resultErr error) {
 	if t == nil {
 		return taskControlResult{}, fmt.Errorf("task not found")
 	}
-	out := taskControlResult{ID: t.ID}
+	out = taskControlResult{ID: t.ID}
 	switch action {
 	case "pause":
 		s.concMu.Lock()
-		defer s.concMu.Unlock()
+		defer func() {
+			var runs []*taskConversationRun
+			if out.Paused {
+				runs = s.taskConversationWaiters(t.ID)
+			}
+			s.concMu.Unlock()
+			if len(runs) > 0 {
+				ctx, cancel := context.WithTimeout(context.Background(), taskDeleteDrainTimeout)
+				defer cancel()
+				if err := waitConversationRuns(ctx, runs); err != nil && resultErr == nil {
+					resultErr = err
+				}
+			}
+		}()
 		current, exists := s.m.Task(t.ID)
 		if !exists || current != t || s.engine.IsDeleting(t.ID) {
 			return out, fmt.Errorf("任务正在删除，无法控制")

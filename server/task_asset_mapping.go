@@ -143,7 +143,10 @@ func (s *Server) taskAssetMapping(w http.ResponseWriter, r *http.Request) {
 	s.chatMu.Lock()
 	s.chatBusy[busyKey] = true
 	s.chatMu.Unlock()
-	s.runConversation(conversation, message, busyKey, message)
+	if err := s.runConversation(conversation, message, busyKey, message); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status": "accepted", "agent_key": "asset_mapper", "conversation_id": conversation.ID,
 	})

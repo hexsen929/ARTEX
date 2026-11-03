@@ -659,10 +659,10 @@ func customHTTPProxyTransport(rawProxy, caFile string) (*http.Transport, error) 
 		if err != nil {
 			return nil, errors.New("录制代理 CA 读取失败，未发送请求")
 		}
-		pool, err := x509.SystemCertPool()
-		if err != nil || pool == nil {
-			pool = x509.NewCertPool()
-		}
+		// An explicitly supplied bundle replaces the system trust store. Keep
+		// recording routes restricted to their selected CA rather than silently
+		// widening trust to unrelated system roots.
+		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
 			return nil, errors.New("录制代理 CA 无效，未发送请求")
 		}

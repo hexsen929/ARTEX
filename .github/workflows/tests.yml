@@ -127,6 +127,7 @@ jobs:
           go test -race ./server -run 'Test(ChatProfileWiring|TaskAgentBindingWiring|RuntimeControlRoutes|RoESettings|InstalledSkillDefaultsStartup|SkillDefaultsPending|NotifierSettingsWiring)' -count=1 -timeout=5m
           go test -race -p=1 ./agent ./server -run 'Test(TaskTool|TaskDomain|TaskAssemblyWarnings|ExplanationOnly|ChatExplanation|SeedUnlockFromHistory|SkillMCPDependencyWarnings|Custom)' -count=1 -timeout=5m
           go test -race ./db -run '^TestTaskArchive.*Retest' -count=1 -timeout=5m
+          go test -race ./server -run 'Test(TaskConversation|Retest|VerifierContext|SealedVerifier)' -count=1 -timeout=5m
 
   checkpoint-postgres-18:
     runs-on: ubuntu-24.04
@@ -179,10 +180,12 @@ jobs:
           set -euo pipefail
           task_tools_log="$RUNNER_TEMP/task-tools-pg18.log"
           retest_archive_log="$RUNNER_TEMP/retest-archives-pg18.log"
-          go test -race -v ./server -run '^TestTaskToolRegistry' -count=1 -timeout=5m | tee "$task_tools_log"
+          go test -race -v ./server -run '^Test(TaskToolRegistry|TaskConversation)' -count=1 -timeout=5m | tee "$task_tools_log"
           go test -race -v ./db -run '^TestTaskArchive.*Retest' -count=1 -timeout=5m | tee "$retest_archive_log"
           grep -q -- '^--- PASS: TestTaskToolRegistryWorkerExecuteUsesTaskLocalReader ' "$task_tools_log"
           grep -q -- '^--- PASS: TestTaskToolRegistryConcurrentWorkersStayIsolated ' "$task_tools_log"
+          grep -q -- '^--- PASS: TestTaskConversationDeleteWaitsForActualProviderExit ' "$task_tools_log"
+          grep -q -- '^--- PASS: TestTaskConversationRetestCarriesTaskContextAndPrivateProxy ' "$task_tools_log"
           grep -q -- '^--- PASS: TestTaskArchiveRetestConversationAndApprovalRoundTrip ' "$retest_archive_log"
           grep -q -- '^--- PASS: TestTaskArchiveRetestSharedConversationRemainsHotAndDetached ' "$retest_archive_log"
 

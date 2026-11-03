@@ -51,7 +51,14 @@ func newRetestServer(t *testing.T) (*Server, int64) {
 	if err := s.seedFindingRetester(); err != nil {
 		t.Fatal(err)
 	}
-	fid, err := pg.AddFinding(0, 0, "retest-server", "复测测试", "high", "summary", "original proof", "worker", nil)
+	row, err := pg.CreateTask("retest lifecycle fixture", "synthetic fixture", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID := strconv.FormatInt(row.ID, 10)
+	s.m.tasks[taskID] = &Task{ID: taskID, ExpID: row.ExplorationID, Store: pg.Exploration(row.ExplorationID), Status: "running"}
+	s.engine = NewEngine(s.m)
+	fid, err := pg.AddFinding(row.ID, 0, "retest-server", "复测测试", "high", "summary", "original proof", "worker", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,6 +74,8 @@ func newRetestServer(t *testing.T) (*Server, int64) {
 		agent.ToolAugment, agent.ToolResolve, agent.PromptOverride = oldAugment, oldResolve, oldPrompt
 		_, _ = pg.Exec(`DELETE FROM conversations WHERE id IN (SELECT conversation_id FROM finding_retests WHERE finding_id=$1)`, fid)
 		_, _ = pg.DeleteFinding(fid)
+		_, _ = pg.Exec(`DELETE FROM tasks WHERE id=$1`, row.ID)
+		_, _ = pg.Exec(`DELETE FROM explorations WHERE id=$1`, row.ExplorationID)
 		pg.Close()
 	})
 	return s, fid

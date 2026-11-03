@@ -79,6 +79,8 @@ func (s *Server) startFindingRetest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "复测补充说明最多 4000 个字符")
 		return
 	}
+	s.concMu.Lock()
+	defer s.concMu.Unlock()
 	f, err := pg.GetFinding(id)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -130,7 +132,13 @@ func (s *Server) startFindingRetest(w http.ResponseWriter, r *http.Request) {
 		s.chatMu.Lock()
 		s.chatBusy[busyKey] = true
 		s.chatMu.Unlock()
-		s.runConversation(conv, retest.InitialMessage(), busyKey)
+		if f.TaskID != nil {
+			s.findingCheckTasks.Store(conv.ID, strconv.FormatInt(*f.TaskID, 10))
+		}
+		if err := s.runConversationLocked(conv, retest.InitialMessage(), busyKey); err != nil {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
 	}
 	code := http.StatusOK
 	if created {

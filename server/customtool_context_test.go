@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -262,16 +263,30 @@ func TestCustomHTTPInvalidProxyOrCAMustNotBecomeDirect(t *testing.T) {
 			t.Fatal("CA failure silently changed the route")
 		}
 	}
+}
+
+func TestCustomHTTPExplicitCABundleIsExclusive(t *testing.T) {
 	tlsFixture := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer tlsFixture.Close()
-	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsFixture.Certificate().Raw}), 0o600); err != nil {
+	ca := filepath.Join(t.TempDir(), "explicit-ca.pem")
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsFixture.Certificate().Raw})
+	if err := os.WriteFile(ca, caPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	tr, err := customHTTPProxyTransport("http://127.0.0.1:22001", ca)
-	if err != nil || tr.TLSClientConfig == nil || tr.TLSClientConfig.InsecureSkipVerify {
-		t.Fatal("valid CA did not retain normal TLS verification")
+	wantRoots := x509.NewCertPool()
+	if !wantRoots.AppendCertsFromPEM(caPEM) {
+		t.Fatal("fixture CA is not valid PEM")
 	}
-	tr.CloseIdleConnections()
+	for _, proxy := range []string{"", "http://127.0.0.1:22001"} {
+		tr, err := customHTTPProxyTransport(proxy, ca)
+		if err != nil || tr == nil || tr.TLSClientConfig == nil || tr.TLSClientConfig.InsecureSkipVerify {
+			t.Fatal("valid CA did not retain normal TLS verification")
+		}
+		if tr.TLSClientConfig.RootCAs == nil || !tr.TLSClientConfig.RootCAs.Equal(wantRoots) {
+			t.Fatal("explicit CA bundle was widened with unrelated trust roots")
+		}
+		tr.CloseIdleConnections()
+	}
 }
 
 func TestCustomHTTPIncompleteResponseIsAnErrorAndFailedDirectCallDoesNotNeedManager(t *testing.T) {
