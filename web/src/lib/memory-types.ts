@@ -284,7 +284,7 @@ export function memoryLearningOutcome(result?: MemoryLearningSnapshot["last_resu
     budget_deferred: "上次阶段等待实际 HTTP 发送预算，本轮未发送请求；不是提供方或 API 失败。",
     provider_error: "上次模型调用发生错误，未报告学习完成；这不是渗透任务失败计数。",
     timeout: "上次阶段总结超时，未报告学习完成；这不是渗透任务超时计数。",
-    storage_error: "上次阶段结果保存发生错误，未报告保存成功，条目状态需重新核对。",
+    storage_error: "上次阶段存储读取或保存未完成；未把存储故障记为正常空结果，条目状态需重新核对。",
     lease_expired: "上次阶段处理租约已过期，未报告保存成功。",
     no_experience: "上次记录为历史未细分的“未新增经验”；原记录混合了空结果与拒绝等情况，具体原因未记录。",
     failed: "上次为历史失败记录，未保存具体失败类别；不代表渗透任务失败。",
