@@ -253,7 +253,9 @@ func (m *Manager) initProxyPool() error {
 	}
 	// Publish only a successfully loaded and committed snapshot.
 	m.proxyPool = &proxyPoolState{entries: pool.Entries, active: pool.Active}
+	m.mu.Lock()
 	m.globalProxy = global
+	m.mu.Unlock()
 	m.proxyPoolConfigured.Store(len(pool.Entries) > 0)
 	return nil
 }
@@ -680,6 +682,9 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 }
 
 func serverContext(s *Server) context.Context {
+	if s != nil && s.proxyCtx != nil {
+		return s.proxyCtx
+	}
 	if s != nil && s.ctx != nil {
 		return s.ctx
 	}
@@ -754,6 +759,9 @@ func (s *Server) handleProxyPoolFailure(cause error) bool {
 		return false
 	}
 	res := s.runProxyProbe(serverContext(s), cur, "", defaultEgressProbes, proxyPoolProbeTimeout)
+	if s.proxyShuttingDown() {
+		return true
+	}
 	if res.OK {
 		return false
 	}
@@ -960,6 +968,14 @@ func (s *Server) updateProxyPool(w http.ResponseWriter, r *http.Request) {
 	recoverPaused := false
 	proxyGuards := s.snapshotProxyReconnectGuards(false)
 	s.m.proxyPool.mu.Lock()
+	rollback := s.m.proxyPoolRollbackLocked()
+	committed := false
+	unlock := func() {
+		if !committed {
+			rollback()
+		}
+		s.m.proxyPool.mu.Unlock()
+	}
 	for i := range s.m.proxyPool.entries {
 		e := &s.m.proxyPool.entries[i]
 		if e.ID != id {
@@ -970,7 +986,7 @@ func (s *Server) updateProxyPool(w http.ResponseWriter, r *http.Request) {
 		if req.URL != nil {
 			raw, err := mergeMaskedProxyURL(*req.URL, oldRaw)
 			if err != nil {
-				s.m.proxyPool.mu.Unlock()
+				unlock()
 				writeErr(w, 400, err.Error())
 				return
 			}
@@ -1000,7 +1016,7 @@ func (s *Server) updateProxyPool(w http.ResponseWriter, r *http.Request) {
 				if e.Enabled && e.RawURL != "" {
 					if err := s.m.applyActiveProxyLockedWithHealth(id, "manual", req.URL != nil); err != nil {
 						*e = oldEntry
-						s.m.proxyPool.mu.Unlock()
+						unlock()
 						writeErr(w, 400, maskSecrets(err.Error()))
 						return
 					}
@@ -1016,7 +1032,7 @@ func (s *Server) updateProxyPool(w http.ResponseWriter, r *http.Request) {
 						// Fall through to the enabled-member fallback below.
 					} else {
 						if err := s.m.applyActiveProxyLocked(next, "manual"); err != nil {
-							s.m.proxyPool.mu.Unlock()
+							unlock()
 							writeErr(w, 400, maskSecrets(err.Error()))
 							return
 						}
@@ -1038,34 +1054,38 @@ func (s *Server) updateProxyPool(w http.ResponseWriter, r *http.Request) {
 					}
 					if next != "" {
 						if err := s.m.applyActiveProxyLockedWithHealth(next, "manual", true); err != nil {
-							s.m.proxyPool.mu.Unlock()
+							unlock()
 							writeErr(w, 400, maskSecrets(err.Error()))
 							return
 						}
 						needPause = true
 					} else {
 						if err := s.m.applyActiveProxyLocked("", "manual"); err != nil {
-							s.m.proxyPool.mu.Unlock()
+							unlock()
 							writeErr(w, 400, maskSecrets(err.Error()))
 							return
 						}
 						needPause = false
 						recoverPaused = true
 					}
+					routed = true
 				}
 			}
 		}
-		if err := s.m.persistProxyPoolLocked(); err != nil {
-			s.m.proxyPool.mu.Unlock()
-			writeErr(w, 500, err.Error())
-			return
+		if !routed {
+			if err := s.m.persistProxyPoolLocked(); err != nil {
+				unlock()
+				writeErr(w, 500, maskSecrets(err.Error()))
+				return
+			}
 		}
+		committed = true
 		out := e.ProxyPoolEntry
 		out.URL = maskSecrets(e.RawURL)
 		if !out.Enabled {
 			out.Health = "disabled"
 		}
-		s.m.proxyPool.mu.Unlock()
+		unlock()
 		if needPause {
 			s.pauseAllProxyTasks(errors.New("代理池暂无健康成员"))
 		}
@@ -1078,7 +1098,7 @@ func (s *Server) updateProxyPool(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"entry": out})
 		return
 	}
-	s.m.proxyPool.mu.Unlock()
+	unlock()
 	writeErr(w, 404, "代理不存在")
 }
 
@@ -1093,8 +1113,17 @@ func (s *Server) deleteProxyPool(w http.ResponseWriter, r *http.Request) {
 	recoverPaused := false
 	proxyGuards := s.snapshotProxyReconnectGuards(false)
 	s.m.proxyPool.mu.Lock()
+	rollback := s.m.proxyPoolRollbackLocked()
+	committed := false
+	routed := false
+	unlock := func() {
+		if !committed {
+			rollback()
+		}
+		s.m.proxyPool.mu.Unlock()
+	}
 	found := false
-	out := s.m.proxyPool.entries[:0]
+	out := make([]proxyPoolEntry, 0, len(s.m.proxyPool.entries))
 	for _, e := range s.m.proxyPool.entries {
 		if e.ID == id {
 			found = true
@@ -1103,16 +1132,15 @@ func (s *Server) deleteProxyPool(w http.ResponseWriter, r *http.Request) {
 		out = append(out, e)
 	}
 	if !found {
-		s.m.proxyPool.mu.Unlock()
+		unlock()
 		writeErr(w, 404, "代理不存在")
 		return
 	}
 	s.m.proxyPool.entries = out
-	s.m.proxyPoolConfigured.Store(len(out) > 0)
 	if s.m.proxyPool.active == id {
 		if next := s.m.selectHealthyLocked(id); next != "" {
 			if err := s.m.applyActiveProxyLocked(next, "manual"); err != nil {
-				s.m.proxyPool.mu.Unlock()
+				unlock()
 				writeErr(w, 500, maskSecrets(err.Error()))
 				return
 			}
@@ -1129,14 +1157,14 @@ func (s *Server) deleteProxyPool(w http.ResponseWriter, r *http.Request) {
 			}
 			if next != "" {
 				if err := s.m.applyActiveProxyLockedWithHealth(next, "manual", true); err != nil {
-					s.m.proxyPool.mu.Unlock()
+					unlock()
 					writeErr(w, 500, maskSecrets(err.Error()))
 					return
 				}
 				needPause = true
 			} else {
 				if err := s.m.applyActiveProxyLocked("", "manual"); err != nil {
-					s.m.proxyPool.mu.Unlock()
+					unlock()
 					writeErr(w, 500, maskSecrets(err.Error()))
 					return
 				}
@@ -1154,13 +1182,18 @@ func (s *Server) deleteProxyPool(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		routed = true
 	}
-	if err := s.m.persistProxyPoolLocked(); err != nil {
-		s.m.proxyPool.mu.Unlock()
-		writeErr(w, 500, err.Error())
-		return
+	if !routed {
+		if err := s.m.persistProxyPoolLocked(); err != nil {
+			unlock()
+			writeErr(w, 500, maskSecrets(err.Error()))
+			return
+		}
+		s.m.proxyPoolConfigured.Store(len(out) > 0)
 	}
-	s.m.proxyPool.mu.Unlock()
+	committed = true
+	unlock()
 	if needPause {
 		s.pauseAllProxyTasks(errors.New("代理池暂无健康成员"))
 	}

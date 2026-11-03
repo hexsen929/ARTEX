@@ -153,6 +153,9 @@ type Server struct {
 	proxyReconnect    proxyReconnectSupervisor
 	proxyPoolWake     chan struct{}
 	proxyPoolWG       sync.WaitGroup
+	proxyCallbackWG   sync.WaitGroup
+	proxyCtx          context.Context
+	proxyCancel       context.CancelFunc
 	proxyPoolProbeSem chan struct{}
 	proxyPoolTickMu   sync.Mutex
 	// proxyProbe is injectable for deterministic reconnect race tests. Production
@@ -195,9 +198,10 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	if err != nil {
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
+	proxyCtx, proxyCancel := context.WithCancel(ctx)
 	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, dataDir: dataDir, jwtKey: key, keyDir: keyDir, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
-		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{}, proxyPoolWake: make(chan struct{}, 1), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency),
+		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{}, proxyCtx: proxyCtx, proxyCancel: proxyCancel, proxyPoolWake: make(chan struct{}, 1), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency),
 		profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1), credentialWake: make(chan struct{}, 1)}
@@ -346,7 +350,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	s.restoreTaskRuntimes()
 	s.ensureProxySupervisor()
 	s.proxyPoolWG.Add(1)
-	go func() { defer s.proxyPoolWG.Done(); s.runProxyPoolSupervisor(s.ctx) }()
+	go func() { defer s.proxyPoolWG.Done(); s.runProxyPoolSupervisor(s.proxyCtx) }()
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()
 	if m.pg != nil {
@@ -367,11 +371,25 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	return s
 }
 
-// Close waits for proxy pool supervision to stop before Manager closes the DB.
+// Close cancels and joins both proxy supervisors before Manager closes PG.
+// An owned child context also permits Close before the caller cancels s.ctx.
 func (s *Server) Close() {
-	if s != nil {
-		s.proxyPoolWG.Wait()
+	if s == nil {
+		return
 	}
+	if s.proxyCancel != nil {
+		s.proxyCancel()
+	}
+	s.proxyReconnect.mu.Lock()
+	s.proxyReconnect.closed = true
+	cancelReconnect := s.proxyReconnect.cancel
+	s.proxyReconnect.mu.Unlock()
+	if cancelReconnect != nil {
+		cancelReconnect()
+	}
+	s.proxyPoolWG.Wait()
+	s.proxyReconnect.wg.Wait()
+	s.proxyCallbackWG.Wait()
 }
 
 // Restored deadline and worker loops must inherit the same context as new tasks,

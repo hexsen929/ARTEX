@@ -54,8 +54,11 @@ func isGlobalProxyDialFailure(err error) bool {
 }
 
 type proxyReconnectSupervisor struct {
-	mu   sync.Mutex
-	wake chan struct{}
+	mu     sync.Mutex
+	wake   chan struct{}
+	wg     sync.WaitGroup
+	cancel context.CancelFunc
+	closed bool
 }
 
 type proxyReconnectGuard struct {
@@ -97,11 +100,17 @@ func proxyReconnectGuardMatches(st taskLifecycleState, guard proxyReconnectGuard
 
 func (s *Server) ensureProxySupervisor() {
 	s.proxyReconnect.mu.Lock()
-	if s.proxyReconnect.wake == nil {
-		s.proxyReconnect.wake = make(chan struct{}, 1)
-		go s.runProxyReconnect(s.ctx)
+	defer s.proxyReconnect.mu.Unlock()
+	if s.proxyReconnect.closed {
+		return
 	}
-	s.proxyReconnect.mu.Unlock()
+	if s.proxyReconnect.wake == nil {
+		ctx, cancel := context.WithCancel(serverContext(s))
+		s.proxyReconnect.cancel = cancel
+		s.proxyReconnect.wake = make(chan struct{}, 1)
+		s.proxyReconnect.wg.Add(1)
+		go func() { defer s.proxyReconnect.wg.Done(); s.runProxyReconnect(ctx) }()
+	}
 }
 
 func (s *Server) signalProxySupervisor() {
@@ -110,6 +119,25 @@ func (s *Server) signalProxySupervisor() {
 	case s.proxyReconnect.wake <- struct{}{}:
 	default:
 	}
+}
+
+// Traffic reports and Engine callbacks may arrive after cancellation. Serialize
+// callback admission with Close so no WaitGroup.Add races its final Wait, and
+// a late callback cannot use PG after Manager has closed it.
+func (s *Server) beginProxyCallback() bool {
+	s.proxyReconnect.mu.Lock()
+	defer s.proxyReconnect.mu.Unlock()
+	if s.proxyReconnect.closed || (s.proxyCtx != nil && s.proxyCtx.Err() != nil) {
+		return false
+	}
+	s.proxyCallbackWG.Add(1)
+	return true
+}
+
+func (s *Server) proxyShuttingDown() bool {
+	s.proxyReconnect.mu.Lock()
+	defer s.proxyReconnect.mu.Unlock()
+	return s.proxyReconnect.closed || (s.proxyCtx != nil && s.proxyCtx.Err() != nil)
 }
 
 func (s *Server) proxyReconnectConfig() (int, time.Duration) {
@@ -139,19 +167,29 @@ func (s *Server) runProxyProbe(ctx context.Context, proxyRaw, caPEMPath string, 
 }
 
 func (s *Server) handleProxyFailure(taskID string, cause error) {
+	if !s.beginProxyCallback() {
+		return
+	}
+	defer s.proxyCallbackWG.Done()
 	if strings.TrimSpace(s.m.GlobalProxy()) == "" || !s.taskUsesGlobalProxy(taskID) {
 		return
 	}
 	if s.handleProxyPoolFailure(cause) {
 		return
 	}
-	if probe := s.runProxyProbe(s.ctx, s.m.GlobalProxy(), "", defaultEgressProbes, 10*time.Second); probe.OK {
+	if probe := s.runProxyProbe(serverContext(s), s.m.GlobalProxy(), "", defaultEgressProbes, 10*time.Second); probe.OK {
+		return
+	}
+	if s.proxyShuttingDown() {
 		return
 	}
 	s.pauseProxyTask(taskID, cause)
 }
 
 func (s *Server) pauseProxyTask(taskID string, cause error) {
+	if s.proxyShuttingDown() {
+		return
+	}
 	if strings.TrimSpace(s.m.GlobalProxy()) == "" || !s.taskUsesGlobalProxy(taskID) {
 		return
 	}
@@ -201,6 +239,10 @@ func (s *Server) pauseProxyTask(taskID string, cause error) {
 }
 
 func (s *Server) handleProxyTrafficFailure(cause error) {
+	if !s.beginProxyCallback() {
+		return
+	}
+	defer s.proxyCallbackWG.Done()
 	if s.handleProxyPoolFailure(cause) {
 		return
 	}
@@ -210,6 +252,9 @@ func (s *Server) handleProxyTrafficFailure(cause error) {
 	// Confirm the saved global proxy itself before pausing. MITM RequestError can
 	// also represent a target-side failure, and those must not pause a task.
 	if probe := s.runProxyProbe(serverContext(s), s.m.GlobalProxy(), "", defaultEgressProbes, 10*time.Second); probe.OK {
+		return
+	}
+	if s.proxyShuttingDown() {
 		return
 	}
 	for _, t := range s.m.List() {
@@ -222,6 +267,10 @@ func (s *Server) handleProxyTrafficFailure(cause error) {
 }
 
 func (s *Server) handleProxyToolFailure(ctx context.Context, cause error) {
+	if !s.beginProxyCallback() {
+		return
+	}
+	defer s.proxyCallbackWG.Done()
 	info := agent.RunInfoFrom(ctx)
 	if info.TaskID > 0 && !s.taskUsesGlobalProxy(fmt.Sprint(info.TaskID)) {
 		return
@@ -233,6 +282,9 @@ func (s *Server) handleProxyToolFailure(ctx context.Context, cause error) {
 		return
 	}
 	if probe := s.runProxyProbe(serverContext(s), s.m.GlobalProxy(), "", defaultEgressProbes, 10*time.Second); probe.OK {
+		return
+	}
+	if s.proxyShuttingDown() {
 		return
 	}
 	if info.TaskID > 0 {
@@ -259,14 +311,21 @@ func (s *Server) runProxyReconnect(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.proxyReconnectTick()
+			s.proxyReconnectTickContext(ctx)
 		case <-s.proxyReconnect.wake:
-			s.proxyReconnectTick()
+			s.proxyReconnectTickContext(ctx)
 		}
 	}
 }
 
 func (s *Server) proxyReconnectTick() {
+	s.proxyReconnectTickContext(context.Background())
+}
+
+func (s *Server) proxyReconnectTickContext(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	if strings.TrimSpace(s.m.GlobalProxy()) == "" {
 		// Clearing the runtime route is a successful direct transition. Reuse the
 		// generation gate so only eligible, non-exhausted proxy pauses resume.
@@ -315,7 +374,10 @@ func (s *Server) proxyReconnectTick() {
 		if !claimed {
 			continue
 		}
-		res := s.runProxyProbe(context.Background(), s.m.GlobalProxy(), "", defaultEgressProbes, 10*time.Second)
+		res := s.runProxyProbe(ctx, s.m.GlobalProxy(), "", defaultEgressProbes, 10*time.Second)
+		if ctx.Err() != nil {
+			return
+		}
 		if res.OK {
 			s.proxyReconnectSuccessWithGuards(map[string]proxyReconnectGuard{
 				t.ID: {generation: round, attempt: attempt, checkAttempt: true},

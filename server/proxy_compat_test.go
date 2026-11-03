@@ -2,12 +2,15 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -195,5 +198,224 @@ func TestProxyCompatPauseCancelsFindingChecksInsidePauseTransition(t *testing.T)
 	}
 	if st := task.lifecycleSnapshot(); !st.Paused || st.PauseReason != "paused_by_proxy" {
 		t.Fatalf("proxy pause was not persisted: %+v", st)
+	}
+}
+
+func proxyCompatClosedManager(t *testing.T) *Manager {
+	t.Helper()
+	closed, err := sql.Open("pgx", "postgres://proxy-fixture.invalid/unused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{pg: &db.DB{DB: closed}, globalProxy: "http://127.0.0.1:18081", proxyPool: &proxyPoolState{
+		active: "a", entries: []proxyPoolEntry{
+			{ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true, Health: "healthy"}, RawURL: "http://127.0.0.1:18081"},
+			{ProxyPoolEntry: ProxyPoolEntry{ID: "b", Enabled: true, Health: "healthy"}, RawURL: "http://127.0.0.1:18082"},
+		},
+	}}
+	m.proxyPoolConfigured.Store(true)
+	return m
+}
+
+func TestProxyCompatReadAndWriteFailureKeepOriginalRoute(t *testing.T) {
+	for _, action := range []string{"startup read", "activate", "replace", "edit", "delete"} {
+		t.Run(action, func(t *testing.T) {
+			m := proxyCompatClosedManager(t)
+			entries, active, logs := m.ProxyPoolSnapshot()
+			original := m.GlobalProxy()
+			var err error
+			s := &Server{m: m}
+			switch action {
+			case "startup read":
+				err = m.initProxyPool()
+			case "activate":
+				err = m.activateProxyID("b", "manual")
+			case "replace":
+				err = m.setProxyPoolEntries([]proxyPoolEntry{{ProxyPoolEntry: ProxyPoolEntry{ID: "replacement", Enabled: true}, RawURL: "http://127.0.0.1:18083"}}, "replacement")
+			case "edit":
+				r := httptest.NewRequest(http.MethodPatch, "/api/settings/proxy-pool/a", strings.NewReader(`{"url":"http://127.0.0.1:18083"}`))
+				r.SetPathValue("id", "a")
+				w := httptest.NewRecorder()
+				s.updateProxyPool(w, r)
+				if w.Code < 400 {
+					t.Fatalf("failed DB accepted mutation: %d %s", w.Code, w.Body.String())
+				}
+				err = errors.New("expected API persistence failure")
+			case "delete":
+				r := httptest.NewRequest(http.MethodDelete, "/api/settings/proxy-pool/a", nil)
+				r.SetPathValue("id", "a")
+				w := httptest.NewRecorder()
+				s.deleteProxyPool(w, r)
+				if w.Code < 400 {
+					t.Fatalf("failed DB accepted deletion: %d %s", w.Code, w.Body.String())
+				}
+				err = errors.New("expected API persistence failure")
+			}
+			if err == nil {
+				t.Fatal("database failure became success")
+			}
+			after, afterActive, afterLogs := m.ProxyPoolSnapshot()
+			if !reflect.DeepEqual(entries, after) || active != afterActive || !reflect.DeepEqual(logs, afterLogs) || m.GlobalProxy() != original || !m.proxyPoolConfigured.Load() {
+				t.Fatalf("failed mutation changed original state: %+v, active=%s, route=%s", after, afterActive, m.GlobalProxy())
+			}
+		})
+	}
+}
+
+func TestProxyCompatInvalidStartupPoolIsNotAnEmptyPool(t *testing.T) {
+	for _, raw := range []string{"", "null", "[]", "{}", `{"entries":{}}`, `{"entries":[{"id":"x","raw_url":"ftp://fixture"}]}`, `{"entries":[{"id":"x"},{"id":"x"}]}`} {
+		if _, _, _, err := decodeProxyPoolStartup(map[string]string{settingProxyPool: raw, settingGlobalProxy: "http://127.0.0.1:18081"}); err == nil {
+			t.Errorf("invalid pool treated as cleared: %q", raw)
+		}
+	}
+	for _, raw := range []string{`{"entries":[],"active":""}`, `{"entries":[{"id":"x","enabled":false,"raw_url":"http://127.0.0.1:18081"}],"active":"x"}`} {
+		pool, route, persist, err := decodeProxyPoolStartup(map[string]string{settingProxyPool: raw, settingGlobalProxy: "http://stale.example:8080", settingProxyPoolActive: "stale"})
+		if err != nil || route != "" || pool.Active != "" || !persist {
+			t.Errorf("explicit cleared/disabled pool was not respected: %+v %q %v", pool, route, err)
+		}
+	}
+	pool, route, persist, err := decodeProxyPoolStartup(map[string]string{settingGlobalProxy: "http://user:fixture-password@127.0.0.1:18081"})
+	if err != nil || pool.Active != "proxy-legacy" || route != pool.Entries[0].RawURL || !persist {
+		t.Fatalf("legacy proxy was not migrated intact: %+v %q %v", pool, route, err)
+	}
+}
+
+func TestProxyCompatRoutePersistenceIsAtomicOnPostgresRejection(t *testing.T) {
+	m := proxyTestManager(t)
+	keys := []string{settingProxyPool, settingProxyPoolActive, settingGlobalProxy}
+	old := map[string]string{}
+	present := map[string]bool{}
+	for _, key := range keys {
+		value, ok, err := m.pg.GetSetting(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		old[key], present[key] = value, ok
+	}
+	defer func() {
+		for _, key := range keys {
+			if present[key] {
+				_ = m.pg.SetSetting(key, old[key])
+			} else {
+				_ = m.pg.DeleteSetting(key)
+			}
+		}
+	}()
+	m.mu.Lock()
+	m.globalProxy = "http://127.0.0.1:18081"
+	m.mu.Unlock()
+	m.proxyPool = &proxyPoolState{active: "a", entries: []proxyPoolEntry{
+		{ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true, Health: "healthy"}, RawURL: "http://127.0.0.1:18081"},
+		{ProxyPoolEntry: ProxyPoolEntry{ID: "b", Enabled: true, Health: "healthy"}, RawURL: "http://127.0.0.1:18082"},
+	}}
+	m.proxyPool.mu.Lock()
+	err := m.persistProxyPoolLocked()
+	m.proxyPool.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := map[string]string{}
+	for _, key := range keys {
+		value, _, err := m.pg.GetSetting(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[key] = value
+	}
+	name := fmt.Sprintf("artex_proxy_reject_%d", time.Now().UnixNano())
+	if _, err = m.pg.Exec(`CREATE FUNCTION ` + name + `() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.key='proxy_pool_entries' THEN RAISE EXCEPTION 'fixture reject route'; END IF; RETURN NEW; END $$`); err != nil {
+		t.Fatal(err)
+	}
+	defer m.pg.Exec(`DROP FUNCTION IF EXISTS ` + name + `()`)
+	if _, err = m.pg.Exec(`CREATE TRIGGER ` + name + ` BEFORE INSERT OR UPDATE ON settings FOR EACH ROW EXECUTE FUNCTION ` + name + `()`); err != nil {
+		t.Fatal(err)
+	}
+	defer m.pg.Exec(`DROP TRIGGER IF EXISTS ` + name + ` ON settings`)
+	if err = m.activateProxyID("b", "manual"); err == nil {
+		t.Fatal("rejected atomic route write was reported successful")
+	}
+	if m.GlobalProxy() != "http://127.0.0.1:18081" || m.proxyPoolActiveID() != "a" {
+		t.Fatal("rejected atomic route write changed runtime")
+	}
+	for _, key := range keys {
+		value, _, err := m.pg.GetSetting(key)
+		if err != nil || value != before[key] {
+			t.Errorf("partial persistent route for %s: %q err=%v", key, value, err)
+		}
+	}
+}
+
+func TestProxyCompatCloseJoinsReconnectProbe(t *testing.T) {
+	m := &Manager{globalProxy: "http://127.0.0.1:18081", tasks: map[string]*Task{"7": {ID: "7", Status: "running", Paused: true, PauseReason: "paused_by_proxy"}}}
+	entered, finished := make(chan struct{}), make(chan struct{})
+	s := &Server{m: m, ctx: context.Background(), proxyProbe: func(ctx context.Context, _ string, _ string, _ []string, _ time.Duration) egressProbeResult {
+		close(entered)
+		<-ctx.Done()
+		close(finished)
+		return egressProbeResult{Error: "fixture cancelled"}
+	}}
+	s.signalProxySupervisor()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("reconnect probe did not begin")
+	}
+	done := make(chan struct{})
+	go func() { s.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not cancel and join the reconnect probe")
+	}
+	select {
+	case <-finished:
+	default:
+		t.Fatal("Close returned while reconnect probe still ran")
+	}
+	// A late callback may signal, but must not recreate a shutdown supervisor.
+	s.signalProxySupervisor()
+	s.Close()
+}
+
+func TestProxyCompatCloseJoinsTrafficCallbackAndRejectsLateCallbacks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered := make(chan struct{})
+	s := &Server{m: &Manager{globalProxy: "http://127.0.0.1:18081"}, ctx: context.Background(), proxyCtx: ctx, proxyCancel: cancel,
+		proxyProbe: func(ctx context.Context, _ string, _ string, _ []string, _ time.Duration) egressProbeResult {
+			close(entered)
+			<-ctx.Done()
+			return egressProbeResult{Error: "fixture cancelled"}
+		},
+	}
+	callbackDone := make(chan struct{})
+	go func() {
+		s.handleProxyTrafficFailure(errors.New("proxyconnect: connection refused"))
+		close(callbackDone)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("traffic callback did not start probe")
+	}
+	closed := make(chan struct{})
+	go func() { s.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not join the admitted traffic callback")
+	}
+	select {
+	case <-callbackDone:
+	case <-time.After(time.Second):
+		t.Fatal("traffic callback survived Close")
+	}
+	s.handleProxyTrafficFailure(errors.New("proxyconnect: connection refused"))
+	if s.beginProxyCallback() {
+		s.proxyCallbackWG.Done()
+		t.Fatal("late callback admission succeeded after Close")
 	}
 }
