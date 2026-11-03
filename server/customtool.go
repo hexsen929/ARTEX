@@ -672,7 +672,15 @@ func customHTTPProxyTransport(rawProxy, caFile string) (*http.Transport, error) 
 			cfg.RootCAs = pool
 			cfg.InsecureSkipVerify = false
 		}
+		// The recorder speaks HTTP/1.1. A cloned default transport may already
+		// contain HTTP/2 handlers and ALPN, so disable all inherited h2 paths
+		// rather than only clearing ForceAttemptHTTP2.
+		cfg.NextProtos = []string{"http/1.1"}
 		tr.TLSClientConfig = cfg
+		tr.ForceAttemptHTTP2 = false
+		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+		tr.Protocols = new(http.Protocols)
+		tr.Protocols.SetHTTP1(true)
 	}
 	return tr, nil
 }

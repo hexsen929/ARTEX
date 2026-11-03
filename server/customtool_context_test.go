@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -287,6 +288,53 @@ func TestCustomHTTPExplicitCABundleIsExclusive(t *testing.T) {
 		}
 		tr.CloseIdleConnections()
 	}
+}
+
+func TestCustomHTTPRecordingCAKeepsHTTP1WithoutChangingDirectDefaults(t *testing.T) {
+	tlsFixture := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer tlsFixture.Close()
+	ca := filepath.Join(t.TempDir(), "recording-ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsFixture.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := &http.Transport{
+		ForceAttemptHTTP2: true,
+		TLSClientConfig:   &tls.Config{NextProtos: []string{"h2", "http/1.1"}},
+		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{
+			"h2": func(string, *tls.Conn) http.RoundTripper { return nil },
+		},
+		Protocols: new(http.Protocols),
+	}
+	base.Protocols.SetHTTP1(true)
+	base.Protocols.SetHTTP2(true)
+	base.Protocols.SetUnencryptedHTTP2(true)
+	previous := http.DefaultTransport
+	http.DefaultTransport = base
+	defer func() { http.DefaultTransport = previous }()
+	for _, proxy := range []string{"", "http://127.0.0.1:22001"} {
+		tr, err := customHTTPProxyTransport(proxy, ca)
+		if err != nil || tr == nil || tr.TLSClientConfig == nil || tr.TLSClientConfig.InsecureSkipVerify {
+			t.Fatal("recording route lost normal TLS verification")
+		}
+		if tr.ForceAttemptHTTP2 || tr.TLSNextProto == nil || len(tr.TLSNextProto) != 0 {
+			t.Fatal("recording route inherited an HTTP/2 implementation")
+		}
+		if got := tr.TLSClientConfig.NextProtos; len(got) != 1 || got[0] != "http/1.1" {
+			t.Fatalf("recording route ALPN = %v, want only HTTP/1.1", got)
+		}
+		if tr.Protocols == nil || !tr.Protocols.HTTP1() || tr.Protocols.HTTP2() || tr.Protocols.UnencryptedHTTP2() {
+			t.Fatal("recording route did not restrict protocols to HTTP/1.1")
+		}
+		tr.CloseIdleConnections()
+	}
+	direct, err := customHTTPProxyTransport("", "")
+	if err != nil || direct == nil || direct.Proxy != nil || !direct.ForceAttemptHTTP2 || direct.TLSClientConfig == nil || direct.TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("direct route changed the default HTTP/TLS behavior")
+	}
+	if direct.TLSNextProto["h2"] == nil || direct.Protocols == nil || !direct.Protocols.HTTP1() || !direct.Protocols.HTTP2() || !direct.Protocols.UnencryptedHTTP2() || len(direct.TLSClientConfig.NextProtos) != 2 || direct.TLSClientConfig.NextProtos[0] != "h2" {
+		t.Fatal("recording route changes leaked into the default/direct transport")
+	}
+	direct.CloseIdleConnections()
 }
 
 func TestCustomHTTPIncompleteResponseIsAnErrorAndFailedDirectCallDoesNotNeedManager(t *testing.T) {
