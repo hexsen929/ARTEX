@@ -419,3 +419,98 @@ func TestProxyCompatCloseJoinsTrafficCallbackAndRejectsLateCallbacks(t *testing.
 		t.Fatal("late callback admission succeeded after Close")
 	}
 }
+
+func TestProxyCompatCloseDiscardsCancelledPoolProbeBeforeRouteReconciliation(t *testing.T) {
+	const first = "http://127.0.0.1:18081"
+	const second = "http://127.0.0.1:18082"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &Manager{globalProxy: first, tasks: map[string]*Task{}, proxyPool: &proxyPoolState{
+		active: "a", entries: []proxyPoolEntry{
+			// A cancelled probe would cross the default failure threshold and
+			// reroute to b if shutdown results were published as real failures.
+			{ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true, Health: "healthy", ConsecutiveFailures: defaultProxyHealthThreshold - 1}, RawURL: first},
+			{ProxyPoolEntry: ProxyPoolEntry{ID: "b", Enabled: true, Health: "healthy"}, RawURL: second},
+		},
+	}}
+	m.proxyPoolConfigured.Store(true)
+	started, cancelled := make(chan struct{}), make(chan struct{})
+	s := &Server{m: m, ctx: context.Background(), proxyCtx: ctx, proxyCancel: cancel,
+		proxyProbe: func(ctx context.Context, raw, _ string, _ []string, _ time.Duration) egressProbeResult {
+			if raw == first {
+				close(started)
+				<-ctx.Done()
+				close(cancelled)
+				return egressProbeResult{Error: "fixture cancelled"}
+			}
+			return egressProbeResult{OK: true, ExitIP: "192.0.2.2"}
+		},
+	}
+	before, active, logs := m.ProxyPoolSnapshot()
+	s.proxyPoolWG.Add(1)
+	tickDone := make(chan struct{})
+	go func() {
+		defer s.proxyPoolWG.Done()
+		defer close(tickDone)
+		s.proxyPoolTick()
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("pool probe did not begin")
+	}
+	closed := make(chan struct{})
+	go func() { s.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not cancel and join pool tick")
+	}
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("Close returned before the blocked probe observed cancellation")
+	}
+	select {
+	case <-tickDone:
+	default:
+		t.Fatal("Close returned before pool tick completed")
+	}
+	after, afterActive, afterLogs := m.ProxyPoolSnapshot()
+	if !reflect.DeepEqual(before[0], after[0]) {
+		t.Fatalf("shutdown cancellation was published as proxy health: before=%+v after=%+v", before[0], after[0])
+	}
+	if afterActive != active || m.GlobalProxy() != first || !reflect.DeepEqual(logs, afterLogs) {
+		t.Fatalf("pool tick switched route during Close: active=%s route=%s logs=%+v", afterActive, m.GlobalProxy(), afterLogs)
+	}
+	// No late tick may probe or publish after Close has completed.
+	s.proxyPoolTick()
+	latest, latestActive, latestLogs := m.ProxyPoolSnapshot()
+	if !reflect.DeepEqual(after, latest) || latestActive != afterActive || !reflect.DeepEqual(afterLogs, latestLogs) {
+		t.Fatal("late pool tick mutated the shutdown snapshot")
+	}
+}
+
+func TestProxyCompatRecoveryRejectsShutdownBeforeLifecycleAdmission(t *testing.T) {
+	for _, mode := range []string{"cancelled child context", "closed server"} {
+		t.Run(mode, func(t *testing.T) {
+			task := &Task{ID: "7", Status: "running", Paused: true, PauseReason: "paused_by_proxy", ReconnectGeneration: 9, ReconnectAttempt: 2, ReconnectMax: 5}
+			// No PG is needed: rejecting shutdown must happen before any new
+			// lifecycle reads or writes, including the calendar/clear-reason path.
+			s := &Server{m: &Manager{tasks: map[string]*Task{"7": task}}}
+			if mode == "cancelled child context" {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				s.proxyCtx = ctx
+			} else {
+				s.Close()
+			}
+			before := task.lifecycleSnapshot()
+			called := false
+			s.proxyReconnectSuccessWithGuards(map[string]proxyReconnectGuard{"7": {generation: 9}}, func() { called = true })
+			if called || !reflect.DeepEqual(before, task.lifecycleSnapshot()) {
+				t.Fatalf("shutdown admitted recovery: before=%+v after=%+v hook=%v", before, task.lifecycleSnapshot(), called)
+			}
+		})
+	}
+}

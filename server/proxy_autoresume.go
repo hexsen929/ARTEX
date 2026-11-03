@@ -428,10 +428,19 @@ func (s *Server) proxyReconnectSuccessWithGuard(expectedID string, expectedGener
 }
 
 func (s *Server) proxyReconnectSuccessWithGuards(guards map[string]proxyReconnectGuard, afterAdmission func()) {
+	if s.proxyShuttingDown() {
+		return
+	}
 	max, interval := s.proxyReconnectConfig()
 	s.scheduleMu.Lock()
 	defer s.scheduleMu.Unlock()
+	if s.proxyShuttingDown() {
+		return
+	}
 	for _, t := range s.m.List() {
+		if s.proxyShuttingDown() {
+			return
+		}
 		guard, ok := guards[t.ID]
 		if !ok {
 			continue
@@ -451,6 +460,11 @@ func (s *Server) proxyReconnectSuccessWithGuards(guards map[string]proxyReconnec
 				}
 				continue
 			}
+		}
+		// Check before admitting a lifecycle transaction, not after commit:
+		// accepted transactions must still publish their matching runtime state.
+		if s.proxyShuttingDown() {
+			return
 		}
 		var err error
 		if s.engine != nil {

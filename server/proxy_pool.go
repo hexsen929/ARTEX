@@ -590,7 +590,7 @@ func (s *Server) proxyPoolTick() proxyPoolTickOutcome {
 
 func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 	var outcome proxyPoolTickOutcome
-	if s.m == nil || s.m.proxyPool == nil {
+	if s.m == nil || s.m.proxyPool == nil || s.proxyShuttingDown() {
 		return outcome
 	}
 	now := time.Now()
@@ -638,14 +638,31 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 					return
 				}
 				defer func() { <-sem }()
+				if s.proxyShuttingDown() {
+					return
+				}
 				res := s.runProxyProbe(serverContext(s), e.RawURL, "", defaultEgressProbes, proxyPoolProbeTimeout)
-				s.m.markProxyProbe(e.ID, res)
+				// Shutdown cancellation is not a failed proxy health check. Do
+				// not persist that result or let it trigger route reconciliation.
+				if s.proxyShuttingDown() {
+					return
+				}
+				s.m.proxyPool.mu.Lock()
+				if s.proxyShuttingDown() {
+					s.m.proxyPool.mu.Unlock()
+					return
+				}
+				s.m.markProxyProbeLocked(e.ID, res)
+				s.m.proxyPool.mu.Unlock()
 				probeMu.Lock()
 				probeResults[e.ID] = res.OK
 				probeMu.Unlock()
 			}()
 		}
 		wg.Wait()
+		if s.proxyShuttingDown() {
+			return proxyPoolTickOutcome{}
+		}
 		probeMu.Lock()
 		confirmed := probeResults[activeAtProbe]
 		probeMu.Unlock()
@@ -663,17 +680,30 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 	// selected the best available member for this round, so avoid immediately
 	// rotating away from it.
 	timed, rotateInterval, _, _ := s.m.proxyRotateConfig()
+	if s.proxyShuttingDown() {
+		return proxyPoolTickOutcome{}
+	}
 	if timed && !outcome.switched {
 		s.m.proxyPool.mu.Lock()
+		if s.proxyShuttingDown() {
+			s.m.proxyPool.mu.Unlock()
+			return proxyPoolTickOutcome{}
+		}
 		due := s.m.proxyPool.lastTimed.IsZero() || now.Sub(s.m.proxyPool.lastTimed) >= rotateInterval
 		if due {
 			s.m.proxyPool.lastTimed = now
 		}
 		s.m.proxyPool.mu.Unlock()
-		if due {
-			before := s.m.proxyPoolActiveID()
-			if s.m.rotateProxy("timed") && before != s.m.proxyPoolActiveID() {
-				outcome.switched = true
+		if due && !s.proxyShuttingDown() {
+			s.m.proxyPool.mu.Lock()
+			if !s.proxyShuttingDown() {
+				id := s.m.selectHealthyLocked(s.m.proxyPool.active)
+				if id != "" && id != s.m.proxyPool.active {
+					outcome.switched = s.m.applyActiveProxyLocked(id, "timed") == nil
+				}
+			}
+			s.m.proxyPool.mu.Unlock()
+			if outcome.switched {
 				s.proxyReconnectSuccess()
 			}
 		}
@@ -692,6 +722,9 @@ func serverContext(s *Server) context.Context {
 }
 
 func (s *Server) reconcileProxyPoolAfterProbe(activeConfirmed bool) bool {
+	if s.proxyShuttingDown() {
+		return false
+	}
 	entries := s.m.proxyPoolEntries()
 	activeID := s.m.proxyPoolActiveID()
 	activeAvailable := false
@@ -711,8 +744,13 @@ func (s *Server) reconcileProxyPoolAfterProbe(activeConfirmed bool) bool {
 	s.m.proxyPool.mu.Lock()
 	id := s.m.selectHealthyLocked(activeID)
 	var err error
-	if id != "" {
+	if id != "" && !s.proxyShuttingDown() {
+		// Once admitted, finish the durable commit and its runtime publication
+		// together. Close joins this tick before Manager closes its resources.
 		err = s.m.applyActiveProxyLocked(id, "reconnect")
+	} else if s.proxyShuttingDown() {
+		s.m.proxyPool.mu.Unlock()
+		return false
 	}
 	s.m.proxyPool.mu.Unlock()
 	if err == nil && id != "" {
@@ -767,7 +805,16 @@ func (s *Server) handleProxyPoolFailure(cause error) bool {
 	}
 	_, _, onFailure, _ := s.m.proxyRotateConfig()
 	s.proxyPoolTickMu.Lock()
+	if s.proxyShuttingDown() {
+		s.proxyPoolTickMu.Unlock()
+		return true
+	}
 	s.m.proxyPool.mu.Lock()
+	if s.proxyShuttingDown() {
+		s.m.proxyPool.mu.Unlock()
+		s.proxyPoolTickMu.Unlock()
+		return true
+	}
 	active := s.m.proxyPool.active
 	currentChanged := s.m.GlobalProxy() != cur
 	for _, e := range s.m.proxyPool.entries {
