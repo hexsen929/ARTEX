@@ -249,17 +249,9 @@ func (s *Server) runClaimedMemoryJob(ctx context.Context, settings db.MemorySett
 	callCtx, release := memcontext.WithRecall(callCtx, nil, func(checkCtx context.Context) error {
 		checkCtx, stop := context.WithTimeout(checkCtx, 2*time.Second)
 		defer stop()
-		if err := s.m.pg.ValidateMemoryExtractionJob(checkCtx, job); err != nil {
-			code := "storage_error"
-			if errors.Is(err, db.ErrMemoryBudget) {
-				code = "budget_deferred"
-			} else if errors.Is(err, db.ErrMemoryStale) {
-				code = "source_changed"
-			}
-			admissionFailure.Store(code)
-			return err
-		}
 		// A profile may be edited without changing the memory settings epoch.
+		// Pure rejection checks precede the actual-attempt ledger admission:
+		// neither a changed model nor a newly protected secret sends HTTP.
 		_, actual, err := s.memoryModel(settings)
 		if err != nil || actual != cfg {
 			admissionFailure.Store("settings_changed")
@@ -270,6 +262,18 @@ func (s *Server) runClaimedMemoryJob(ctx context.Context, settings db.MemorySett
 				admissionFailure.Store("input_sensitive")
 				return db.ErrMemoryStale
 			}
+		}
+		// This remains the final source/settings/lease and dual-budget gate.
+		// Its transaction ends before HTTP and no earlier check consumes quota.
+		if err := s.m.pg.ValidateMemoryExtractionJob(checkCtx, job); err != nil {
+			code := "storage_error"
+			if errors.Is(err, db.ErrMemoryBudget) {
+				code = "budget_deferred"
+			} else if errors.Is(err, db.ErrMemoryStale) {
+				code = "source_changed"
+			}
+			admissionFailure.Store(code)
+			return err
 		}
 		return nil
 	})

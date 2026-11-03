@@ -27,6 +27,11 @@ func memoryOutcomeStage(t *testing.T, f *memoryHTTPFixture) (*db.Task, int64, in
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A worker can finish only an intent it actually claimed. Match the native
+	// open -> running -> done lifecycle instead of bypassing its state guard.
+	if err := store.SetIntentState(intent, "running"); err != nil {
+		t.Fatal(err)
+	}
 	fact, err := store.AddNode(db.KindFact, map[string]any{
 		"summary": "Structured output compatibility was observed only under a synthetic harness.", "confidence": "observed",
 	}, 0, "confirmed", "worker", nil)
@@ -324,6 +329,59 @@ func TestMemoryWorkerBudgetAdmissionIsNotAnAPIError(t *testing.T) {
 	_, state, result, claims := memoryOutcomeJobState(t, f, task.ID)
 	if state != "failed" || result != "budget_deferred" || claims != 1 || invocations != 1 || attempts != 0 {
 		t.Fatalf("budget gate misreported API outcome: %s/%s claims=%d invocations=%d attempts=%d", state, result, claims, invocations, attempts)
+	}
+}
+
+func TestMemoryWorkerLocalAdmissionRejectionsDoNotSpendHTTPBudget(t *testing.T) {
+	f := isolatedExperienceWorkerFixture(t)
+	for _, tc := range []struct {
+		name, wantState, wantResult string
+		change                      func()
+	}{
+		{name: "changed model", wantState: "failed", wantResult: "settings_changed", change: func() {
+			f.server.cfgMu.Lock()
+			f.server.llmCfg.Model += "-edited-before-http"
+			f.server.cfgMu.Unlock()
+		}},
+		{name: "new sensitive fingerprint", wantState: "skipped", wantResult: "input_sensitive", change: func() {
+			f.server.m.egress.AddFingerprint("llm_api_key", "Structured output compatibility")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			task, intent, _ := memoryOutcomeStage(t, f)
+			settings, job := claimedMemoryOutcomeJob(t, f, intent)
+			originalConfig := f.server.llmCfg
+			f.server.m.egress = guard.NewEgressGuard()
+			t.Cleanup(func() {
+				f.server.cfgMu.Lock()
+				f.server.llmCfg = originalConfig
+				f.server.cfgMu.Unlock()
+				f.server.m.egress = nil
+			})
+			invocations, attempts := 0, 0
+			provider := retestProvider{complete: func(ctx context.Context, _ llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+				invocations++
+				// Simulate an edit after input preparation but before the real
+				// provider transport's final request-admission callback.
+				tc.change()
+				if err := memcontext.Validate(ctx); err != nil {
+					return llm.Message{}, "", llm.Usage{}, err
+				}
+				attempts++
+				return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("[]")}}, "end_turn", llm.Usage{}, nil
+			}}
+			if err := f.server.runClaimedMemoryJob(t.Context(), settings, provider, originalConfig, job); err != nil {
+				t.Fatal(err)
+			}
+			_, state, result, claims := memoryOutcomeJobState(t, f, task.ID)
+			var admitted int
+			if err := f.pg.QueryRow(`SELECT count(*) FROM memory_audit WHERE job_id=$1 AND action='extract_admitted'`, job.ID).Scan(&admitted); err != nil {
+				t.Fatal(err)
+			}
+			if state != tc.wantState || result != tc.wantResult || claims != 1 || invocations != 1 || attempts != 0 || admitted != 0 {
+				t.Fatalf("local rejection consumed HTTP budget: %s/%s claims=%d invocations=%d attempts=%d admitted=%d", state, result, claims, invocations, attempts, admitted)
+			}
+		})
 	}
 }
 

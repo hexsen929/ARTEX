@@ -1,11 +1,13 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -218,6 +220,262 @@ func TestMemoryFailureMetadataDoesNotRebuildUnreadableSource(t *testing.T) {
 	}
 	if state, result, attempts := memoryJobOutcome(t, d, job); state != "failed" || result != "storage_error" || attempts != 1 {
 		t.Fatalf("source read failure became empty success: %q/%q/%d", state, result, attempts)
+	}
+}
+
+func TestMemorySkipUnreadableInputDoesNotRebuildBody(t *testing.T) {
+	d := memoryFixtureDB(t)
+	task := memoryFixtureTask(t, d)
+	job := memoryQueueClaim(t, d, memoryFixtureSource(t, d, task))
+	memoryRejectBuild(t, d, mustMemoryNodeID(t, job.Source.ID))
+	if err := d.SkipMemoryJobWithResult(t.Context(), job, "input_invalid"); err != nil {
+		t.Fatalf("rejecting an unreadable input rebuilt its body: %v", err)
+	}
+	if state, result, attempts := memoryJobOutcome(t, d, job); state != "skipped" || result != "input_invalid" || attempts != 1 {
+		t.Fatalf("invalid input was not terminal: %q/%q/%d", state, result, attempts)
+	}
+	var calls int
+	if err := d.QueryRow(`SELECT count(*) FROM memory_audit WHERE job_id=$1 AND action='extract_admitted'`, job.ID).Scan(&calls); err != nil || calls != 0 {
+		t.Fatalf("rejecting input created HTTP admission: %d %v", calls, err)
+	}
+}
+
+func TestMemorySettingsFailureAndUnclaimedCancellationCounts(t *testing.T) {
+	d := memoryFixtureDB(t)
+	task := memoryFixtureTask(t, d)
+	before, err := d.MemoryLearningSnapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := memoryQueueClaim(t, d, memoryFixtureSource(t, d, task))
+	if _, err := d.Exec(`UPDATE memory_jobs SET attempts=3 WHERE id=$1`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.FailMemoryJobWithResult(t.Context(), job, time.Minute, "settings_changed"); err != nil {
+		t.Fatal(err)
+	}
+	afterFailure, err := d.MemoryLearningSnapshot(t.Context())
+	if err != nil || afterFailure.StoppedFailed != before.StoppedFailed+1 {
+		t.Fatalf("stopped third settings failure lost: before=%+v after=%+v %v", before, afterFailure, err)
+	}
+	source := memoryFixtureSource(t, d, task)
+	if queued, err := d.QueueMemoryExtraction(t.Context(), source); err != nil || !queued {
+		t.Fatalf("queue unused fixture: %v %v", queued, err)
+	}
+	settings, err := d.GetMemorySettings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.UpdateMemorySettings(t.Context(), settings, settings.Epoch); err != nil {
+		t.Fatal(err)
+	}
+	afterCancel, err := d.MemoryLearningSnapshot(t.Context())
+	if err != nil || afterCancel.Failed != afterFailure.Failed || afterCancel.StoppedFailed != afterFailure.StoppedFailed ||
+		afterCancel.OutcomeCounts["settings_changed"] != afterFailure.OutcomeCounts["settings_changed"]+1 {
+		t.Fatalf("unclaimed configuration cancellation became a failed call: %+v %+v %v", afterFailure, afterCancel, err)
+	}
+}
+
+func TestMemoryLateOutcomeCannotConsumeNewSourceGeneration(t *testing.T) {
+	d := memoryFixtureDB(t)
+	memoryEnableIncrementalHistory(t, d)
+	task := memoryFixtureTask(t, d)
+	source := memoryFixtureSource(t, d, task)
+	source.Historical = false
+	old := memoryQueueClaim(t, d, source)
+	intent := mustMemoryNodeID(t, source.ID)
+	if reopened, err := d.Exploration(task.ExplorationID).ReopenIntent(intent); err != nil || !reopened {
+		t.Fatalf("reopen native generation: %v %v", reopened, err)
+	}
+	current := memoryFinishStage(t, d, task, intent, "done")
+	current.Historical = false
+	newJob := memoryQueueClaim(t, d, current)
+	if newJob.Source.Version <= old.Source.Version {
+		t.Fatal("native rerun did not create a new completion generation")
+	}
+	if err := d.SkipMemoryJobWithResult(t.Context(), old, "source_changed"); !errors.Is(err, ErrMemoryStale) {
+		t.Fatalf("old source callback was not fenced: %v", err)
+	}
+	var completed sql.NullInt64
+	if err := d.QueryRow(`SELECT last_completed_version FROM memory_sources WHERE source_kind=$1 AND source_id=$2`, source.Kind, source.ID).Scan(&completed); err != nil || completed.Valid {
+		t.Fatalf("late source result consumed a new completion generation: %+v %v", completed, err)
+	}
+	if state, _, _ := memoryJobOutcome(t, d, newJob); state != "running" {
+		t.Fatal("late source callback retired the new native lease")
+	}
+	if err := d.SkipMemoryJobWithResult(t.Context(), newJob, "input_sensitive"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMemoryLearningSnapshotCancellationIsReadOnly(t *testing.T) {
+	d := memoryFixtureDB(t)
+	task := memoryFixtureTask(t, d)
+	job := memoryQueueClaim(t, d, memoryFixtureSource(t, d, task))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := d.MemoryLearningSnapshot(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled observation returned apparent zero success: %v", err)
+	}
+	if state, _, attempts := memoryJobOutcome(t, d, job); state != "running" || attempts != 1 {
+		t.Fatal("cancelled observation mutated the job")
+	}
+}
+
+// Pause the budget read after the first job-count query. The view is scoped to
+// this isolated fixture database and restored before its task cleanup. Advisory
+// locking only coordinates the test; it never writes from the read-only tx.
+func memorySnapshotBarrier(t *testing.T, d *DB) (func(), func()) {
+	t.Helper()
+	const key int64 = 705731189
+	ddl, err := d.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ddl.Rollback()
+	for _, query := range []string{
+		`ALTER TABLE memory_audit RENAME TO memory_audit_snapshot_base`,
+		`CREATE FUNCTION memory_snapshot_test_barrier() RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM pg_advisory_xact_lock(705731189::bigint); RETURN true; END $$`,
+		`CREATE VIEW memory_audit AS SELECT * FROM memory_audit_snapshot_base WHERE memory_snapshot_test_barrier()`,
+	} {
+		if _, err := ddl.ExecContext(t.Context(), query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ddl.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := d.ExecContext(ctx, `DROP VIEW memory_audit; ALTER TABLE memory_audit_snapshot_base RENAME TO memory_audit; DROP FUNCTION memory_snapshot_test_barrier()`); err != nil {
+			t.Error(err)
+		}
+	})
+	blocker, err := d.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.ExecContext(t.Context(), `SELECT pg_advisory_lock($1::bigint)`, key); err != nil {
+		blocker.Close()
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if _, err := blocker.ExecContext(ctx, `SELECT pg_advisory_unlock($1::bigint)`, key); err != nil {
+				t.Error(err)
+			}
+			if err := blocker.Close(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	t.Cleanup(release)
+	wait := func() {
+		t.Helper()
+		deadline := time.NewTimer(2 * time.Second)
+		defer deadline.Stop()
+		tick := time.NewTicker(5 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			var blocked bool
+			if err := d.QueryRowContext(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory'
+				AND classid=0 AND objid=($1::bigint)::oid AND objsubid=1 AND NOT granted
+				AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))`, key).Scan(&blocked); err != nil {
+				t.Fatal(err)
+			}
+			if blocked {
+				return
+			}
+			select {
+			case <-tick.C:
+			case <-deadline.C:
+				t.Fatal("snapshot did not reach the controlled budget-read barrier")
+			}
+		}
+	}
+	return wait, release
+}
+
+func TestMemoryLearningSnapshotUsesOneReadOnlyGeneration(t *testing.T) {
+	d := memoryFixtureDB(t)
+	task := memoryFixtureTask(t, d)
+	job := memoryQueueClaim(t, d, memoryFixtureSource(t, d, task))
+	var beforeEntries, beforeEmpty int64
+	if err := d.QueryRow(`SELECT count(*) FROM memory_entries WHERE state<>'deleted'`).Scan(&beforeEntries); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.QueryRow(`SELECT count(*) FROM memory_jobs job JOIN memory_sources source ON source.id=job.source_ref
+		WHERE source.source_kind IN ('intent_stage','task_stage') AND job.state IN ('done','failed','skipped') AND job.result='empty'`).Scan(&beforeEmpty); err != nil {
+		t.Fatal(err)
+	}
+	wait, release := memorySnapshotBarrier(t, d)
+	type observation struct {
+		snapshot MemoryLearningSnapshot
+		err      error
+	}
+	result := make(chan observation, 1)
+	go func() { snapshot, err := d.MemoryLearningSnapshot(t.Context()); result <- observation{snapshot, err} }()
+	wait()
+	writer, err := d.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	if _, err := writer.ExecContext(t.Context(), `UPDATE memory_jobs SET state='done',result='empty',lease_token='',lease_until=NULL,updated_at=now() WHERE id=$1`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(t.Context(), `INSERT INTO memory_entries(title,content,content_hash,kind,origin_task_id)
+		VALUES('snapshot fixture','snapshot writer fixture',$1,'lesson',$2)`, memoryContentHash("snapshot writer fixture"), task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	select {
+	case observed := <-result:
+		if observed.err != nil {
+			t.Fatal(observed.err)
+		}
+		if observed.snapshot.EntryCount != beforeEntries || observed.snapshot.OutcomeCounts["empty"] != beforeEmpty ||
+			(observed.snapshot.LastJob != nil && observed.snapshot.LastJob.ID == job.ID) {
+			t.Fatalf("one observation mixed pre/post-commit generations: %+v", observed.snapshot)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("bounded read-only observation did not finish")
+	}
+	after, err := d.MemoryLearningSnapshot(t.Context())
+	if err != nil || after.EntryCount != beforeEntries+1 || after.OutcomeCounts["empty"] != beforeEmpty+1 {
+		t.Fatalf("next observation failed to see committed writer: %+v %v", after, err)
+	}
+}
+
+func TestMemoryLearningSnapshotCancelsBlockedReadWithoutWrites(t *testing.T) {
+	d := memoryFixtureDB(t)
+	task := memoryFixtureTask(t, d)
+	job := memoryQueueClaim(t, d, memoryFixtureSource(t, d, task))
+	wait, release := memorySnapshotBarrier(t, d)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { _, err := d.MemoryLearningSnapshot(ctx); result <- err }()
+	wait()
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled read was reported as a successful empty observation: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled observation remained blocked")
+	}
+	release()
+	if state, _, attempts := memoryJobOutcome(t, d, job); state != "running" || attempts != 1 {
+		t.Fatal("cancelled blocked read modified the job")
 	}
 }
 

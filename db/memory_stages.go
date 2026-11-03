@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 func isMemoryStage(kind string) bool {
@@ -65,7 +66,14 @@ func boundedMemoryStageText(text string) (string, error) {
 // seed defaults, build a provider, or send any source content to a model.
 func (d *DB) MemoryLearningSnapshot(ctx context.Context) (MemoryLearningSnapshot, error) {
 	out := MemoryLearningSnapshot{OutcomeCounts: map[string]int64{}}
-	err := d.QueryRowContext(ctx, `SELECT
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	tx, err := d.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return out, err
+	}
+	defer tx.Rollback()
+	err = tx.QueryRowContext(ctx, `SELECT
 		count(*) FILTER (WHERE job.state='queued'),count(*) FILTER (WHERE job.state='running'),
 		count(*) FILTER (WHERE job.state='failed' AND job.attempts<3),
 		count(*) FILTER (WHERE job.state='failed' OR (job.state='skipped' AND job.result IN `+memoryFailedResultSQL+`
@@ -80,7 +88,7 @@ func (d *DB) MemoryLearningSnapshot(ctx context.Context) (MemoryLearningSnapshot
 	// Counts, limit and release time come from one statement snapshot. When the
 	// limit was lowered below current usage, enough oldest events must expire;
 	// releasing just the first event would falsely promise an available slot.
-	err = d.QueryRowContext(ctx, `WITH usage AS (
+	err = tx.QueryRowContext(ctx, `WITH usage AS (
 		SELECT count(*) FILTER (WHERE action='extract_start') AS starts,
 		count(*) FILTER (WHERE action='extract_admitted') AS attempts,
 		array_agg(created_at ORDER BY created_at,id) FILTER (WHERE action='extract_start') AS start_times,
@@ -98,7 +106,7 @@ func (d *DB) MemoryLearningSnapshot(ctx context.Context) (MemoryLearningSnapshot
 		return out, err
 	}
 	var last MemoryLearningLastJob
-	err = d.QueryRowContext(ctx, `SELECT id,result,updated_at FROM (
+	err = tx.QueryRowContext(ctx, `SELECT id,result,updated_at FROM (
 		SELECT job.id,job.result,job.updated_at
 		FROM memory_jobs job JOIN memory_sources source ON source.id=job.source_ref
 		WHERE source.source_kind IN ('intent_stage','task_stage') AND job.state IN ('done','failed','skipped')
@@ -113,7 +121,7 @@ func (d *DB) MemoryLearningSnapshot(ctx context.Context) (MemoryLearningSnapshot
 		last.Result = NormalizeMemoryResult(last.Result)
 		out.LastJob = &last
 	}
-	rows, err := d.QueryContext(ctx, `SELECT CASE WHEN job.result IN `+memoryKnownResultSQL+`
+	rows, err := tx.QueryContext(ctx, `SELECT CASE WHEN job.result IN `+memoryKnownResultSQL+`
 		THEN job.result ELSE 'legacy_unknown' END,count(*) FROM memory_jobs job
 		JOIN memory_sources source ON source.id=job.source_ref
 		WHERE source.source_kind IN ('intent_stage','task_stage') AND job.state IN ('done','failed','skipped')
@@ -135,15 +143,18 @@ func (d *DB) MemoryLearningSnapshot(ctx context.Context) (MemoryLearningSnapshot
 	if err != nil {
 		return out, err
 	}
-	if err := d.QueryRowContext(ctx, `SELECT count(*) FROM memory_entries WHERE state<>'deleted'`).Scan(&out.EntryCount); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM memory_entries WHERE state<>'deleted'`).Scan(&out.EntryCount); err != nil {
 		return out, err
 	}
-	err = d.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM exploration_nodes intent
+	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM exploration_nodes intent
 		JOIN tasks task ON task.exploration_id=intent.exploration_id
 		WHERE intent.kind='intent' AND intent.state<>'deleted' AND task.deleted_at IS NULL AND task.archived_at IS NULL
 		AND (intent.state IN ('open','running','paused') OR (intent.state IN ('done','blocked','exhausted','stopped')
 		  AND intent.completed_at>now()-interval '30 seconds')))
 		OR EXISTS(SELECT 1 FROM tasks task WHERE task.deleted_at IS NULL AND task.archived_at IS NULL
 		AND task.status IN ('done','failed','timeout') AND task.completed_at>now()-interval '30 seconds')`).Scan(&out.WaitingStage)
-	return out, err
+	if err != nil {
+		return out, err
+	}
+	return out, tx.Commit()
 }

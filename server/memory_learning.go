@@ -82,7 +82,7 @@ func memoryLearningStatus(settings db.MemorySettings, snapshot db.MemoryLearning
 	case v.LastResult == "input_invalid":
 		v.Message = "最近阶段来源投影不合格，未进行有效提炼；未把来源错误标为正常空结果。"
 	case v.LastResult == "output_rejected":
-		v.Message = "最近阶段候选未通过证据、完整适用条件或共享规则检查；不是模型返回了有效空结果。"
+		v.Message = "最近阶段候选未通过证据、完整适用条件或共享规则检查；未把筛选拒绝记成正常空结果。"
 	case v.LastResult == "provider_error" || v.LastResult == "timeout":
 		v.Message = "最近阶段模型请求失败或超时，未确认新增经验；仅保存安全分类，不回显提供方正文。"
 	case v.LastResult == "storage_error":
