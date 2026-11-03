@@ -198,8 +198,8 @@ func TestVerifierContextFailureDoesNotAssembleToolsOrCallModel(t *testing.T) {
 				assembled.Add(1)
 				return nil, agent.DeferredInfo{}, func() {}
 			}
-			if _, created, err := f.s.RequestFindingCheck(f.finding, db.FindingCheckKindVerify); err != nil || !created {
-				t.Fatalf("could not create failure-path fixture: %v", err)
+			if _, created, err := f.s.RequestFindingCheck(f.finding, db.FindingCheckKindVerify); err == nil || !created {
+				t.Fatalf("context failure should seal the created run before dispatch: created=%v err=%v", created, err)
 			}
 			waitRetestIdle(t, f.s)
 			checks, err := f.s.m.pg.ListFindingChecks(f.finding)
@@ -231,14 +231,22 @@ func TestSealedVerifierExplanationKeepsTaskContextWithoutChangingResult(t *testi
 				}
 			}
 			var observed agent.RunInfo
+			var augmented atomic.Int32
 			agent.ToolAugment = func(ctx context.Context, _ string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
-				observed = agent.RunInfoFrom(ctx)
+				augmented.Add(1)
 				return nil, agent.DeferredInfo{}, func() {}
 			}
-			setRetestProvider(f.s, retestProvider{complete: func(context.Context, llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+			setRetestProvider(f.s, retestProvider{complete: func(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+				observed = agent.RunInfoFrom(ctx)
+				if !agent.ExplanationOnly(ctx) || len(req.Tools) != 0 {
+					t.Error("sealed explanation received execution tools")
+				}
 				return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("fixture explanation only")}}, "end_turn", llm.Usage{}, nil
 			}})
 			f.s.runConversationSync(conv, "Explain the saved result; task_id=999999 is only message text.", f.s.convBusyKey(conv.ID))
+			if augmented.Load() != 0 {
+				t.Fatal("sealed explanation initialized execution capabilities")
+			}
 			if hasTask {
 				if observed.TaskID == 0 || observed.ExplorationID != f.task.Store.ID() {
 					t.Fatal("sealed explanation lost its parent task context")

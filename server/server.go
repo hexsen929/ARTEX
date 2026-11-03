@@ -101,6 +101,9 @@ type Server struct {
 	// Runtime attribution lets task pause cancel independent verification even
 	// when PostgreSQL is temporarily unavailable (conversation id -> task id).
 	findingCheckTasks sync.Map
+	// Per-run ownership is registered before launch and held through sealing/cleanup.
+	taskConversationRuns sync.Map
+	conversationClosing  bool // guarded by concMu; rejects post-close launches
 
 	// triggerQ buffers P3 trigger fires PER AGENT. A per-agent "pump" launches runs up
 	// to a concurrency limit derived from the agent's策略: serial → limit 1 (+ optional
@@ -183,11 +186,12 @@ type triggeredRun struct {
 
 	agentKey  string
 	title     string
-	message   string // 事件正文(触发语 + 工具/入参/返回等);不含任务描述/目标头
-	taskID    int64  // source task for finding/goal triggers; 0 for interval/none
-	taskDesc  string // 任务描述(任务级,同任务相同);合并时只渲染一次
-	taskGoal  string // 任务目标(任务级,同任务相同);合并时只渲染一次
-	mergeable bool   // true for finding/goal event triggers (merge by taskID)
+	message   string  // 事件正文(触发语 + 工具/入参/返回等);不含任务描述/目标头
+	taskID    int64   // source task for finding/goal triggers; 0 for interval/none
+	taskIDs   []int64 // immutable scheduler-owned aggregate lifecycle provenance
+	taskDesc  string  // 任务描述(任务级,同任务相同);合并时只渲染一次
+	taskGoal  string  // 任务目标(任务级,同任务相同);合并时只渲染一次
+	mergeable bool    // true for finding/goal event triggers (merge by taskID)
 }
 
 func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDir string) *Server {
@@ -377,6 +381,7 @@ func (s *Server) Close() {
 	if s == nil {
 		return
 	}
+	s.stopTaskConversationRuns()
 	if s.proxyCancel != nil {
 		s.proxyCancel()
 	}

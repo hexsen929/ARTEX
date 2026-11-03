@@ -46,6 +46,10 @@ var ToolAugment func(ctx context.Context, agentKey string) (extra []actool.CoreT
 // The catalog can narrow built-in capabilities. Metadata failures are explicit
 // errors and never restore an unfiltered base or the SDK's default toolset.
 func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) ([]actool.CoreTool, DeferredInfo, func()) {
+	ctx, warnings := withToolAssemblyWarnings(ctx)
+	if !nativeTaskToolRole(agentKey) {
+		ctx = WithoutTaskToolSet(ctx)
+	}
 	if agentKey == "worker.intranet" {
 		return []actool.CoreTool{}, DeferredInfo{AssemblyError: fmt.Errorf("worker.intranet 是 worker 的任务提示词变体，不支持独立执行")}, func() {}
 	}
@@ -88,6 +92,7 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 	if ToolResolve != nil {
 		out = ToolResolve(ctx, agentKey, out)
 	}
+	def.AssemblyWarnings = append(def.AssemblyWarnings, warnings.snapshot()...)
 	if err := toolAssemblyError(out); err != nil {
 		def.AssemblyError = err
 		return []actool.CoreTool{}, def, cleanup

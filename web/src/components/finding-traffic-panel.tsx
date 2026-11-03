@@ -55,6 +55,22 @@ export function FindingTrafficPanel({
   const [preview, setPreview] = React.useState<string | null>(null);
   const router = useRouter();
   const [repeaterBusy, setRepeaterBusy] = React.useState(false);
+  const repeaterScope = JSON.stringify([findingId, contextTask ?? ""]);
+  const currentRepeaterScope = React.useRef(repeaterScope);
+  currentRepeaterScope.current = repeaterScope;
+  const repeaterMountedScope = React.useRef<string | null>(null);
+  const repeaterGeneration = React.useRef(0);
+  const repeaterController = React.useRef<AbortController | null>(null);
+  React.useEffect(() => {
+    repeaterMountedScope.current = repeaterScope;
+    setRepeaterBusy(false);
+    return () => {
+      repeaterMountedScope.current = null;
+      repeaterGeneration.current++;
+      repeaterController.current?.abort();
+      repeaterController.current = null;
+    };
+  }, [repeaterScope]);
   const [editing, setEditing] = React.useState<FindingTrafficBinding | null>(null);
   const [role, setRole] = React.useState<TrafficEvidenceRole>("supporting");
   const [note, setNote] = React.useState("");
@@ -101,9 +117,16 @@ export function FindingTrafficPanel({
   }
 
   async function seedRepeater(bindingId: string) {
+    if (repeaterMountedScope.current !== repeaterScope || repeaterController.current) return;
+    const generation = ++repeaterGeneration.current;
+    const controller = new AbortController();
+    repeaterController.current = controller;
+    const current = () => repeaterMountedScope.current === repeaterScope &&
+      currentRepeaterScope.current === repeaterScope && repeaterGeneration.current === generation && !controller.signal.aborted;
     setRepeaterBusy(true);
     try {
-      const detail = await api.findingTrafficDetail(findingId, bindingId, contextTask);
+      const detail = await api.findingTrafficDetail(findingId, bindingId, contextTask, controller.signal);
+      if (!current()) return;
       if (detail.request.binary) toast.info("请求体为二进制，已留空；完整正文请先下载");
       else if (detail.request.truncated) toast.info("请求体为预览片段，完整正文请先下载");
       seedFromEvidence(
@@ -118,11 +141,14 @@ export function FindingTrafficPanel({
         ),
         { findingId, bindingId },
       );
-      router.push("/function/repeater");
+      if (current()) router.push("/function/repeater");
     } catch (e) {
-      toast.error((e as Error).message);
+      if (current()) toast.error((e as Error).message);
     } finally {
-      setRepeaterBusy(false);
+      if (current()) {
+        repeaterController.current = null;
+        setRepeaterBusy(false);
+      }
     }
   }
 

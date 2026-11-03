@@ -392,6 +392,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	domain := tsx.capFrontierTools(tsx.DropCoverageTools(tsx.PlannerTools()))
 	base := append(domain, actool.DefaultTools()...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
+	ctx = WithTaskToolSet(ctx, "planner", tsx)
 	base = append(base, deepSeekTools(p.webSearch)...)
 	tools, def, cleanup := AugmentTools(ctx, "planner", base)
 	defer cleanup()

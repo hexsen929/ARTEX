@@ -229,7 +229,9 @@ func (s *Server) requestFindingCheck(findingID int64, kind string) (*db.FindingC
 		s.chatMu.Lock()
 		s.chatBusy[busyKey] = true
 		s.chatMu.Unlock()
-		s.runConversation(conv, check.InitialMessage(), busyKey)
+		if err := s.runConversationLocked(conv, check.InitialMessage(), busyKey); err != nil {
+			return check, created, err
+		}
 	}
 	return check, created, nil
 }
@@ -263,6 +265,9 @@ func (s *Server) dispatchFindingVerify(e db.TaskEvent) {
 // held. Cancel known runtime contexts first: a database failure must never let
 // network/tool work continue. Sealing affects only check history, not findings.
 func (s *Server) cancelTaskFindingChecks(taskID string, cause error) error {
+	// Runs registered before launch include retests, reports and aggregate owners.
+	// Identity-scoped cancellation cannot stop a later explanation turn.
+
 	id, err := strconv.ParseInt(strings.TrimSpace(taskID), 10, 64)
 	if err != nil || id <= 0 {
 		return errors.New("无效任务编号")
@@ -271,6 +276,7 @@ func (s *Server) cancelTaskFindingChecks(taskID string, cause error) error {
 	if cause == nil {
 		cause = agent.AbortChatPausedWithTask
 	}
+	s.cancelTaskConversationRuns(taskID, cause)
 	var known []context.CancelCauseFunc
 	s.findingCheckTasks.Range(func(key, value any) bool {
 		conversationID, validID := key.(int64)

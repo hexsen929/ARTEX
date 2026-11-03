@@ -79,6 +79,12 @@ func (s *Server) findingReportTaskContext(ctx context.Context, c *db.Conversatio
 	if s.engine != nil && s.engine.IsDeleting(taskID) {
 		return ctx, errors.New("报告来源任务正在删除或归档")
 	}
+	// Fail before creating any task proxy/listener. A persisted source row
+	// alone is not a live task execution instance.
+	runtime, loaded := s.m.Task(taskID)
+	if !loaded || runtime == nil || runtime.Store == nil || runtime.Store.ID() != parent.ExplorationID {
+		return ctx, errors.New("报告来源任务运行时未就绪，未执行本轮操作")
+	}
 	addr, ca, err := s.m.TaskProxyForTaskChecked(ctx, parent.ID)
 	if err != nil {
 		return ctx, fmt.Errorf("报告任务代理未就绪，未执行本轮操作: %w", err)

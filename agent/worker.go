@@ -504,6 +504,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 收敛工具面、减少低价值调用。其余 SDK 默认工具(Read/Write/Edit/LS/Bash/Sleep)照常。
 	base = append(base, defaultToolsExcept("MultiEdit", "Glob", "Grep")...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
+	ctx = WithTaskToolSet(ctx, "worker", tsx)
 	// Freeze the phase once for this run: the prompt and Skill visibility must
 	// describe the same state even if sessions/tunnels change during assembly.
 	intranet := w.intranetForTask(taskID)

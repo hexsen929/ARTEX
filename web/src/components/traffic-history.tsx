@@ -116,10 +116,25 @@ const STATUS_BUCKETS = ["2xx", "3xx", "4xx", "5xx"];
 
 export function TrafficHistory({ taskId }: { taskId?: string }) {
   const taskScoped = Boolean(taskId);
-  const [selectedFlows, setSelectedFlows] = React.useState<Map<string, TrafficExchange>>(() => new Map());
+  const scope = taskId ?? "";
+  const currentScope = React.useRef(scope);
+  currentScope.current = scope;
+  const [selection, setSelection] = React.useState<{ scope: string; flows: Map<string, TrafficExchange> }>(() => ({ scope, flows: new Map() }));
+  const selectedFlows = React.useMemo(() => selection.scope === scope ? selection.flows : new Map<string, TrafficExchange>(), [selection, scope]);
+  const setSelectedFlows = (update: React.SetStateAction<Map<string, TrafficExchange>>) => {
+    if (currentScope.current !== scope) return;
+    setSelection((previous) => {
+      if (currentScope.current !== scope) return previous;
+      const before = previous.scope === scope ? previous.flows : new Map<string, TrafficExchange>();
+      return { scope, flows: typeof update === "function" ? update(before) : update };
+    });
+  };
   const router = useRouter();
   const [importing, setImporting] = React.useState(false);
   const importLock = React.useRef(false);
+  const importMountedScope = React.useRef<string | null>(null);
+  const importGeneration = React.useRef(0);
+  const importController = React.useRef<AbortController | null>(null);
   const [linking, setLinking] = React.useState(false);
   const [page, setPage] = React.useState(0);
   const [size, setSize] = React.useState(50);
@@ -143,10 +158,28 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
   const [respMaxQ, setRespMaxQ] = React.useState("");
   const [sort, setSort] = useStoredSortPreference<SortField>(SORT_STORAGE_KEY, SORT_FIELDS, "ts", "desc");
 
-  const [traffic, setTraffic] = React.useState<TrafficResp | null>(null);
+  const [trafficSnapshot, setTrafficSnapshot] = React.useState<{ scope: string; data: TrafficResp } | null>(null);
+  const traffic = trafficSnapshot?.scope === scope ? trafficSnapshot.data : null;
   const [selected, setSelected] = React.useState<TrafficExchange | null>(null);
   const [detail, setDetail] = React.useState<TrafficDetail | null>(null);
   const [detailLoading, setDetailLoading] = React.useState(false);
+
+  React.useEffect(() => {
+    importMountedScope.current = scope;
+    importLock.current = false;
+    setImporting(false);
+    setSelection({ scope, flows: new Map() });
+    setSelected(null);
+    setDetail(null);
+    setLinking(false);
+    return () => {
+      importMountedScope.current = null;
+      importGeneration.current++;
+      importController.current?.abort();
+      importController.current = null;
+      importLock.current = false;
+    };
+  }, [scope]);
 
   const [hosts, setHosts] = React.useState<TrafficHost[]>([]); // target picker
   const [selectedHosts, setSelectedHosts] = React.useState<string[]>([]); // checked in picker
@@ -220,7 +253,7 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
           order: sort.direction,
         })
         .then((r) => {
-          if (alive) setTraffic(r);
+          if (alive && currentScope.current === scope) setTrafficSnapshot({ scope, data: r });
         })
         .catch(() => {
           // Keep the last successful snapshot during transient refresh failures.
@@ -335,16 +368,23 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
   }, [selected]);
 
   async function openRepeater(flows: TrafficExchange[]) {
-    if (!flows.length || importLock.current) return;
+    if (!flows.length || importLock.current || importMountedScope.current !== scope) return;
     importLock.current = true;
+    const generation = ++importGeneration.current;
+    const controller = new AbortController();
+    importController.current = controller;
+    const current = () => importMountedScope.current === scope && currentScope.current === scope &&
+      importGeneration.current === generation && !controller.signal.aborted;
     setImporting(true);
     let imported = 0;
     try {
       // Sequential loading limits pressure when a whole page is selected. A bad
       // capture does not discard drafts imported successfully before it.
       for (const flow of flows) {
+        if (!current()) return;
         try {
-          const raw = await api.trafficExchange(flow.id);
+          const raw = await api.trafficExchange(flow.id, controller.signal);
+          if (!current()) return;
           seedFromEvidence(
             requestFromTraffic(raw.req, flow),
             { label: `流量 ${flow.id}` },
@@ -352,17 +392,21 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
           );
           imported += 1;
         } catch (error) {
+          if (!current()) return;
           toast.error(`${flow.host}：${(error as Error).message}`);
         }
       }
-      if (imported) {
+      if (imported && current()) {
         toast.success(`已送入 ${imported} 条请求，可编辑后发送`);
         setSelected(null);
         router.push("/function/repeater");
       }
     } finally {
-      importLock.current = false;
-      setImporting(false);
+      if (current()) {
+        importController.current = null;
+        importLock.current = false;
+        setImporting(false);
+      }
     }
   }
 

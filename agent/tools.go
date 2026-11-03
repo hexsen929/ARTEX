@@ -320,7 +320,7 @@ func (t *ToolSet) writeExpTool(name, desc string, schema map[string]any, run fun
 func (t *ToolSet) needExploration(name string, run func(context.Context, json.RawMessage) (actool.Result, error)) func(context.Context, json.RawMessage) (actool.Result, error) {
 	return func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 		if t.ts == nil {
-			return actool.Errorf(name + " 需要任务上下文（探索图）：当前 agent 不在某个任务内运行，取不到任务的探索图，该工具不可用。请在任务内使用它，或改用带 task_id 的跨任务读取工具（get_task_node_detail / list_task_findings / get_task_graph 等）。"), nil
+			return actool.Errorf(name + " 需要任务上下文（探索图）：当前工具实例未绑定任务探索图，本次未执行读取。任务归属元数据本身不会绑定工具实例；请检查本轮工具装配，不会自动改用其它任务。"), nil
 		}
 		return run(ctx, in)
 	}

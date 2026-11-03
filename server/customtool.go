@@ -6,17 +6,21 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -384,7 +388,12 @@ func (s *Server) runScriptTool(ctx context.Context, key string, execRaw json.Raw
 	}
 	body, err := execPython(ctx, interp, key, spec.Code, params, workDir, sessionEnv, timeoutOr(spec.TimeoutMs, 120000))
 	if err != nil {
-		return actool.Errorf(maskSecrets(err.Error())), nil
+		if body == "" {
+			body = maskSecrets(err.Error())
+		}
+		res := actool.Text(actool.Capture(tc, body))
+		res.IsError = true
+		return res, nil
 	}
 	return actool.Text(actool.Capture(tc, body)), nil
 }
@@ -421,14 +430,55 @@ func execPython(ctx context.Context, interp, key, code string, params map[string
 	}
 	pj, _ := json.Marshal(params)
 	c.Stdin = bytes.NewReader(pj) // 参数 JSON 走 stdin
-	out, err := c.CombinedOutput()
-	body := string(out)
-	if runCtx.Err() == context.DeadlineExceeded {
+	// Capture has a second, smaller presentation limit. Bound the subprocess
+	// buffer before that valve too, including scripts that flood stderr.
+	output := &customToolOutput{}
+	c.Stdout, c.Stderr = output, output
+	c.WaitDelay = 2 * time.Second
+	err = c.Run()
+	body := output.String()
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		body += "\n... [超时终止] ..."
+		err = runCtx.Err()
+	} else if runCtx.Err() != nil {
+		body += "\n... [执行已取消] ..."
+		err = runCtx.Err()
 	} else if err != nil {
 		body += "\n[exit: " + err.Error() + "]"
 	}
-	return body, nil
+	return body, err
+}
+
+const customToolMaxOutput = 1 << 20
+
+type customToolOutput struct {
+	mu        sync.Mutex
+	buffer    bytes.Buffer
+	truncated bool
+}
+
+func (b *customToolOutput) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	remaining := customToolMaxOutput - b.buffer.Len()
+	if len(p) > remaining {
+		b.truncated = true
+	}
+	if remaining > 0 {
+		_, _ = b.buffer.Write(p[:min(len(p), remaining)])
+	}
+	// Keep draining the child pipe even after the in-memory limit is reached.
+	return len(p), nil
+}
+
+func (b *customToolOutput) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	text := b.buffer.String()
+	if b.truncated {
+		text += "\n... [输出超过上限，已截断] ..."
+	}
+	return text
 }
 
 // ---------- http:原生请求 + 代理 ----------
@@ -457,61 +507,215 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 	for k, v := range spec.Headers {
 		req.Header.Set(k, renderTemplate(v, params, identity))
 	}
-	client := &http.Client{Timeout: timeoutOr(spec.TimeoutMs, 30000)}
-	if tr := s.httpProxyTransport(spec); tr != nil {
-		client.Transport = tr
+	tr, reportPlatformFailure, err := s.customHTTPTransport(runCtx, spec, tc, req.URL.Scheme)
+	if err != nil {
+		return actool.Errorf(err.Error()), nil
 	}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Timeout: timeoutOr(spec.TimeoutMs, 30000), Transport: tr}
 	resp, err := client.Do(req)
 	if err != nil {
-		if spec.UseRecordingProxy || strings.TrimSpace(spec.Proxy) == strings.TrimSpace(s.m.GlobalProxy()) {
+		if reportPlatformFailure {
 			s.handleProxyToolFailure(runCtx, err)
 		}
 		return actool.Errorf("请求失败: " + maskSecrets(err.Error())), nil
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, customToolMaxOutput+1))
+	truncated := len(respBody) > customToolMaxOutput
+	if truncated {
+		respBody = respBody[:customToolMaxOutput]
+	}
 	out := map[string]any{"status": resp.StatusCode, "body": string(respBody)}
+	if truncated {
+		out["body_truncated"] = true
+	}
+	if readErr != nil {
+		out["error"] = "响应体读取未完成"
+	}
 	b, _ := json.Marshal(out)
-	return actool.Text(actool.Capture(tc, string(b))), nil
+	res := actool.Text(actool.Capture(tc, string(b)))
+	res.IsError = readErr != nil
+	return res, nil
 }
 
-// httpProxyTransport builds a Transport for the http tool's proxy config, or nil
-// (direct). use_recording_proxy routes through the recording proxy + trusts its CA.
-func (s *Server) httpProxyTransport(spec httpExec) *http.Transport {
-	proxyStr := strings.TrimSpace(spec.Proxy)
-	var caFile string
+// customHTTPTransport resolves a run's route without consulting process proxy
+// variables. The existing switch remains authoritative: recording/platform mode
+// uses the task route; otherwise the tool's explicit Proxy (or direct) wins.
+func (s *Server) customHTTPTransport(ctx context.Context, spec httpExec, tc *actool.ToolContext, scheme string) (*http.Transport, bool, error) {
+	proxyStr, caFile := strings.TrimSpace(spec.Proxy), ""
+	reportPlatformFailure := false
 	if spec.UseRecordingProxy {
-		// ProxyAddr is already a complete URL while capture is enabled, and
-		// returns the configured global proxy URL when capture is off. Keep both
-		// forms intact (including socks5:// and credentials).
-		if s.m.TrafficEnabled() {
-			if addr := s.m.ProxyAddr(); addr != "" {
-				proxyStr = addr
-				caFile = s.m.ProxyCACert()
+		info := agent.RunInfoFrom(ctx)
+		if info.TaskID > 0 {
+			if s == nil || s.m == nil {
+				return nil, false, errors.New("任务代理未就绪，未发送自定义 HTTP 请求")
 			}
-		} else if global := strings.TrimSpace(s.m.GlobalProxy()); global != "" {
-			proxyStr = global
+			var err error
+			proxyStr, caFile, err = s.m.TaskProxyForTaskChecked(ctx, info.TaskID)
+			if err != nil {
+				return nil, false, errors.New("任务代理读取失败，未发送自定义 HTTP 请求")
+			}
+			// A disabled task-proxy feature keeps the explicit platform route.
+			// With the feature enabled, even an empty checked result is final.
+			if s.m.taskProxy == nil {
+				proxyStr, caFile, err = s.platformHTTPProxy()
+				if err != nil {
+					return nil, false, err
+				}
+			}
+			reportPlatformFailure = proxyStr != ""
+		} else if addr, ca, present := customHTTPEnvProxy(tc, scheme); present {
+			// Only host-supplied ToolContext env is considered. A present empty
+			// key is an explicit direct route, not permission to use global/env.
+			proxyStr, caFile = addr, ca
+			reportPlatformFailure = s != nil && s.m != nil && proxyStr != "" &&
+				(proxyStr == s.m.ProxyAddr() || proxyStr == s.m.GlobalProxy())
+		} else {
+			var err error
+			proxyStr, caFile, err = s.platformHTTPProxy()
+			if err != nil {
+				return nil, false, err
+			}
+			reportPlatformFailure = proxyStr != ""
+		}
+	} else {
+		reportPlatformFailure = s != nil && s.m != nil && proxyStr != "" && proxyStr == s.m.GlobalProxy()
+	}
+	tr, err := customHTTPProxyTransport(proxyStr, caFile)
+	return tr, reportPlatformFailure, err
+}
+
+func (s *Server) platformHTTPProxy() (string, string, error) {
+	if s == nil || s.m == nil {
+		return "", "", errors.New("平台代理上下文未就绪，未发送自定义 HTTP 请求")
+	}
+	if s.m.TrafficEnabled() {
+		if s.m.traffic == nil || s.m.ProxyAddr() == "" {
+			return "", "", errors.New("流量录制代理未就绪，未发送自定义 HTTP 请求")
+		}
+		return s.m.ProxyAddr(), s.m.ProxyCACert(), nil
+	}
+	return s.m.ProxyAddr(), "", nil
+}
+
+func customHTTPEnvProxy(tc *actool.ToolContext, scheme string) (string, string, bool) {
+	if tc == nil {
+		return "", "", false
+	}
+	values := make(map[string]string, len(tc.Env))
+	for _, entry := range tc.Env {
+		if name, value, ok := strings.Cut(entry, "="); ok {
+			values[name] = value // last assignment wins, like exec.Cmd.Env
 		}
 	}
-	if proxyStr == "" {
-		return nil
+	keys := []string{"HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"}
+	if strings.EqualFold(scheme, "https") {
+		keys = []string{"HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"}
 	}
-	pu, err := url.Parse(proxyStr)
-	if err != nil {
-		return nil
+	for _, key := range keys {
+		if value, ok := values[key]; ok {
+			proxyStr := strings.TrimSpace(value)
+			if proxyStr == "" {
+				return "", "", true
+			}
+			for _, caKey := range []string{"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"} {
+				if ca := strings.TrimSpace(values[caKey]); ca != "" {
+					return proxyStr, ca, true
+				}
+			}
+			return proxyStr, "", true
+		}
 	}
-	// Go 1.26+ supports http/https/socks5/socks5h in ProxyURL directly,
-	// including proxy userinfo. Keep one code path so existing HTTP tool
-	// behavior and proxy authentication remain unchanged.
-	tr := &http.Transport{Proxy: http.ProxyURL(pu)}
+	return "", "", false
+}
+
+func directCustomHTTPTransport() *http.Transport {
+	var tr *http.Transport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		tr = base.Clone()
+	} else {
+		tr = &http.Transport{}
+	}
+	tr.Proxy = nil
+	if tr.TLSClientConfig != nil {
+		tr.TLSClientConfig = tr.TLSClientConfig.Clone()
+		tr.TLSClientConfig.InsecureSkipVerify = false
+	}
+	return tr
+}
+
+func customHTTPProxyTransport(rawProxy, caFile string) (*http.Transport, error) {
+	tr := directCustomHTTPTransport()
+	if rawProxy != "" {
+		pu, err := url.Parse(rawProxy)
+		if err != nil || pu.Hostname() == "" || (pu.Scheme != "http" && pu.Scheme != "https" && pu.Scheme != "socks5" && pu.Scheme != "socks5h") {
+			return nil, errors.New("自定义 HTTP 代理地址无效，未发送请求")
+		}
+		tr.Proxy = http.ProxyURL(pu)
+	}
 	if caFile != "" {
-		if pem, err := os.ReadFile(caFile); err == nil {
-			pool := x509.NewCertPool()
-			if pool.AppendCertsFromPEM(pem) {
-				tr.TLSClientConfig = &tls.Config{RootCAs: pool}
-			}
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, errors.New("录制代理 CA 读取失败，未发送请求")
+		}
+		// An explicitly supplied bundle replaces the system trust store. Keep
+		// recording routes restricted to their selected CA rather than silently
+		// widening trust to unrelated system roots.
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, errors.New("录制代理 CA 无效，未发送请求")
+		}
+		cfg := &tls.Config{RootCAs: pool}
+		if tr.TLSClientConfig != nil {
+			cfg = tr.TLSClientConfig.Clone()
+			cfg.RootCAs = pool
+			cfg.InsecureSkipVerify = false
+		}
+		// The recorder speaks HTTP/1.1. A cloned default transport may already
+		// contain HTTP/2 handlers and ALPN, so disable all inherited h2 paths
+		// rather than only clearing ForceAttemptHTTP2.
+		cfg.NextProtos = []string{"http/1.1"}
+		tr.TLSClientConfig = cfg
+		tr.ForceAttemptHTTP2 = false
+		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+		tr.Protocols = new(http.Protocols)
+		tr.Protocols.SetHTTP1(true)
+	}
+	return tr, nil
+}
+
+// httpProxyTransport keeps the repeater's existing signature/selection contract.
+// Its caller deliberately constructs a no-env direct transport when nil is
+// returned. Invalid configured routes instead get a rejecting transport, never
+// permission to fall back to a different route.
+func (s *Server) httpProxyTransport(spec httpExec) *http.Transport {
+	proxyStr, caFile := strings.TrimSpace(spec.Proxy), ""
+	if spec.UseRecordingProxy {
+		var err error
+		proxyStr, caFile, err = s.platformHTTPProxy()
+		if err != nil {
+			return rejectedCustomHTTPTransport(proxyStr, err)
 		}
 	}
+	if proxyStr == "" && caFile == "" {
+		return nil
+	}
+	tr, err := customHTTPProxyTransport(proxyStr, caFile)
+	if err != nil {
+		return rejectedCustomHTTPTransport(proxyStr, err)
+	}
+	return tr
+}
+
+func rejectedCustomHTTPTransport(rawProxy string, cause error) *http.Transport {
+	tr := directCustomHTTPTransport()
+	if pu, err := url.Parse(rawProxy); err == nil && pu.Hostname() != "" {
+		tr.Proxy = http.ProxyURL(pu)
+	}
+	tr.Dial = nil
+	tr.DialTLS, tr.DialTLSContext = nil, nil
+	tr.DialContext = func(context.Context, string, string) (net.Conn, error) { return nil, cause }
 	return tr
 }
 

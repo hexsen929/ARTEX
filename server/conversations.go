@@ -528,7 +528,10 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	// conv-<id>/), matching chatUpload's landing dir and agent/chat.go's sessionWorkDir
 	// — busyKey == convBusyKey(c.ID) == "conv-<id>" == that session id.
 	baseDir := filepath.Join(s.m.dir, "sessions", busyKey)
-	s.runConversation(c, composeAgentMessage(agentMessage, req.Attachments, baseDir), busyKey, msg)
+	if err := s.runConversation(c, composeAgentMessage(agentMessage, req.Attachments, baseDir), busyKey, msg); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
 	writeJSON(w, 202, map[string]any{"status": "accepted"})
 }
 
@@ -566,57 +569,84 @@ func resolveAutoTitleProvider(profileID *int64, byID func(int64) (llm.Provider, 
 // (each conversation is independent → parallel). Steps stream to
 // conversation_activities. Shared by the chat HTTP handler and the P3 scheduler.
 // busyKey clears when the run ends (best-effort in-flight marker).
-func (s *Server) runConversation(c *db.Conversation, msg, busyKey string, userMessage ...string) {
-	ctx, cancel := s.conversationRunContext(c.ID, busyKey)
-	// Only the human-message handler supplies this field, before adding the
-	// attachment manifest. Scheduler/retest prompts must not be labelled as users.
-	if len(userMessage) == 1 {
-		ctx = intercept.WithReviewContext(ctx, "", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: userMessage[0]})
+func (s *Server) runConversation(c *db.Conversation, msg, busyKey string, userMessage ...string) error {
+	s.concMu.Lock()
+	err := s.runConversationLocked(c, msg, busyKey, userMessage...)
+	s.concMu.Unlock()
+	return err
+}
+
+// A caller already serializing check/retest creation with pause uses this form.
+func (s *Server) runConversationLocked(c *db.Conversation, msg, busyKey string, userMessage ...string) error {
+	run, err := s.prepareConversationRunLocked(c, busyKey, nil)
+	if err != nil {
+		s.rejectConversationRun(c, busyKey, err)
+		return err
 	}
-	go s.runConversationTurn(ctx, cancel, c, msg, busyKey)
+	if len(userMessage) == 1 {
+		run.ctx = intercept.WithReviewContext(run.ctx, "", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: userMessage[0]})
+	}
+	go func() { _ = s.runPreparedConversation(run, c, msg, nil) }()
+	return nil
 }
 
-// runConversationSync runs ONE agent turn on a conversation and BLOCKS until the
-// run ends (clearing busyKey). runConversation wraps it in a goroutine for the
-// fire-and-forget chat path; the P3 trigger queue calls it directly so it can wait
-// for completion before starting the next queued fire for the same agent.
-func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
-	ctx, cancel := s.conversationRunContext(c.ID, busyKey)
-	s.runConversationTurn(ctx, cancel, c, msg, busyKey)
+func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) error {
+	return s.runConversationSyncWithOwners(c, msg, busyKey, nil)
 }
 
-// Register cancellation before returning 202, so an immediate stop/delete cannot
-// miss a background goroutine which has not started yet.
-func (s *Server) conversationRunContext(id int64, busyKey string) (context.Context, context.CancelCauseFunc) {
-	// Per-run cancellable context so a manual stop (pgStopConversation) can abort
-	// just this session. Registered under chatMu so the stop handler can find it.
-	ctx, cancel := context.WithCancelCause(intercept.WithConvID(s.ctx, id))
-	s.chatMu.Lock()
-	s.chatCancel[busyKey] = cancel
-	s.chatMu.Unlock()
-	return ctx, cancel
+func (s *Server) runConversationSyncWithOwners(c *db.Conversation, msg, busyKey string, owners []int64) error {
+	s.concMu.Lock()
+	run, err := s.prepareConversationRunLocked(c, busyKey, owners)
+	s.concMu.Unlock()
+	if err != nil {
+		s.rejectConversationRun(c, busyKey, err)
+		return err
+	}
+	return s.runPreparedConversation(run, c, msg, nil)
+}
+
+// The run was already admitted and owns inflight. Trigger bodies are written
+// only inside this lifetime, so deletion waits for the first activity as well
+// as model execution, final state and cleanup.
+func (s *Server) runPreparedConversation(run *taskConversationRun, c *db.Conversation, msg string, firstActivity *db.Activity, completion ...func(error)) (runErr error) {
+	defer s.finishConversationRun(run)
+	// Trusted review state cleanup belongs to this run too, including a failed
+	// first activity or panic. It executes before inflight/done are released.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if len(completion) > 0 && completion[0] != nil {
+				completion[0](errors.New("会话运行异常，未确认完成"))
+			}
+			panic(recovered)
+		}
+		if len(completion) > 0 && completion[0] != nil {
+			completion[0](runErr)
+		}
+	}()
+	if firstActivity != nil {
+		if run.ctx.Err() != nil {
+			s.sealUnstartedConversation(run.ctx, c, "finding_retests", "failed")
+			s.sealUnstartedConversation(run.ctx, c, "finding_checks", "failed")
+			return run.ctx.Err()
+		}
+		if _, err := s.m.pg.AppendConvActivity(c.ID, *firstActivity); err != nil {
+			s.sealUnstartedConversation(run.ctx, c, "finding_retests", "failed")
+			s.sealUnstartedConversation(run.ctx, c, "finding_checks", "failed")
+			return errors.New("会话首条消息未保存，未执行本轮操作")
+		}
+	}
+	if len(run.owners) > 1 {
+		msg = "【平台聚合会话】本会话关联多个来源任务，不代表某个单独任务运行，也未自动选用任一任务的代理或扩大权限。\n" + msg
+	}
+	s.runConversationTurn(run.ctx, run.cancel, c, msg, run.busyKey)
+	return nil
 }
 
 func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) {
-	defer func() {
-		cancel(agent.AbortChatTurnFinished)
-		s.findingCheckTasks.Delete(c.ID)
-		s.chatMu.Lock()
-		delete(s.chatBusy, busyKey)
-		delete(s.chatCancel, busyKey)
-		s.chatMu.Unlock()
-	}()
 	// Only the first turn executes a historical retest. Follow-up conversation
 	// turns may explain the sealed result; the result tool refuses to overwrite it.
 	finishStatus, finishReason := "failed", "Agent 未能启动"
 	if c.AgentKey == "reporter" {
-		var err error
-		ctx, err = s.findingReportTaskContext(ctx, c)
-		if err != nil {
-			finishReason = err.Error()
-			_, _ = s.m.pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true, Summary: "报告会话未启动：" + finishReason, Detail: finishReason})
-			return
-		}
 		if scope, ok := ctx.Value(findingReportScopeKey{}).(findingReportScope); ok && scope.binding != nil {
 			s.findingCheckTasks.Store(c.ID, strconv.FormatInt(scope.binding.TaskID, 10))
 			msg = fmt.Sprintf("【平台已核实的报告来源】独立漏洞记录 finding_id=%d；探索节点 finding_node_id=%d；来源任务 task_id=%d。仅调整该漏洞报告，先读取现有报告与证据；不要新建漏洞或扩大范围。get_finding_traffic 使用独立记录 ID，update_finding_report 的 finding_id 使用探索节点 ID，并回传读取到的 evidence_version。以下是本轮请求：\n%s", scope.binding.FindingID, scope.binding.NodeID, scope.binding.TaskID, msg)
@@ -654,88 +684,54 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 		}()
 	}
 	if c.AgentKey == db.FindingRetestAgentKey {
-		// Read without the run cancellation so an immediate stop still seals pending.
-		r, err := s.m.pg.FindingRetestForConversation(context.Background(), c.ID)
+		readCtx, stopRead := context.WithTimeout(context.Background(), 3*time.Second)
+		r, err := s.m.pg.FindingRetestForConversation(readCtx, c.ID)
+		stopRead()
 		if err != nil {
-			// The sealing defer below needs r.ID, which we do not have here. Seal by
-			// conversation instead, otherwise the row stays 'pending' forever.
-			log.Printf("[conv %d] load retest: %v", c.ID, err)
-			if err := s.m.pg.FailPendingRetestForConversation(c.ID, "复测状态读取失败，请重新发起"); err != nil {
-				log.Printf("[conv %d] seal retest: %v", c.ID, err)
-			}
+			s.sealUnstartedConversation(ctx, c, "finding_retests", "failed")
 			return
 		}
-		if r != nil && r.Status == "pending" {
+		if r == nil || (r.Status != "pending" && r.Status != "running") {
+			ctx = agent.WithExplanationOnly(ctx)
+		} else {
+			if r.Status != "pending" {
+				return
+			} // Never replay another run's execution.
+			if !s.beginFindingConversation(ctx, c, "finding_retests", func() error { return s.validateConversationFindingParent(ctx, r.FindingID) }, func() (bool, error) { return s.m.pg.StartFindingRetest(ctx, r.ID) }) {
+				return
+			}
 			defer func() {
 				if ctx.Err() != nil {
 					finishStatus, finishReason = "stopped", "复测已停止或服务已关闭"
 				}
 				s.finishRetest(r.ID, finishStatus, finishReason)
 			}()
-			if ctx.Err() != nil {
-				return
-			}
-			started, err := s.m.pg.StartFindingRetest(ctx, r.ID)
-			if err != nil {
-				finishReason = err.Error()
-				return
-			}
-			if !started {
-				return
-			}
 		}
 	}
-	// Same first-turn sealing for verifier checks (finding_checks pipeline).
 	if c.AgentKey == db.FindingVerifierAgentKey {
 		finishStatus, finishReason = "failed", "验证未能启动"
-		chk, err := s.m.pg.FindingCheckForConversation(context.Background(), c.ID)
+		readCtx, stopRead := context.WithTimeout(context.Background(), 3*time.Second)
+		chk, err := s.m.pg.FindingCheckForConversation(readCtx, c.ID)
+		stopRead()
 		if err != nil {
-			log.Printf("[conv %d] load check: %v", c.ID, err)
-			if err := s.m.pg.FailPendingCheckForConversation(c.ID, "验证状态读取失败，请重新发起"); err != nil {
-				log.Printf("[conv %d] seal check: %v", c.ID, err)
-			}
+			s.sealUnstartedConversation(ctx, c, "finding_checks", "failed")
 			return
 		}
-		if chk == nil {
-			if _, wasCheck := s.findingCheckTasks.Load(c.ID); wasCheck {
-				_, _ = s.m.pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true,
-					Summary: "验证记录已删除，未执行本轮操作", Detail: "验证记录已删除，未执行本轮操作"})
+		if chk == nil || (chk.Status != "pending" && chk.Status != "running") {
+			ctx = agent.WithExplanationOnly(ctx)
+		} else {
+			if chk.Status != "pending" {
 				return
 			}
-		}
-		activeCheck := chk != nil && (chk.Status == "pending" || chk.Status == "running")
-		if activeCheck {
+			if !s.beginFindingConversation(ctx, c, "finding_checks", func() error { return s.validateConversationFindingParent(ctx, chk.FindingID) }, func() (bool, error) { return s.m.pg.StartFindingCheck(ctx, chk.ID) }) {
+				return
+			}
 			defer func() {
 				if ctx.Err() != nil {
 					finishStatus, finishReason = "stopped", "验证已停止或服务已关闭"
 				}
 				s.finishCheck(chk.ID, finishStatus, finishReason)
 			}()
-			if ctx.Err() != nil {
-				return
-			}
-			if chk.Status == "pending" {
-				started, err := s.m.pg.StartFindingCheck(ctx, chk.ID)
-				if err != nil {
-					finishReason = err.Error()
-					return
-				}
-				if !started {
-					return
-				}
-			}
-		}
-		ctx, err = s.findingCheckTaskContext(ctx, chk)
-		if err != nil {
-			finishReason = err.Error()
-			_, _ = s.m.pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true,
-				Summary: "验证会话未启动：" + finishReason, Detail: finishReason})
-			return
-		}
-		if activeCheck {
-			if ri := agent.RunInfoFrom(ctx); ri.TaskID > 0 {
-				s.findingCheckTasks.Store(c.ID, strconv.FormatInt(ri.TaskID, 10))
-			}
 		}
 	}
 	if ctx.Err() != nil {
@@ -1048,6 +1044,7 @@ func mergeTriggeredRuns(items []triggeredRun) triggeredRun {
 		title:     fmt.Sprintf("合并触发 · task#%d · %d 条", first.taskID, len(items)),
 		message:   b.String(),
 		taskID:    first.taskID,
+		taskIDs:   triggerTaskOwners(first),
 		mergeable: true,
 		// taskDesc/taskGoal left empty: header already embedded above.
 	}
@@ -1090,6 +1087,7 @@ func mergeAllRuns(items []triggeredRun) triggeredRun {
 		title:     fmt.Sprintf("合并触发 · 全部 · %d 条", len(items)),
 		message:   b.String(),
 		taskID:    first.taskID,
+		taskIDs:   append([]int64(nil), order...),
 		mergeable: true,
 		// taskDesc/taskGoal left empty: per-task headers already embedded above.
 	}
@@ -1099,48 +1097,111 @@ func mergeAllRuns(items []triggeredRun) triggeredRun {
 // turn, and runs it synchronously (blocks until the run ends). recover keeps a
 // panic from killing the drain loop and wedging the agent's queue.
 func (s *Server) runTriggeredRun(item triggeredRun) {
+	pg := s.m.pg
+	// The tuple revision belongs only to the queued -> running transition
+	// claimed below. Failure cleanup must not overwrite another run or revive
+	// a terminal review, including a newly queued round on the same key.
+	var reviewClaim string
+	preparedHandled := false
+	failClaimedReview := func(reason string) {
+		if item.conversationID <= 0 || reviewClaim == "" {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_, _ = pg.ExecContext(ctx, `UPDATE finding_case_review_runs SET state='failed',error=$3
+		WHERE conversation_id=$1 AND state='running' AND xmin::text=$2`, item.conversationID, reviewClaim, reason)
+	}
 	defer func() {
-		if r := recover(); r != nil {
-			if item.conversationID > 0 {
-				_, _ = s.m.pg.Exec(`UPDATE finding_case_review_runs SET state='failed',error=$2 WHERE conversation_id=$1`, item.conversationID, fmt.Sprint(r))
+		if recover() != nil {
+			if !preparedHandled {
+				failClaimedReview("整理运行发生异常，未确认完成")
 			}
-			log.Printf("[trigger] run for %s panicked: %v", item.agentKey, r)
+			log.Printf("[trigger] run for %s panicked", item.agentKey)
 		}
 	}()
-	pg := s.m.pg
 	var c *db.Conversation
 	var err error
 	if item.conversationID > 0 {
 		c, err = pg.GetConversation(item.conversationID)
-		_, _ = pg.Exec(`UPDATE finding_case_review_runs SET state='running' WHERE conversation_id=$1`, item.conversationID)
-	} else {
-		c, err = pg.CreateConversation(item.agentKey, firstLine(item.title, 60), nil)
+		if err == nil && c != nil {
+			var isReview bool
+			err = pg.QueryRow(`WITH claimed AS (
+			 UPDATE finding_case_review_runs SET state='running',error=''
+			 WHERE conversation_id=$1 AND state='queued' RETURNING xmin::text AS revision)
+			 SELECT COALESCE((SELECT revision FROM claimed),''),
+			 EXISTS(SELECT 1 FROM finding_case_review_runs WHERE conversation_id=$1)`, item.conversationID).Scan(&reviewClaim, &isReview)
+			if err == nil && isReview && reviewClaim == "" {
+				return
+			}
+		}
 	}
 	if err == nil && c != nil && c.AgentKey != item.agentKey {
 		err = errors.New("触发会话角色与请求不一致")
 		c = nil
 	}
-	if err != nil || c == nil {
-		if item.conversationID > 0 {
-			_, _ = pg.Exec(`UPDATE finding_case_review_runs SET state='failed',error='整理会话不可用' WHERE conversation_id=$1`, item.conversationID)
+	if err != nil || (item.conversationID > 0 && c == nil) {
+		failClaimedReview("整理会话不可用，未执行本轮操作")
+		log.Printf("[trigger] conversation for %s unavailable", item.agentKey)
+		return
+	}
+	var run *taskConversationRun
+	s.concMu.Lock()
+	func() {
+		defer s.concMu.Unlock()
+		// No queued task body or conversation is recreated after its owner was
+		// deleted, paused, or the server installed its closing barrier.
+		if s.conversationClosing || s.ctx == nil || s.ctx.Err() != nil {
+			err = conversationAdmissionError()
+			return
 		}
-		log.Printf("[trigger] create conversation for %s failed: %v", item.agentKey, err)
-		return
-	}
-	busyKey := s.convBusyKey(c.ID)
-	s.chatMu.Lock()
-	if s.chatBusy[busyKey] {
+		if _, checkErr := s.trustedConversationOwners(triggerTaskOwners(item)); checkErr != nil {
+			err = checkErr
+			return
+		}
+		if c == nil {
+			c, err = pg.CreateConversation(item.agentKey, firstLine(item.title, 60), nil)
+			if err != nil {
+				return
+			}
+		}
+		busyKey := s.convBusyKey(c.ID)
+		s.chatMu.Lock()
+		if s.chatBusy[busyKey] {
+			s.chatMu.Unlock()
+			err = errConversationRunBusy
+			return
+		}
+		if s.chatBusy == nil {
+			s.chatBusy = map[string]bool{}
+		}
+		s.chatBusy[busyKey] = true
 		s.chatMu.Unlock()
-		log.Printf("[trigger] conversation %d already running; duplicate fire not executed", c.ID)
+		run, err = s.prepareConversationRunLocked(c, busyKey, triggerTaskOwners(item))
+		if err != nil {
+			s.chatMu.Lock()
+			if _, active := s.taskConversationRuns.Load(c.ID); !active {
+				delete(s.chatBusy, busyKey)
+			}
+			s.chatMu.Unlock()
+		}
+	}()
+	if err != nil || run == nil {
+		failClaimedReview("整理运行准入失败，未执行本轮操作")
+		log.Printf("[trigger] conversation for %s not admitted", item.agentKey)
 		return
 	}
-	s.chatBusy[busyKey] = true
-	s.chatMu.Unlock()
-	msg := finalTriggerMessage(item) // prepend the task-context header for single (non-merged) fires
-	if _, err := pg.AppendConvActivity(c.ID, db.Activity{Worker: item.agentKey, Kind: "user", Summary: firstLine(msg, 200), Detail: msg}); err != nil {
-		log.Printf("[trigger] append msg failed: %v", err)
+	msg := finalTriggerMessage(item)
+	first := db.Activity{Worker: item.agentKey, Kind: "user", Summary: firstLine(msg, 200), Detail: msg}
+	if err := s.runPreparedConversation(run, c, msg, &first, func(runErr error) {
+		preparedHandled = true
+		if runErr != nil {
+			failClaimedReview("整理会话未执行完成，未确认成功")
+		}
+	}); err != nil {
+		log.Printf("[trigger] conversation %d did not execute", c.ID)
 	}
-	s.runConversationSync(c, msg, busyKey)
+
 }
 
 // firstLine returns a single-line, length-capped preview (shared with summaries).
