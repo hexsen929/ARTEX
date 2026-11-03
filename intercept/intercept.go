@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -142,11 +143,40 @@ func (i *Interceptor) SetReviewer(r Reviewer) {
 // defaultEnabledTools is the hard-coded set of tools that enter the intercept
 // rule system when no intercept_enabled_tools setting has been saved.
 var defaultEnabledTools = []string{
+	// deepseek_fetch/search share these existing scope switches. Do not add
+	// independent defaults that would re-enable an explicitly disabled group.
 	"Bash", "WebFetch", "web_search",
 	"shell_open", "shell_send",
 	"Write", "Edit", "MultiEdit",
 	// 立足点会话工具(期 1a):登记 webshell 与目标侧命令/文件操作,默认进拦截规则体系。
 	"register_session", "session_exec", "session_read", "session_write",
+}
+
+// canonicalInterceptTool keeps backend-specific implementations under the
+// existing approval controls. Only policy lookup is aliased: reviewer input,
+// approval records and activity always retain the actual called tool name.
+func canonicalInterceptTool(name string) string {
+	switch name {
+	case "deepseek_fetch":
+		return "WebFetch"
+	case "deepseek_search":
+		return "web_search"
+	default:
+		return name
+	}
+}
+
+func normalizeEnabledTools(names []string) []string {
+	out := make([]string, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		name = canonicalInterceptTool(name)
+		if !seen[name] {
+			out = append(out, name)
+			seen[name] = true
+		}
+	}
+	return out
 }
 
 // New creates an Interceptor backed by d. The rule cache is lazy-loaded on
@@ -203,7 +233,7 @@ func (i *Interceptor) loadLocked() error {
 			return fmt.Errorf("invalid intercept tool configuration: %w", err)
 		} else {
 			m := make(map[string]bool, len(names))
-			for _, n := range names {
+			for _, n := range normalizeEnabledTools(names) {
 				m[n] = true
 			}
 			enabled = m
@@ -240,6 +270,7 @@ func (i *Interceptor) rules() ([]compiledRule, error) {
 // tool is NOT exempted — it enters the intercept flow, where Match fails closed
 // on the same load error.
 func (i *Interceptor) IsToolEnabled(name string) bool {
+	name = canonicalInterceptTool(name)
 	i.mu.RLock()
 	if i.enabledTools != nil {
 		v := i.enabledTools[name]
@@ -276,13 +307,13 @@ func (i *Interceptor) GetEnabledTools() ([]string, error) {
 	if err := json.Unmarshal([]byte(val), &names); err != nil {
 		return nil, fmt.Errorf("invalid intercept tool configuration: %w", err)
 	}
-	return names, nil
+	return normalizeEnabledTools(names), nil
 }
 
 // SetEnabledTools persists the list of tool names that should enter the intercept
 // rule system, then invalidates the cache so the next call picks up the new list.
 func (i *Interceptor) SetEnabledTools(tools []string) error {
-	b, err := json.Marshal(tools)
+	b, err := json.Marshal(normalizeEnabledTools(tools))
 	if err != nil {
 		return err
 	}
@@ -323,6 +354,7 @@ const (
 	settingJudgeAskTimeoutSecs   = "llm_judge_ask_timeout_seconds"
 	settingJudgeAskTimeoutAction = "llm_judge_ask_timeout_action"
 	settingJudgeIncompleteScript = "llm_judge_incomplete_script_action"
+	settingJudgeConfidence       = "llm_judge_confidence_threshold"
 )
 
 // Judge default values. Fail-closed: a judge failure defaults to "ask" (a human
@@ -334,6 +366,7 @@ const (
 	defaultJudgeFailAction       = "ask"
 	defaultJudgeAskTimeoutSecs   = 300
 	defaultJudgeAskTimeoutAction = "deny"
+	defaultJudgeConfidence       = 0.55
 	// DefaultIncompleteScriptAction keeps incomplete snapshots with the judge.
 	DefaultIncompleteScriptAction = "model"
 )
@@ -341,16 +374,17 @@ const (
 // JudgeConfig is the resolved LLM-fallback-judge configuration. Prompt is always
 // non-empty (falls back to DefaultJudgePrompt).
 type JudgeConfig struct {
-	Enabled                bool   `json:"enabled"`
-	ProfileID              int64  `json:"profile_id"` // 0 = follow active/default
-	Prompt                 string `json:"prompt"`
-	TimeoutSeconds         int    `json:"timeout_seconds"` // per attempt
-	RetryCount             int    `json:"retry_count"`     // additional attempts; 0 = disabled
-	RetryIntervalMS        int    `json:"retry_interval_ms"`
-	FailAction             string `json:"fail_action"` // allow|ask|deny
-	AskTimeoutSeconds      int    `json:"ask_timeout_seconds"`
-	AskTimeoutAction       string `json:"ask_timeout_action"`       // allow|deny
-	IncompleteScriptAction string `json:"incomplete_script_action"` // ask|model
+	Enabled                bool    `json:"enabled"`
+	ProfileID              int64   `json:"profile_id"` // 0 = follow active/default
+	Prompt                 string  `json:"prompt"`
+	TimeoutSeconds         int     `json:"timeout_seconds"` // per attempt
+	RetryCount             int     `json:"retry_count"`     // additional attempts; 0 = disabled
+	RetryIntervalMS        int     `json:"retry_interval_ms"`
+	FailAction             string  `json:"fail_action"` // allow|ask|deny
+	AskTimeoutSeconds      int     `json:"ask_timeout_seconds"`
+	AskTimeoutAction       string  `json:"ask_timeout_action"`       // allow|deny
+	IncompleteScriptAction string  `json:"incomplete_script_action"` // ask|model
+	ConfidenceThreshold    float64 `json:"confidence_threshold"`     // Jev only; below this becomes ask
 }
 
 // judgeConfig reads the judge configuration from settings, applying defaults for
@@ -367,6 +401,7 @@ func (i *Interceptor) judgeConfig() JudgeConfig {
 		AskTimeoutSeconds:      i.getSettingInt(settingJudgeAskTimeoutSecs, defaultJudgeAskTimeoutSecs),
 		AskTimeoutAction:       i.getSettingChoice(settingJudgeAskTimeoutAction, defaultJudgeAskTimeoutAction, "allow", "deny"),
 		IncompleteScriptAction: i.getSettingChoice(settingJudgeIncompleteScript, DefaultIncompleteScriptAction, "ask", "model"),
+		ConfidenceThreshold:    i.getSettingFloat(settingJudgeConfidence, defaultJudgeConfidence),
 	}
 	// Prompt: stored value if non-empty, else the built-in template.
 	if v, ok, _ := i.db.GetSetting(settingJudgePrompt); ok && strings.TrimSpace(v) != "" {
@@ -380,7 +415,22 @@ func (i *Interceptor) judgeConfig() JudgeConfig {
 	if c.AskTimeoutSeconds <= 0 {
 		c.AskTimeoutSeconds = defaultJudgeAskTimeoutSecs
 	}
+	if math.IsNaN(c.ConfidenceThreshold) || math.IsInf(c.ConfidenceThreshold, 0) || c.ConfidenceThreshold < 0 || c.ConfidenceThreshold > 1 {
+		c.ConfidenceThreshold = defaultJudgeConfidence
+	}
 	return c
+}
+
+func (i *Interceptor) getSettingFloat(key string, def float64) float64 {
+	v, ok, err := i.db.GetSetting(key)
+	if err != nil || !ok {
+		return def
+	}
+	n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 func (i *Interceptor) getSettingInt(key string, def int) int {
@@ -419,6 +469,9 @@ func (i *Interceptor) SetJudgeConfig(c JudgeConfig) error {
 	if err := c.ValidateRetry(); err != nil {
 		return err
 	}
+	if math.IsNaN(c.ConfidenceThreshold) || math.IsInf(c.ConfidenceThreshold, 0) || c.ConfidenceThreshold < 0 || c.ConfidenceThreshold > 1 {
+		return fmt.Errorf("confidence_threshold 必须在 0 到 1 之间")
+	}
 	if err := i.db.SetBool(settingJudgeEnabled, c.Enabled); err != nil {
 		return err
 	}
@@ -453,6 +506,9 @@ func (i *Interceptor) SetJudgeConfig(c JudgeConfig) error {
 		return err
 	}
 	if err := i.db.SetSetting(settingJudgeIncompleteScript, c.IncompleteScriptAction); err != nil {
+		return err
+	}
+	if err := i.db.SetSetting(settingJudgeConfidence, strconv.FormatFloat(c.ConfidenceThreshold, 'f', 4, 64)); err != nil {
 		return err
 	}
 	return nil
@@ -603,10 +659,18 @@ func ruleMatches(r compiledRule, toolName string, input []byte) bool {
 	default:
 		return false
 	}
-	if r.MatchType == "regex" {
-		return r.re != nil && r.re.MatchString(subject)
+	matches := func(value string) bool {
+		if r.MatchType == "regex" {
+			return r.re != nil && r.re.MatchString(value)
+		}
+		return strings.Contains(value, r.Pattern)
 	}
-	return strings.Contains(subject, r.Pattern)
+	if matches(subject) {
+		return true
+	}
+	// Existing WebFetch/web_search rules cover the new backend names, while
+	// an explicit deepseek_* rule can still match the original name above.
+	return r.MatchTarget == "tool_name" && canonicalInterceptTool(toolName) != toolName && matches(canonicalInterceptTool(toolName))
 }
 
 func defaultMessage(action, name string) string {

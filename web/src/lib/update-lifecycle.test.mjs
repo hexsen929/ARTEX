@@ -39,9 +39,20 @@ test("update card cancels stale checks and polls without replaying update reques
   assert.match(card, /version !== streamVersion\.current/);
   assert.match(card, /restartAbort\.current\?\.abort/);
   assert.match(card, /observeUpdateVersion\(operation, j\.version\)/);
+  assert.match(card, /await api\.version\(controller\.signal\)/);
+  assert.doesNotMatch(card, /fetch\("\/api\/health"/);
   assert.match(card, /isUpdateTransportFailure\(e\)/);
   assert.match(card, /attempt\.waitForRestart\(\)/);
   assert.match(card, /kind: "update", from, target/);
   assert.match(card, /kind: "rollback", from/);
   assert.doesNotMatch(card, /j\.version\s*!==\s*fromVersion/);
+});
+
+
+test("restart polling's caller deadline also cancels token-refresh waiting", () => {
+  const api = fs.readFileSync(new URL("./api.ts", import.meta.url), "utf8");
+  assert.match(api, /await waitForAccessTokenRefresh\(init\?\.signal\)/);
+  assert.match(api, /signal\.addEventListener\("abort", onAbort/);
+  assert.match(api, /signal\.removeEventListener\("abort", onAbort/);
+  assert.doesNotMatch(api, /refreshAccessToken\([^)]*signal/);
 });

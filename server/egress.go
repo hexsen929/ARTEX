@@ -19,7 +19,7 @@ import (
 
 // registerEgressFingerprints 把当前平台敏感信息注册进共享 EgressGuard:
 // 所有 LLM profile 的 API key(变更时原子替换)、jwt.key 文件内容(原文/hex/base64
-// 三种文本形态)、gate 入口路径、PG DSN 中的密码。
+// 三种文本形态)、独立搜索服务 key、gate 入口路径、PG DSN 中的密码。
 // 幂等:重复调用不产生重复指纹(guard.AddFingerprint 内部去重)。
 func (s *Server) registerEgressFingerprints() {
 	if s.m == nil || s.m.egress == nil {
@@ -35,6 +35,11 @@ func (s *Server) registerEgressFingerprints() {
 				keys = append(keys, p.APIKey)
 			}
 			eg.ReplaceKind("llm_api_key", keys)
+		}
+		// Search keys can be configured without any active chat profile. Keep
+		// their own category so a failed DB read never clears known protection.
+		if key, _, err := s.m.pg.GetSetting(settingDeepSeekSearchKey); err == nil {
+			eg.ReplaceKind("search_api_key", []string{strings.TrimSpace(key)})
 		}
 	}
 	// jwt.key:32 字节签名密钥,出现在命令文本里通常是原文/hex/base64 之一。

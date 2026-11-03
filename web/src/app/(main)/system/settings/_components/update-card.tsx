@@ -45,7 +45,7 @@ export function UpdateCard() {
   const [info, setInfo] = React.useState<UpdateCheck | null>(null);
   const [checking, setChecking] = React.useState(true);
   const [progress, setProgress] = React.useState<UpdateProgress | null>(null);
-  // 与 progress 分开：暂存完成后进程就没了，SSE 会断，此时要切到轮询 /api/health。
+  // 与 progress 分开：暂存完成后进程就没了，SSE 会断，此时要切到轮询 /api/version。
   const [restarting, setRestarting] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [checkError, setCheckError] = React.useState("");
@@ -164,29 +164,26 @@ export function UpdateCard() {
       restartAbort.current = controller;
       const timeout = setTimeout(() => controller.abort(), 5000);
       try {
-        const r = await fetch("/api/health", { cache: "no-store", signal: controller.signal });
-        if (r.ok) {
-          const j = (await r.json()) as { version?: string };
-          if (!active()) return;
-          const observation = observeUpdateVersion(operation, j.version);
-          if (observation === "confirmed") {
-            toast.success(`已更新到 ${j.version}，正在重新加载页面`);
-            await sleep(800);
-            if (active()) window.location.reload();
-            return;
-          }
-          if (observation === "unexpected" || observation === "rollback_observed") {
-            const notice = operation.kind === "update"
-              ? `服务已响应，但当前版本 ${j.version} 与请求目标 ${operation.target} 不一致，未判定更新成功。请核对后端日志。`
-              : `回滚后服务已响应，当前版本 ${j.version}。现有接口未提供备份版本，尚未核实是否为预期回滚目标。`;
-            setCompletionNotice(notice);
-            setRestarting(false);
-            setBusy(false);
-            setProgress(null);
-            toast.warning(notice);
-            check(true);
-            return;
-          }
+        const j = await api.version(controller.signal);
+        if (!active()) return;
+        const observation = observeUpdateVersion(operation, j.version);
+        if (observation === "confirmed") {
+          toast.success(`已更新到 ${j.version}，正在重新加载页面`);
+          await sleep(800);
+          if (active()) window.location.reload();
+          return;
+        }
+        if (observation === "unexpected" || observation === "rollback_observed") {
+          const notice = operation.kind === "update"
+            ? `服务已响应，但当前版本 ${j.version} 与请求目标 ${operation.target} 不一致，未判定更新成功。请核对后端日志。`
+            : `回滚后服务已响应，当前版本 ${j.version}。现有接口未提供备份版本，尚未核实是否为预期回滚目标。`;
+          setCompletionNotice(notice);
+          setRestarting(false);
+          setBusy(false);
+          setProgress(null);
+          toast.warning(notice);
+          check(true);
+          return;
         }
       } catch {
         // 重启窗口内连不上是预期的，继续轮询。
@@ -202,7 +199,7 @@ export function UpdateCard() {
   }, [check]);
 
   // 订阅更新进度。SSE 不走 Next 的 /api 重写（那层会缓冲，事件推不出来）。
-  // F6:凭据是 60s 一次性 ticket;更新过程后端会重启,不重连(交给 /api/health 轮询)。
+  // F6:凭据是 60s 一次性 ticket;更新过程后端会重启,不重连(交给 /api/version 轮询)。
   const openStream = React.useCallback(
     async (operation: UpdateOperation, version: number) => {
       restartAbort.current?.abort();
@@ -242,8 +239,8 @@ export function UpdateCard() {
       streamRef.current = es;
       es.onerror = () => {
         // 进程退出时 SSE 必然断开。如果已经进入等待重启，这属于正常现象，
-        // 交给 /api/health 轮询继续判定即可。
-        // A one-use ticket must not be retried by EventSource. Health polling
+        // 交给 /api/version 轮询继续判定即可。
+        // A one-use ticket must not be retried by EventSource. Version polling
         // observes the replacement version without replaying applyUpdate.
         es.close();
         if (streamRef.current === es && version === streamVersion.current) {
@@ -289,7 +286,7 @@ export function UpdateCard() {
         if (!alive.current || version !== streamVersion.current) return;
         if (isUpdateTransportFailure(e)) {
           // The process may have accepted the request before its connection
-          // disappeared. Verify health without repeating the state-changing POST.
+          // disappeared. Verify version without repeating the state-changing POST.
           setCompletionNotice("启动更新请求的连接中断，结果未确认；正在只读核对运行版本，未重放更新请求。");
           attempt.waitForRestart();
           return;

@@ -20,6 +20,13 @@ const settings = {
   task_intelligence_enabled: false, task_auto_title_enabled: false, chat_auto_title_enabled: false,
   traffic_capture: false, browser_screenshot_enabled: false, browser_screenshot_timestamp_enabled: false,
   opsec_enabled: false, agent_traffic_binding: false, llm_record: false,
+  deepseek_search_key_set: false,
+  proxy_pool: [], proxy_pool_active_id: "", proxy_pool_switch_log: [],
+  proxy_rotate_timed_enabled: false, proxy_rotate_interval_seconds: 30,
+  proxy_rotate_on_failure: false, proxy_rotate_strategy: "sequential",
+  proxy_health_fail_threshold: 3, proxy_health_cooldown_seconds: 60,
+  proxy_health_check_interval_seconds: 30, proxy_reconnect_max_attempts: 5,
+  proxy_reconnect_interval_seconds: 30,
   web_search_enabled: false, web_search_backend: "ddgs", web_search_proxy: "",
   brave_key_set: false, tavily_key_set: false, global_proxy: "", show_egress_ip: false,
   python_interpreter: "", workers: 3, worker_pools: [],
@@ -84,6 +91,7 @@ async function api(request, response, url) {
   if (endpoint === "/api/settings/basic-auth") return json(response, 200, { enabled: false, username: "", password_set: false });
   if (endpoint === "/api/update/settings") return json(response, 200, { proxy: "" });
   if (endpoint === "/api/update/check") return json(response, 200, { current: "2.4.7-fixture", mode: "binary", os: "darwin", arch: "arm64", repo: "fixture", has_backup: false, has_update: false, comparable: false });
+  if (endpoint === "/api/version") return json(response, 200, { ok: true, service: "fixture", version: "2.4.7-fixture" });
   if (endpoint === "/api/health") return json(response, 200, { ok: true, service: "fixture", version: "2.4.7-fixture" });
   if (endpoint === "/api/auth/status") return json(response, 200, { initialized: true });
   if (endpoint === "/api/tasks") return json(response, 200, { tasks: [], active: "" });

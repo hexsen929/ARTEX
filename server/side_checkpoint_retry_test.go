@@ -440,3 +440,19 @@ func TestSideCheckpointFailureLogsSafeParentRunAndVersion(t *testing.T) {
 		t.Fatal("malformed SQLSTATE leaked arbitrary content")
 	}
 }
+
+func TestSideCheckpointSyntheticContextsNeverEnterPublisherState(t *testing.T) {
+	state := &sideQuestionState{}
+	synthetic := checkpointRetryFixture(0, 100)
+	state.publishCheckpoint(synthetic)
+	if len(state.pending) != 0 || len(state.latest) != 0 || len(state.seen) != 0 || len(state.checkpoints) != 0 {
+		t.Fatal("synthetic snapshot entered checkpoint ordering or persistence state")
+	}
+	real := checkpointRetryFixture(1, 1)
+	state.publishCheckpoint(real)
+	state.publishCheckpoint(synthetic)
+	key := real.Parent.Key()
+	if state.pending[key].RunID != 1 || state.latest[key].RunID != 1 || state.seen[key] != [2]int64{1, 1} {
+		t.Fatal("synthetic snapshot displaced the real checkpoint")
+	}
+}

@@ -64,7 +64,7 @@ func run() int {
 	)
 	flag.Parse()
 
-	// hand the build version to the server package so GET /api/health can report it
+	// hand the build version to the server package so authenticated GET /api/version can report it
 	// to the frontend top bar.
 	server.BuildVersion = version
 
@@ -128,6 +128,7 @@ func run() int {
 		log.Printf("[config] 回连地址未配置：可在系统设置按需填写；普通扫描、爬虫与 HTTP 会话功能不受影响")
 	}
 	srv := server.New(ctx, mgr, skillDir, *dataDir, config.KeyDir())
+	defer srv.Close()
 
 	// 反测绘伪装门控(F14):绑非 loopback 时默认开启,ARTEX_GATE=off 可关。
 	gate, err := server.NewGate(*addr, *dataDir, config.KeyDir())

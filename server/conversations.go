@@ -111,6 +111,10 @@ func (s *Server) pgCreateConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.LLMProfileID != nil {
+		if p, err := pg.ProfileByID(*req.LLMProfileID); err == nil && p != nil && p.Format == "jev" {
+			writeErr(w, 400, db.ErrJevProfileJudgeOnly.Error())
+			return
+		}
 		if _, ok := s.loadProfileConfig(*req.LLMProfileID); !ok {
 			writeErr(w, 400, "指定的 LLM 配置不存在或未设置 API Key")
 			return
@@ -126,6 +130,10 @@ func (s *Server) pgCreateConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	c, err := pg.CreateConversation(req.AgentKey, title, req.LLMProfileID)
 	if err != nil {
+		if errors.Is(err, db.ErrJevProfileJudgeOnly) {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -144,12 +152,20 @@ func (s *Server) pgUpdateConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.LLMProfileID != nil {
+		if p, err := pg.ProfileByID(*req.LLMProfileID); err == nil && p != nil && p.Format == "jev" {
+			writeErr(w, 400, db.ErrJevProfileJudgeOnly.Error())
+			return
+		}
 		if _, ok := s.loadProfileConfig(*req.LLMProfileID); !ok {
 			writeErr(w, 400, "指定的 LLM 配置不存在或未设置 API Key")
 			return
 		}
 	}
 	if err := pg.UpdateConversationProfile(c.ID, req.LLMProfileID); err != nil {
+		if errors.Is(err, db.ErrJevProfileJudgeOnly) {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -814,7 +830,7 @@ func (s *Server) findingCheckTaskContext(ctx context.Context, check *db.FindingC
 				return ctx, errors.New("验证流量录制代理未就绪，未执行本轮操作")
 			}
 		} else {
-			addr, ca = s.m.GlobalProxy(), ""
+			addr, ca = s.m.ProxyAddr(), ""
 		}
 	}
 	ctx = agent.WithRunInfo(ctx, agent.RunInfo{TaskID: parent.ID, ExplorationID: parent.ExplorationID})

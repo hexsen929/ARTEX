@@ -23,6 +23,7 @@ import (
 	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/intercept/jev"
 	"github.com/Autumn-27/artex/llmpool"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/report"
@@ -37,7 +38,7 @@ import (
 
 // BuildVersion is the backend application version, injected from cmd/artex at
 // startup (which in turn gets it from -ldflags "-X main.version=<tag>").
-// Defaults to "dev" for local builds. Exposed to the frontend via GET /api/health.
+// Defaults to "dev" for local builds. Exposed via the authenticated GET /api/version.
 var BuildVersion = "dev"
 
 // Server exposes the ARTEX backend over a JSON HTTP API for the shadcn/ui
@@ -146,18 +147,32 @@ type Server struct {
 
 	// Cold task archives run through one persistent FIFO worker. The buffered wake
 	// channel coalesces enqueue bursts; the database remains the source of truth.
-	archiveWake    chan struct{}
-	archiveWG      sync.WaitGroup
-	credentialWake chan struct{}
-	side           *sideQuestionState
-	memoryWake     chan struct{}
-	memoryWG       sync.WaitGroup
+	archiveWake       chan struct{}
+	archiveWG         sync.WaitGroup
+	credentialWake    chan struct{}
+	proxyReconnect    proxyReconnectSupervisor
+	proxyPoolWake     chan struct{}
+	proxyPoolWG       sync.WaitGroup
+	proxyCallbackWG   sync.WaitGroup
+	proxyCtx          context.Context
+	proxyCancel       context.CancelFunc
+	proxyPoolProbeSem chan struct{}
+	proxyPoolTickMu   sync.Mutex
+	// proxyProbe is injectable for deterministic reconnect race tests. Production
+	// servers leave it nil and use probeEgress directly.
+	proxyProbe func(context.Context, string, string, []string, time.Duration) egressProbeResult
+	side       *sideQuestionState
+	memoryWake chan struct{}
+	memoryWG   sync.WaitGroup
 }
 
 // provEntry is a cached provider + its config for one LLM profile id.
 type provEntry struct {
 	prov llm.Provider
 	cfg  agent.Config
+	// jev is retained in the cache entry so a cached chat provider can be
+	// returned without consulting the DB on every hot-path resolution.
+	jev bool
 }
 
 // triggeredRun is one queued P3 trigger fire awaiting its turn for an agent.
@@ -183,12 +198,14 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	if err != nil {
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
+	proxyCtx, proxyCancel := context.WithCancel(ctx)
 	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, dataDir: dataDir, jwtKey: key, keyDir: keyDir, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
-		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
+		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{}, proxyCtx: proxyCtx, proxyCancel: proxyCancel, proxyPoolWake: make(chan struct{}, 1), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency),
 		profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1), credentialWake: make(chan struct{}, 1)}
+	m.SetTaskControlMutex(&s.concMu)
 	s.initSideQuestions()
 	if m.pg != nil {
 		if err := s.basicAuth.load(m.pg); err != nil {
@@ -220,6 +237,10 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		defer s.cfgMu.Unlock()
 		return s.llmOn
 	})
+	s.engine.SetProxyFailureHandler(s.handleProxyFailure)
+	if m.traffic != nil {
+		m.traffic.SetUpstreamFailureHandler(s.handleProxyTrafficFailure)
+	}
 	// Wire DB-stored prompt templates into the agents (新版方案 §3.3 / §5a). With no
 	// override row, agents keep their built-in defaults — behavior is unchanged.
 	if m.pg != nil {
@@ -327,6 +348,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	}
 	s.wireMemoryRecall()
 	s.restoreTaskRuntimes()
+	s.ensureProxySupervisor()
+	s.proxyPoolWG.Add(1)
+	go func() { defer s.proxyPoolWG.Done(); s.runProxyPoolSupervisor(s.proxyCtx) }()
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()
 	if m.pg != nil {
@@ -345,6 +369,27 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	s.registerEgressFingerprints()
 	s.startMemoryWorker()
 	return s
+}
+
+// Close cancels and joins both proxy supervisors before Manager closes PG.
+// An owned child context also permits Close before the caller cancels s.ctx.
+func (s *Server) Close() {
+	if s == nil {
+		return
+	}
+	if s.proxyCancel != nil {
+		s.proxyCancel()
+	}
+	s.proxyReconnect.mu.Lock()
+	s.proxyReconnect.closed = true
+	cancelReconnect := s.proxyReconnect.cancel
+	s.proxyReconnect.mu.Unlock()
+	if cancelReconnect != nil {
+		cancelReconnect()
+	}
+	s.proxyPoolWG.Wait()
+	s.proxyReconnect.wg.Wait()
+	s.proxyCallbackWG.Wait()
 }
 
 // Restored deadline and worker loops must inherit the same context as new tasks,
@@ -414,6 +459,9 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	if err != nil || p == nil {
 		return agent.Config{}, false
 	}
+	if p.Format == "jev" {
+		return agent.Config{}, false
+	}
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
@@ -437,8 +485,12 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 
 // saveLLMConfig persists the LLM config as the active "default" profile in PG.
 func (s *Server) saveLLMConfig(cfg agent.Config, instructionFiles []string) error {
-	// cfg.Provider() already returns one of the three valid format strings
-	// (anthropic / openai / openai-responses), matching the DB CHECK constraint.
+	if cfg.Jev || cfg.Provider() == "jev" {
+		return db.ErrJevProfileJudgeOnly
+	}
+	// cfg.Provider() returns one of the chat format strings
+	// (anthropic / openai / openai-responses), matching the DB CHECK constraint;
+	// Jev is intentionally handled by the dedicated intercept path.
 	format := cfg.Provider()
 	var id int64
 	// 这个 legacy 端点的请求体不含轮询/收发/输出上限参数,故把库里已存的值原样带回 —
@@ -539,6 +591,9 @@ func maxTokensResolver(cfg agent.Config) func() int {
 // applyLLM (re)builds the planner/worker/main-agent from cfg and installs them on
 // the running engine as the GLOBAL active pair. Safe to call at runtime (UI configures LLM).
 func (s *Server) applyLLM(cfg agent.Config) error {
+	if cfg.Jev {
+		return fmt.Errorf("Jev System One 仅可用于拦截判定模型，不能作为聊天 provider")
+	}
 	var prov llm.Provider
 	// A persisted active profile must use the same cached provider as task chains
 	// and Agent bindings, otherwise each path owns a separate rate limiter.
@@ -590,6 +645,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	// (backend/key) and gates Enabled per-conversation-agent at Chat time. 对话始终用激活配置。
 	s.chatAgent = agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, win) // chat page runner
 	s.chatAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	s.chatAgent.SetProxyProvider(s.m.ProxyAddr)
 	s.chatAgent.SetWebSearch(s.m.WebSearchOpts())
 	s.chatAgent.SetGuard(s.agentGuard())
 	s.chatAgent.SetNonStreaming(nonStreamingResolver(cfg))
@@ -616,6 +672,16 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	p, err := s.m.pg.ProfileByID(id)
 	if err != nil || p == nil {
+		return agent.Config{}, false
+	}
+	return s.profileConfig(p)
+}
+
+func (s *Server) profileConfig(p *db.LLMProfile) (agent.Config, bool) {
+	if p == nil {
+		return agent.Config{}, false
+	}
+	if p.Format == "jev" {
 		return agent.Config{}, false
 	}
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
@@ -721,23 +787,54 @@ func (s *Server) chatUnavailableReason(conversations ...*db.Conversation) string
 // Explicit pool selections must surface missing profiles instead of silently switching.
 func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool) {
 	s.provCacheMu.Lock()
+	if s.provByProfile == nil {
+		s.provByProfile = make(map[int64]*provEntry)
+	}
 	if e := s.provByProfile[id]; e != nil {
+		if e.jev {
+			s.provCacheMu.Unlock()
+			return nil, agent.Config{}, false
+		}
 		s.provCacheMu.Unlock()
 		return e.prov, e.cfg, true
 	}
 	generation := s.provCacheGen
 	s.provCacheMu.Unlock()
-	cfg, ok := s.loadProfileConfig(id)
+	// Only a cache miss reaches the DB. This preserves an already-built chat
+	// provider during a transient profile lookup failure and avoids a query for
+	// every agent/task resolution.
+	profile, err := s.m.pg.ProfileByID(id)
+	if err != nil || profile == nil {
+		return nil, agent.Config{}, false
+	}
+	if profile.Format == "jev" {
+		// Cache the negative result too. Profile writes/activation invalidate this
+		// generation, while a transient DB error on a cached chat profile above
+		// still returns that already-built provider.
+		s.provCacheMu.Lock()
+		if generation == s.provCacheGen {
+			if s.provByProfile == nil {
+				s.provByProfile = map[int64]*provEntry{}
+			}
+			s.provByProfile[id] = &provEntry{jev: true}
+		}
+		s.provCacheMu.Unlock()
+		return nil, agent.Config{}, false
+	}
+	cfg, ok := s.profileConfig(profile)
 	if !ok {
 		return nil, agent.Config{}, false
 	}
-	profile, _ := s.m.pg.ProfileByID(id)
 	s.provCacheMu.Lock()
 	if generation != s.provCacheGen {
 		s.provCacheMu.Unlock()
 		return s.providerForProfile(id)
 	}
 	if e := s.provByProfile[id]; e != nil { // lost the race → keep the winner
+		if e.jev {
+			s.provCacheMu.Unlock()
+			return nil, agent.Config{}, false
+		}
 		s.provCacheMu.Unlock()
 		return e.prov, e.cfg, true
 	}
@@ -758,7 +855,7 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profile.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
 		prov = bindSideProvider(prov, cfg, id, profile.Name)
 	}
-	s.provByProfile[id] = &provEntry{prov: prov, cfg: cfg}
+	s.provByProfile[id] = &provEntry{prov: prov, cfg: cfg, jev: false}
 	log.Printf("[engine] built provider for LLM profile %d (%s / %s)", id, cfg.Provider(), cfg.Model)
 	s.provCacheMu.Unlock()
 	return prov, cfg, true
@@ -796,6 +893,7 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	ca := agent.NewChatAgent(s.poolForBinding(id, prov, cfg), cfg.Model, s.m.dir, tx, cfg.CompactionWindow())
 	ca.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	ca.SetProxyProvider(s.m.ProxyAddr)
 	ca.SetWebSearch(s.m.WebSearchOpts())
 	ca.SetGuard(s.agentGuard())
 	ca.SetNonStreaming(nonStreamingResolver(cfg))
@@ -854,6 +952,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sse-ticket", s.sseTicket)
 
 	mux.HandleFunc("GET /api/health", s.health)
+	mux.HandleFunc("GET /api/version", s.version)
 	mux.HandleFunc("GET /api/stats", s.stats)
 	mux.HandleFunc("GET /api/system/metrics", s.systemMetrics)
 	mux.HandleFunc("GET /api/logs", s.getLogs)
@@ -1073,6 +1172,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/settings/web-search/test", s.testWebSearch)
 	// 出口代理连通性测试：发真实请求验证 global_proxy 是否可用，并回显出口 IP。
 	mux.HandleFunc("POST /api/settings/proxy/test", s.testEgressProxy)
+	mux.HandleFunc("GET /api/settings/proxy-pool", s.getProxyPool)
+	mux.HandleFunc("POST /api/settings/proxy-pool/import", s.importProxyPool)
+	mux.HandleFunc("PUT /api/settings/proxy-pool/{id}", s.updateProxyPool)
+	mux.HandleFunc("DELETE /api/settings/proxy-pool/{id}", s.deleteProxyPool)
+	mux.HandleFunc("POST /api/settings/proxy-pool/{id}/test", s.testProxyPoolEntry)
+	mux.HandleFunc("POST /api/settings/proxy-pool/test-all", s.testAllProxyPool)
+	mux.HandleFunc("POST /api/settings/proxy-pool/{id}/activate", s.activateProxyPool)
+	mux.HandleFunc("POST /api/tasks/{id}/proxy/test", s.testTaskProxy)
 	mux.HandleFunc("GET /api/report", s.getReport)
 	mux.HandleFunc("GET /api/chat/mentions", s.searchChatMentions)
 	mux.HandleFunc("POST /api/chat", s.chat)
@@ -1249,8 +1356,16 @@ func (s *Server) SetGate(g *Gate) {
 
 // --- handlers ---
 
+// health requires the optional Basic Auth gate but no admin JWT, and exposes no application fingerprints.
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"ok": true, "service": "artex", "version": BuildVersion})
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// version is protected by the normal JWT middleware and optional Basic Auth gate.
+func (s *Server) version(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, 200, map[string]any{"version": BuildVersion})
 }
 
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
@@ -1743,6 +1858,45 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if strings.TrimSpace(req.Provider) == "jev" {
+		apiKey := strings.TrimSpace(req.APIKey)
+		baseURL, model := strings.TrimSpace(req.BaseURL), strings.TrimSpace(req.Model)
+		if req.ProfileID != nil {
+			if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
+				if apiKey == "" {
+					apiKey = p.APIKey
+				}
+				if baseURL == "" {
+					baseURL = p.BaseURL
+				}
+				if model == "" {
+					model = p.Model
+				}
+			}
+		}
+		if apiKey == "" {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "未提供 API Key"})
+			return
+		}
+		if model == "" {
+			model = jev.DefaultModel
+		}
+		proxy := strings.TrimSpace(req.Proxy)
+		if proxy == "" && req.ProfileID != nil {
+			if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
+				proxy = p.Proxy
+			}
+		}
+		testCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		lat, reply, err := (jev.Config{BaseURL: baseURL, APIKey: apiKey, Model: model, Proxy: proxy}).TestConnection(testCtx)
+		if err != nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "latency_ms": lat.Milliseconds(), "model": model, "reply": truncateReply(reply)})
+		return
+	}
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
 	// mirror production: send the SAME thinking params so a provider that rejects the
 	// reasoning_effort/thinking field fails the test too (no false "test ok, run 400").
@@ -1981,6 +2135,9 @@ func (s *Server) validateTaskProfileIDs(ids []int64) error {
 			return fmt.Errorf("LLM 配置 id 无效或重复")
 		}
 		seen[id] = true
+		if p, err := s.m.pg.ProfileByID(id); err == nil && p != nil && p.Format == "jev" {
+			return db.ErrJevProfileJudgeOnly
+		}
 		if _, ok := s.loadProfileConfig(id); !ok {
 			return fmt.Errorf("LLM 配置 #%d 不存在或未设置 API Key", id)
 		}
@@ -3819,6 +3976,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) settingsPayload() map[string]any {
 	on, backend, braveKey, tavilyKey, proxy := s.m.WebSearch()
+	proxyEntries, proxyActiveID, proxySwitchLog := s.m.ProxyPoolSnapshot()
 	pyStored, _, _ := s.m.pg.GetSetting(settingPythonInterp)
 	concOn, concLimit := s.m.ConcurrencyLimit()
 	if concLimit == 0 {
@@ -3841,14 +3999,33 @@ func (s *Server) settingsPayload() map[string]any {
 		"web_search_backend":                   backend,
 		"brave_key_set":                        strings.TrimSpace(braveKey) != "",
 		"tavily_key_set":                       strings.TrimSpace(tavilyKey) != "",
-		"web_search_proxy":                     proxy,             // 独立出口代理(http/https/socks5)，空=直连
-		"global_proxy":                         s.m.GlobalProxy(), // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
-		"show_egress_ip":                       s.m.pg.GetBool(settingShowEgressIP, false),
-		"python_interpreter":                   strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
-		"workers":                              s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
-		"worker_pools":                         s.m.WorkerPools(),           // 非空时按池顺序绑定 worker 会话
-		"task_concurrency_enabled":             concOn,                      // 任务并发上限开关(默认关)
-		"task_concurrency_limit":               concLimit,                   // 同时运行任务上限(开启后默认5)
+		"deepseek_search_key_set":              s.m.deepSeekSearchKey() != "",
+		"web_search_proxy":                     maskSecrets(proxy),             // 独立出口代理(http/https/socks5)，空=直连
+		"global_proxy":                         maskSecrets(s.m.GlobalProxy()), // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"proxy_pool":                           proxyEntries,
+		"proxy_pool_active_id":                 proxyActiveID,
+		"proxy_pool_switch_log":                proxySwitchLog,
+		"proxy_rotate_timed_enabled":           s.m.pg.GetBool(settingProxyRotateTimed, false),
+		"proxy_rotate_interval_seconds":        proxyIntSetting(s.m.pg, settingProxyRotateInterval, defaultProxyRotateInterval),
+		"proxy_rotate_on_failure":              s.m.pg.GetBool(settingProxyRotateFailure, false),
+		"proxy_rotate_strategy": func() string {
+			v, ok, _ := s.m.pg.GetSetting(settingProxyRotateStrategy)
+			if ok && (v == "random" || v == "sequential") {
+				return v
+			}
+			return "sequential"
+		}(),
+		"proxy_health_fail_threshold":         proxyIntSetting(s.m.pg, settingProxyHealthThreshold, defaultProxyHealthThreshold),
+		"proxy_health_cooldown_seconds":       proxyIntSetting(s.m.pg, settingProxyHealthCooldown, defaultProxyHealthCooldown),
+		"proxy_health_check_interval_seconds": proxyIntSetting(s.m.pg, settingProxyHealthInterval, defaultProxyHealthInterval),
+		"proxy_reconnect_max_attempts":        func() int { n, _ := s.proxyReconnectConfig(); return n }(),
+		"proxy_reconnect_interval_seconds":    func() int { _, d := s.proxyReconnectConfig(); return int(d / time.Second) }(),
+		"show_egress_ip":                      s.m.pg.GetBool(settingShowEgressIP, false),
+		"python_interpreter":                  strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
+		"workers":                             s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
+		"worker_pools":                        s.m.WorkerPools(),           // 非空时按池顺序绑定 worker 会话
+		"task_concurrency_enabled":            concOn,                      // 任务并发上限开关(默认关)
+		"task_concurrency_limit":              concLimit,                   // 同时运行任务上限(开启后默认5)
 		// LLM 轮询(故障转移)。默认关；开启后走全局激活配置的 agent 在当前配置不可用时
 		// 自动切到下一个配置。bind_fallback 仅在轮询开启时有意义(默认关)。
 		"llm_pool_enabled":       s.m.LLMPoolEnabled(),
@@ -3923,17 +4100,27 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		LLMRecord           *bool           `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear.
-		WebSearchEnabled *bool         `json:"web_search_enabled"`
-		WebSearchBackend *string       `json:"web_search_backend"`
-		BraveKey         *string       `json:"brave_search_api_key"`
-		TavilyKey        *string       `json:"tavily_search_api_key"`
-		WebSearchProxy   *string       `json:"web_search_proxy"`   // 独立出口代理(http/https/socks5)；null=不改，""=清空
-		GlobalProxy      *string       `json:"global_proxy"`       // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
-		CallbackAddr     *string       `json:"callback_addr"`      // 新建回连/隧道即时读取；空值停用，不修改已有资源
-		ShowEgressIP     *bool         `json:"show_egress_ip"`     // 在顶栏显示直连/全局代理出口 IP；默认关
-		PythonInterp     *string       `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
-		Workers          *int          `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
-		WorkerPools      *[]WorkerPool `json:"worker_pools"`
+		WebSearchEnabled       *bool         `json:"web_search_enabled"`
+		WebSearchBackend       *string       `json:"web_search_backend"`
+		BraveKey               *string       `json:"brave_search_api_key"`
+		TavilyKey              *string       `json:"tavily_search_api_key"`
+		DeepSeekSearchKey      *string       `json:"deepseek_search_api_key"`
+		WebSearchProxy         *string       `json:"web_search_proxy"` // 独立出口代理(http/https/socks5)；null=不改，""=清空
+		GlobalProxy            *string       `json:"global_proxy"`     // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
+		ProxyRotateTimed       *bool         `json:"proxy_rotate_timed_enabled"`
+		ProxyRotateInterval    *int          `json:"proxy_rotate_interval_seconds"`
+		ProxyRotateFailure     *bool         `json:"proxy_rotate_on_failure"`
+		ProxyRotateStrategy    *string       `json:"proxy_rotate_strategy"`
+		ProxyHealthThreshold   *int          `json:"proxy_health_fail_threshold"`
+		ProxyHealthCooldown    *int          `json:"proxy_health_cooldown_seconds"`
+		ProxyHealthInterval    *int          `json:"proxy_health_check_interval_seconds"`
+		ProxyReconnectMax      *int          `json:"proxy_reconnect_max_attempts"`
+		ProxyReconnectInterval *int          `json:"proxy_reconnect_interval_seconds"`
+		ShowEgressIP           *bool         `json:"show_egress_ip"`     // 在顶栏显示直连/全局代理出口 IP；默认关
+		PythonInterp           *string       `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
+		Workers                *int          `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
+		WorkerPools            *[]WorkerPool `json:"worker_pools"`
+		CallbackAddr           *string       `json:"callback_addr"` // New resources read this on demand; clearing does not reconfigure existing resources.
 		// 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
 		ConcurrencyEnabled *bool `json:"task_concurrency_enabled"`
 		ConcurrencyLimit   *int  `json:"task_concurrency_limit"`
@@ -4240,12 +4427,61 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		changed = true
 	}
 	if req.GlobalProxy != nil {
+		globalProxyValue := strings.TrimSpace(*req.GlobalProxy)
+		if strings.Contains(globalProxyValue, "***") || strings.Contains(globalProxyValue, "******") {
+			globalProxyValue = s.m.GlobalProxy()
+		}
+		var proxyGuards map[string]proxyReconnectGuard
+		if globalProxyValue == "" {
+			proxyGuards = s.snapshotProxyReconnectGuards(false)
+		}
 		// Validation failure (bad scheme/host) is a client error, not a 500.
-		if err := s.m.SetGlobalProxy(*req.GlobalProxy); err != nil {
+		if err := s.m.SetGlobalProxy(globalProxyValue); err != nil {
 			writeErr(w, 400, err.Error())
 			return
 		}
-		changed = true // capture-off egress is baked into agents at build time → rebuild
+		if globalProxyValue == "" && (s.m.proxyPool == nil || len(s.m.proxyPoolEntries()) == 0) {
+			s.proxyReconnectSuccessWithGuards(proxyGuards, nil)
+		}
+	}
+	if req.ProxyReconnectMax != nil || req.ProxyReconnectInterval != nil {
+		if err := s.setProxyReconnectSettings(req.ProxyReconnectMax, req.ProxyReconnectInterval); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
+	if req.ProxyRotateTimed != nil || req.ProxyRotateInterval != nil || req.ProxyRotateFailure != nil || req.ProxyRotateStrategy != nil || req.ProxyHealthThreshold != nil || req.ProxyHealthCooldown != nil || req.ProxyHealthInterval != nil {
+		timed, interval, onFailure, strategy := s.m.proxyRotateConfig()
+		threshold, cooldown, healthInterval := s.m.proxyHealthConfig()
+		if req.ProxyRotateTimed != nil {
+			timed = *req.ProxyRotateTimed
+		}
+		if req.ProxyRotateInterval != nil {
+			interval = time.Duration(*req.ProxyRotateInterval) * time.Second
+		}
+		if req.ProxyRotateFailure != nil {
+			onFailure = *req.ProxyRotateFailure
+		}
+		if req.ProxyRotateStrategy != nil {
+			strategy = strings.TrimSpace(*req.ProxyRotateStrategy)
+		}
+		if req.ProxyHealthThreshold != nil {
+			threshold = *req.ProxyHealthThreshold
+		}
+		if req.ProxyHealthCooldown != nil {
+			cooldown = time.Duration(*req.ProxyHealthCooldown) * time.Second
+		}
+		if req.ProxyHealthInterval != nil {
+			healthInterval = time.Duration(*req.ProxyHealthInterval) * time.Second
+		}
+		if err := s.m.SetProxyPoolSettings(timed, int(interval/time.Second), onFailure, strategy, threshold, int(cooldown/time.Second), int(healthInterval/time.Second)); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		select {
+		case s.proxyPoolWake <- struct{}{}:
+		default:
+		}
 	}
 	if req.ShowEgressIP != nil {
 		if err := s.m.pg.SetBool(settingShowEgressIP, *req.ShowEgressIP); err != nil {
@@ -4253,7 +4489,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.WebSearchEnabled != nil || req.WebSearchBackend != nil || req.BraveKey != nil || req.TavilyKey != nil || req.WebSearchProxy != nil {
+	if req.WebSearchEnabled != nil || req.WebSearchBackend != nil || req.BraveKey != nil || req.TavilyKey != nil || req.DeepSeekSearchKey != nil || req.WebSearchProxy != nil {
 		// Fill unspecified fields from current state so a partial PUT doesn't reset them.
 		on, backend, _, _, _ := s.m.WebSearch()
 		if req.WebSearchEnabled != nil {
@@ -4262,10 +4498,25 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		if req.WebSearchBackend != nil {
 			backend = *req.WebSearchBackend
 		}
+		if req.WebSearchProxy != nil && (strings.Contains(*req.WebSearchProxy, "***") || strings.Contains(*req.WebSearchProxy, "******")) {
+			_, _, _, _, savedSearchProxy := s.m.WebSearch()
+			req.WebSearchProxy = &savedSearchProxy
+		}
 		if err := s.m.SetWebSearch(on, backend, req.BraveKey, req.TavilyKey, req.WebSearchProxy); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
+		changed = true
+	}
+	if req.DeepSeekSearchKey != nil {
+		if strings.Contains(*req.DeepSeekSearchKey, "***") {
+			*req.DeepSeekSearchKey = s.m.deepSeekSearchKey()
+		}
+		if err := s.m.setDeepSeekSearchKey(*req.DeepSeekSearchKey); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		s.registerEgressFingerprints()
 		changed = true
 	}
 	if changed {
@@ -4347,10 +4598,11 @@ func (s *Server) reporterBrowserScreenshotIDs(requireEnabled bool) (int64, int64
 // not retype them. Always 200 with {ok, error?, count?, backend?}.
 func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Backend   string `json:"web_search_backend"`
-		Proxy     string `json:"web_search_proxy"`
-		BraveKey  string `json:"brave_search_api_key"`
-		TavilyKey string `json:"tavily_search_api_key"`
+		Backend           string `json:"web_search_backend"`
+		Proxy             string `json:"web_search_proxy"`
+		BraveKey          string `json:"brave_search_api_key"`
+		TavilyKey         string `json:"tavily_search_api_key"`
+		DeepSeekSearchKey string `json:"deepseek_search_api_key"`
 	}
 	// Empty body is fine — fall back entirely to the saved config below.
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
@@ -4373,18 +4625,24 @@ func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.TavilyKey) != "" {
 		tavilyKey = req.TavilyKey
 	}
+	deepSeekKey := s.m.deepSeekSearchKey()
+	if strings.TrimSpace(req.DeepSeekSearchKey) != "" {
+		deepSeekKey = strings.TrimSpace(req.DeepSeekSearchKey)
+	}
 	cfg := actool.WebSearchConfig{Backend: backend, BraveAPIKey: braveKey, TavilyAPIKey: tavilyKey, Proxy: proxy}
 	// Hard cap so a slow/blocked proxy can't hang the request.
 	wall := 30 * time.Second
-	// deepseek 的凭据不在表单里，来自当前激活的 LLM 配置；同时它每次搜索都跑一次
-	// 模型推理，30s 的通用上限偏紧，单独放宽。这里不预判配置能不能用——测这一下
-	// 本来就是给用户自己确认的手段，真跑不通时下面的报错比预判更有信息量。
 	probeQuery := "test"
 	if strings.TrimSpace(backend) == deepSeekWebSearchBackend {
-		cfg.DeepSeekBaseURL, cfg.DeepSeekAPIKey, cfg.DeepSeekModel = s.m.deepSeekSearchCreds()
-		wall = 120 * time.Second
-		// 搜索词由 DeepSeek 端的模型自行决定，"test" 太空泛会让它跳过搜索直接作答。
-		probeQuery = "DeepSeek company official website"
+		ctx, cancel := context.WithTimeout(r.Context(), wall)
+		defer cancel()
+		count, err := agent.DeepSeekSearchProbe(ctx, deepSeekKey, proxy, "DeepSeek company official website", 3)
+		if err != nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error(), "backend": backend})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": count > 0, "count": count, "backend": backend})
+		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), wall)
 	defer cancel()

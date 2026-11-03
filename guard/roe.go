@@ -166,7 +166,7 @@ func roeHosts(toolName string, input []byte, cmd string) []string {
 	if cmd != "" {
 		return ExtractHosts(cmd)
 	}
-	if toolName == "WebFetch" {
+	if toolName == "WebFetch" || toolName == "deepseek_fetch" {
 		var in struct {
 			URL string `json:"url"`
 		}

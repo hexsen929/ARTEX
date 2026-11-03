@@ -93,6 +93,7 @@ async function api(request, response, url) {
   if (endpoint === "/api/auth/status") return json(response, 200, { initialized: true });
   if (endpoint === "/api/settings" && method === "GET") return json(response, 200, { show_egress_ip: false, global_proxy: "" });
   if (endpoint === "/api/update/check") return json(response, 200, { current: "memory-fixture", mode: "binary", os: "darwin", arch: "arm64", repo: "fixture", has_backup: false, has_update: false, comparable: false });
+  if (endpoint === "/api/version") return json(response, 200, { ok: true, service: "fixture", version: "memory-fixture" });
   if (endpoint === "/api/health") return json(response, 200, { ok: true, service: "fixture", version: "memory-fixture" });
   if (endpoint === "/api/tasks") return json(response, 200, { tasks: [], active: "" });
   if (endpoint === "/api/agents") return json(response, 200, { agents: [] });

@@ -45,6 +45,8 @@ import type {
   DeleteTaskResult,
   Edge,
   EgressReport,
+  ProxyPoolEntry,
+  ProxySwitchLog,
   EvidenceBodyPreview,
   ExplorationNodePage,
   ExplorationNodeQuery,
@@ -166,7 +168,35 @@ export async function http<T>(path: string, init?: RequestInit): Promise<T> {
   return httpInner<T>(path, init, false);
 }
 
+function throwIfRequestAborted(signal?: AbortSignal | null): void {
+  if (signal?.aborted) throw signal.reason ?? new DOMException("Request cancelled", "AbortError");
+}
+
+// Refresh is shared across callers. An updater's timeout/unmount must release
+// its own wait without cancelling another page's refresh or replaying a request
+// whose caller has already gone away.
+async function waitForAccessTokenRefresh(signal?: AbortSignal | null): Promise<boolean> {
+  throwIfRequestAborted(signal);
+  const refresh = refreshAccessToken();
+  if (!signal) return refresh;
+  return new Promise<boolean>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason ?? new DOMException("Request cancelled", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    refresh.then(
+      (value) => { cleanup(); resolve(value); },
+      (error) => { cleanup(); reject(error); },
+    );
+    // Covers a synchronous abort while the shared refresh was being obtained.
+    if (signal.aborted) onAbort();
+  });
+}
+
 async function httpInner<T>(path: string, init: RequestInit | undefined, retried: boolean): Promise<T> {
+  throwIfRequestAborted(init?.signal);
   if (MOCK) return mockHandle<T>(init?.method ?? "GET", path, init?.body ?? null);
   const token = getToken();
   const r = await fetch(`/api${path}`, {
@@ -180,9 +210,12 @@ async function httpInner<T>(path: string, init: RequestInit | undefined, retried
   if (r.status === 401) {
     // access token(2h)过期:先凭 HttpOnly refresh cookie 换新 token 重试一次;
     // /auth/* 自身(含 refresh)的 401 不再递归,直接算登出(F6)。
-    if (!retried && !path.startsWith("/auth/") && (await refreshAccessToken())) {
-      return httpInner<T>(path, init, true);
+    if (!retried && !path.startsWith("/auth/")) {
+      const refreshed = await waitForAccessTokenRefresh(init?.signal);
+      throwIfRequestAborted(init?.signal);
+      if (refreshed) return httpInner<T>(path, init, true);
     }
+    throwIfRequestAborted(init?.signal);
     if (typeof window !== "undefined") {
       auth.clearToken();
       window.location.href = "/login";
@@ -276,6 +309,13 @@ const del = <T>(p: string, body?: unknown) =>
 
 // Go serializes nil slices as JSON null — coerce to [].
 const arr = <T>(x: T[] | null | undefined): T[] => x ?? [];
+
+// Empty Go slices can arrive as null from older servers. Keep proxy-pool
+// consumers safe across initial load, import, and health-check refreshes.
+function normalizeProxyPool<T extends { entries: ProxyPoolEntry[]; switch_log: ProxySwitchLog[] }>(pool: T): T {
+  return { ...pool, entries: arr(pool.entries), switch_log: arr(pool.switch_log) };
+}
+
 const tq = (task?: string, sep: "?" | "&" = "?") => (task ? `${sep}task=${encodeURIComponent(task)}` : "");
 // 内网作战页四个列表的 ?task_id= 过滤参数(空 = 全局视图)。
 const taskQuery = (taskId?: string) => (taskId ? `?task_id=${encodeURIComponent(taskId)}` : "");
@@ -339,8 +379,9 @@ function schedulePayload(input: ScheduleInput) {
 }
 
 export const api = {
-  // 后端应用版本号（release 时由 ldflags 注入，默认 "dev"）。
-  health: () => get<{ ok: boolean; service: string; version: string }>("/health"),
+  // 健康检查受可选 Basic Auth 保护且不返回应用名称或版本；版本号仅向已登录管理员提供。
+  health: () => get<{ ok: boolean }>("/health"),
+  version: (signal?: AbortSignal) => http<{ version: string }>("/version", { cache: "no-store", signal }),
   systemMetrics: () => get<SystemMetrics>("/system/metrics"),
 
   // ---- auth ----
@@ -1030,11 +1071,42 @@ export const api = {
     web_search_proxy?: string;
     brave_search_api_key?: string;
     tavily_search_api_key?: string;
+    deepseek_search_api_key?: string;
   }) => post<{ ok: boolean; error?: string; count?: number; backend?: string }>(`/settings/web-search/test`, patch),
 
   // global_proxy 传空 = 测直连；probe_url 可覆盖默认探测地址（隔离网用）。
-  testEgressProxy: (patch: { global_proxy?: string; probe_url?: string }) =>
+  testEgressProxy: (patch: { global_proxy?: string; probe_url?: string; resume?: boolean }) =>
     post<EgressReport>(`/settings/proxy/test`, patch),
+  proxyPool: () =>
+    get<{ entries: ProxyPoolEntry[]; active_id: string; active_proxy: string; switch_log: ProxySwitchLog[] }>(
+      `/settings/proxy-pool`,
+    ).then(normalizeProxyPool),
+  importProxyPool: (payload: Record<string, unknown>) =>
+    post<{
+      entries: ProxyPoolEntry[];
+      active_id: string;
+      switch_log: ProxySwitchLog[];
+      errors: Array<{ line: number; input: string; error: string }>;
+    }>(`/settings/proxy-pool/import`, payload).then((r) => ({ ...normalizeProxyPool(r), errors: arr(r.errors) })),
+  updateProxyPool: (id: string, payload: Partial<Pick<ProxyPoolEntry, "url" | "name" | "remark" | "enabled">>) =>
+    put<{ entry: ProxyPoolEntry }>(`/settings/proxy-pool/${encodeURIComponent(id)}`, payload),
+  deleteProxyPool: (id: string) => del<{ ok: boolean }>(`/settings/proxy-pool/${encodeURIComponent(id)}`),
+  testProxyPoolEntry: (id: string) =>
+    post<{ ok: boolean; result?: EgressReport["checks"][number]["result"] }>(
+      `/settings/proxy-pool/${encodeURIComponent(id)}/test`,
+      {},
+    ),
+  testAllProxyPool: () =>
+    post<{ entries: ProxyPoolEntry[]; active_id: string; switch_log: ProxySwitchLog[] }>(
+      `/settings/proxy-pool/test-all`,
+      {},
+    ).then(normalizeProxyPool),
+  activateProxyPool: (id: string) =>
+    post<{ ok: boolean; active_id: string; active_proxy: string }>(
+      `/settings/proxy-pool/${encodeURIComponent(id)}/activate`,
+      {},
+    ),
+  testTaskProxy: (taskID: string) => post<{ ok: boolean; error?: string }>(`/tasks/${taskID}/proxy/test`, {}),
 
   // ---- 漏洞 IM 推送 ----
   // 渠道是多实例资源（同一类型可配多个机器人、各有过滤规则），因此独立成组，

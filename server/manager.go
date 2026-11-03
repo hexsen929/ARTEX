@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
@@ -32,19 +33,26 @@ import (
 // sharing the process-wide asset store. ID is the PG task id as a string; ExpID
 // is the exploration the task owns.
 type Task struct {
-	ID           string `json:"id"`
-	ExpID        int64  `json:"exploration_id"`
-	Remark       string `json:"remark"`
-	Name         string `json:"name"` // 可选任务名称;空=未命名
-	CategoryID   *int64 `json:"category_id,omitempty"`
-	CategoryName string `json:"category_name,omitempty"`
-	PinnedAt     int64  `json:"pinned_at,omitempty"`
-	Description  string `json:"description"`
-	Goal         string `json:"goal"`
-	CreatedAt    int64  `json:"created_at"`
-	CompletedAt  int64  `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
-	Paused       bool   `json:"paused"`
-	Queued       bool   `json:"queued"` // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
+	ID                  string `json:"id"`
+	ExpID               int64  `json:"exploration_id"`
+	Remark              string `json:"remark"`
+	Name                string `json:"name"` // 可选任务名称;空=未命名
+	CategoryID          *int64 `json:"category_id,omitempty"`
+	CategoryName        string `json:"category_name,omitempty"`
+	PinnedAt            int64  `json:"pinned_at,omitempty"`
+	Description         string `json:"description"`
+	Goal                string `json:"goal"`
+	CreatedAt           int64  `json:"created_at"`
+	CompletedAt         int64  `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
+	Paused              bool   `json:"paused"`
+	PauseReason         string `json:"pause_reason,omitempty"`
+	ReconnectAttempt    int    `json:"-"`
+	ReconnectMax        int    `json:"-"`
+	ReconnectNextAt     int64  `json:"-"`
+	ReconnectExhausted  bool   `json:"-"`
+	ReconnectLastError  string `json:"-"`
+	ReconnectGeneration uint64 `json:"-"`
+	Queued              bool   `json:"queued"` // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
 	// QueuedAt is an internal Unix-nanosecond ordering key. It is deliberately
 	// finer than CreatedAt so several tasks enqueued in the same second retain
 	// their real FIFO order.
@@ -92,6 +100,13 @@ type taskLifecycleState struct {
 	PinnedAt            int64
 	Status              string
 	Paused              bool
+	PauseReason         string
+	ReconnectAttempt    int
+	ReconnectMax        int
+	ReconnectNextAt     int64
+	ReconnectExhausted  bool
+	ReconnectLastError  string
+	ReconnectGeneration uint64
 	Queued              bool
 	QueuedAt            int64
 	QueueMode           string
@@ -117,11 +132,13 @@ func (t *Task) lifecycleSnapshot() taskLifecycleState {
 
 func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 	return taskLifecycleState{
-		Name:                t.Name,
-		Remark:              t.Remark,
-		PinnedAt:            t.PinnedAt,
-		Status:              t.Status,
-		Paused:              t.Paused,
+		Name:             t.Name,
+		Remark:           t.Remark,
+		PinnedAt:         t.PinnedAt,
+		Status:           t.Status,
+		Paused:           t.Paused,
+		PauseReason:      t.PauseReason,
+		ReconnectAttempt: t.ReconnectAttempt, ReconnectMax: t.ReconnectMax, ReconnectNextAt: t.ReconnectNextAt, ReconnectExhausted: t.ReconnectExhausted, ReconnectLastError: t.ReconnectLastError, ReconnectGeneration: t.ReconnectGeneration,
 		Queued:              t.Queued,
 		QueuedAt:            t.QueuedAt,
 		QueueMode:           t.QueueMode,
@@ -149,6 +166,13 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.PinnedAt = state.PinnedAt
 	t.Status = state.Status
 	t.Paused = state.Paused
+	t.PauseReason = state.PauseReason
+	t.ReconnectAttempt = state.ReconnectAttempt
+	t.ReconnectMax = state.ReconnectMax
+	t.ReconnectNextAt = state.ReconnectNextAt
+	t.ReconnectExhausted = state.ReconnectExhausted
+	t.ReconnectLastError = state.ReconnectLastError
+	t.ReconnectGeneration = state.ReconnectGeneration
 	t.Queued = state.Queued
 	t.QueuedAt = state.QueuedAt
 	t.QueueMode = state.QueueMode
@@ -250,6 +274,7 @@ type Manager struct {
 	// their in-memory mirrors. lifecycleMu makes snapshots race-free, but without
 	// this outer write lock an older request could commit first and publish last.
 	taskStateMu sync.Mutex
+	controlMu   *sync.Mutex // Server's admission/task-control mutex, when attached.
 	mu          sync.RWMutex
 	tasks       map[string]*Task
 	active      string
@@ -266,7 +291,10 @@ type Manager struct {
 	// (http/https/socks5, optional user:pass). Empty = direct. When traffic
 	// capture is on it becomes the MITM's upstream; when capture is off it is
 	// injected into agent bash env / WebFetch directly. See ProxyAddr.
-	globalProxy string
+	globalProxy         string
+	proxyPool           *proxyPoolState
+	forwardProxy        *dynamicForwardProxy
+	proxyPoolConfigured atomic.Bool
 	// taskProxy 期 3b 按任务 MITM 实例管理器(见 taskproxy.go);nil = 关闭
 	// (ARTEX_TASK_PROXY=off 或端口池非法)。worker 流量经任务实例 → 任务隧道。
 	taskProxy        *taskProxyManager
@@ -275,6 +303,10 @@ type Manager struct {
 	closeOnce        sync.Once
 	closeErr         error
 }
+
+// SetTaskControlMutex lets lifecycle operations that originate in Manager
+// participate in the Server's admission/task-control critical section.
+func (m *Manager) SetTaskControlMutex(mu *sync.Mutex) { m.controlMu = mu }
 
 // Settings keys the UI toggles at runtime.
 const (
@@ -287,6 +319,7 @@ const (
 	settingWebSearchBackend    = "web_search_backend"
 	settingBraveKey            = "brave_search_api_key"
 	settingTavilyKey           = "tavily_search_api_key"
+	settingDeepSeekSearchKey   = "deepseek_search_api_key"
 	settingWebSearchProxy      = "web_search_proxy"
 	// settingGlobalProxy is the global egress proxy for all target traffic
 	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
@@ -318,8 +351,7 @@ const (
 	settingNoaCompaction = "noa_compaction"
 	// defaultWebSearchBackend is used when web search is on but no backend was picked.
 	defaultWebSearchBackend = "ddgs"
-	// deepSeekWebSearchBackend borrows the active LLM profile instead of its own
-	// key, so it only works on an anthropic-format profile pointed at DeepSeek.
+	// deepSeekWebSearchBackend calls DeepSeek's independent web-search API.
 	deepSeekWebSearchBackend = "deepseek"
 	// defaultWorkers is the concurrent work-agent count when the setting is unset.
 	defaultWorkers = 3
@@ -564,6 +596,9 @@ func (m *Manager) SetWorkerPools(pools []WorkerPool, legacyWorkers ...int) error
 			if profile == nil {
 				return fmt.Errorf("worker_pools 中 profile_id %d 不存在", pool.ProfileID)
 			}
+			if profile.Format == "jev" {
+				return pgdb.ErrJevProfileJudgeOnly
+			}
 		}
 	}
 	b, err := json.Marshal(pools)
@@ -706,8 +741,11 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		log.Printf("[llmusage] create table: %v", err)
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg), egress: guard.NewEgressGuard()}
-	m.startLLMRecordsRetention()
-	m.startPortAudit() // F13 台账外监听端口审计(仅 Linux;只观测不处置)
+	if fp, ferr := newDynamicForwardProxy(func() string { return m.GlobalProxy() }); ferr == nil {
+		m.forwardProxy = fp
+	} else {
+		log.Printf("[proxy] local forwarder disabled: %v", ferr)
+	}
 	if proxyAddr != "" {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
 		if err != nil {
@@ -765,8 +803,9 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	// Global egress proxy (default: direct). When capture is on, feed it to the
 	// MITM as its upstream so recorded traffic exits through it; when capture is
 	// off, ProxyAddr hands it to agents directly (bash env / WebFetch).
-	if v, ok, _ := pg.GetSetting(settingGlobalProxy); ok {
-		m.globalProxy = strings.TrimSpace(v)
+	if err := m.initProxyPool(); err != nil {
+		_ = m.Close()
+		return nil, err
 	}
 	if m.traffic != nil {
 		if err := m.traffic.SetUpstreamProxy(m.globalProxy); err != nil {
@@ -784,6 +823,8 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 			m.taskProxy = newTaskProxyManager(dir, pgdb.NewTunnelStore(pg), m.GlobalProxy, pmin, pmax, m.Traffic)
 		}
 	}
+	m.startLLMRecordsRetention()
+	m.startPortAudit() // F13 台账外监听端口审计(仅 Linux;只观测不处置)
 	// Reconcile the seeded browser MCP with the persisted capture state, so a
 	// restart with capture already on keeps Playwright routed through the proxy.
 	m.syncBrowserMCPProxy()
@@ -910,26 +951,23 @@ func (m *Manager) WebSearchOpts() agent.WebSearchOpts {
 	if on && backend == "tavily" && strings.TrimSpace(tavilyKey) == "" {
 		on = false
 	}
+	if on && backend == deepSeekWebSearchBackend && m.deepSeekSearchKey() == "" {
+		on = false
+	}
 	o := agent.WebSearchOpts{Enabled: on, Backend: backend, BraveKey: braveKey, TavilyKey: tavilyKey, Proxy: proxy}
 	if backend == deepSeekWebSearchBackend {
-		o.DeepSeekBaseURL, o.DeepSeekAPIKey, o.DeepSeekModel = m.deepSeekSearchCreds()
+		o.DeepSeekAPIKey = m.deepSeekSearchKey()
 	}
 	return o
 }
 
-// deepSeekSearchCreds resolves the credentials the "deepseek" search backend
-// borrows from the active LLM profile (it has no key of its own). Whether that
-// profile can actually drive server-side search — DeepSeek exposes it only on
-// the Anthropic-format endpoint — is deliberately NOT validated here: the UI
-// states the requirement and the user decides. A profile that can't serve it
-// simply fails at search time (or at the settings page's 测试 button), which is
-// the same feedback every other backend gives for a bad key.
-func (m *Manager) deepSeekSearchCreds() (baseURL, apiKey, model string) {
-	p, err := m.pg.ActiveProfile()
-	if err != nil || p == nil {
-		return "", "", ""
-	}
-	return p.BaseURL, p.APIKey, p.Model
+func (m *Manager) deepSeekSearchKey() string {
+	key, _, _ := m.pg.GetSetting(settingDeepSeekSearchKey)
+	return strings.TrimSpace(key)
+}
+
+func (m *Manager) setDeepSeekSearchKey(key string) error {
+	return m.pg.SetSetting(settingDeepSeekSearchKey, strings.TrimSpace(key))
 }
 
 // SetWebSearch persists and applies the web-search settings. braveKey, tavilyKey, and
@@ -1252,8 +1290,14 @@ func (m *Manager) ProxyAddr() string {
 		return m.traffic.ProxyAddr()
 	}
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.globalProxy
+	global := m.globalProxy
+	m.mu.RUnlock()
+	if (global != "" || m.proxyPoolConfigured.Load()) && m.forwardProxy != nil {
+		return m.forwardProxy.Addr()
+	}
+	// This is a runtime address, not a public API field. Replacing userinfo
+	// with a display mask would break authentication when no forwarder exists.
+	return global
 }
 
 // ProxyCACert returns the CA cert path agents must trust to verify HTTPS through
@@ -1308,7 +1352,12 @@ func (m *Manager) TaskProxyForTaskChecked(ctx context.Context, taskID int64) (ad
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if !m.TrafficEnabled() {
-		upstream, err := m.taskProxy.ResolveUpstreamChecked(ctx, taskID)
+		upstream, global, err := m.resolveTaskUpstreamChecked(ctx, taskID)
+		if err == nil && global && m.forwardProxy != nil && (upstream != "" || m.proxyPoolConfigured.Load()) {
+			// Keep existing runs on the stable pool route. A task-selected tunnel
+			// is returned unchanged and must never be replaced by this forwarder.
+			upstream = m.forwardProxy.Addr()
+		}
 		return upstream, "", err
 	}
 	return m.taskProxy.ForTaskChecked(ctx, taskID)
@@ -1342,7 +1391,29 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw != "" {
 		if _, err := traffic.ValidateProxyURL(raw); err != nil {
-			return err
+			return fmt.Errorf("%s", maskSecrets(err.Error()))
+		}
+	}
+	if m.proxyPool != nil {
+		m.proxyPool.mu.Lock()
+		managed := len(m.proxyPool.entries) > 0
+		if !managed && raw != "" {
+			rollback := m.proxyPoolRollbackLocked()
+			m.proxyPool.entries = []proxyPoolEntry{{ProxyPoolEntry: ProxyPoolEntry{ID: "proxy-legacy", URL: maskSecrets(raw), Enabled: true, Health: "healthy"}, RawURL: raw}}
+			m.proxyPool.active = "proxy-legacy"
+			if err := m.applyActiveProxyLocked("proxy-legacy", "manual"); err != nil {
+				rollback()
+				m.proxyPool.mu.Unlock()
+				return err
+			}
+			m.proxyPool.mu.Unlock()
+			return nil
+		}
+		m.proxyPool.mu.Unlock()
+		if managed {
+			// The legacy field is a read-only echo once a pool exists. Pool API
+			// operations are the sole authority for health, enablement and switching.
+			return nil
 		}
 	}
 	if err := m.pg.SetSetting(settingGlobalProxy, raw); err != nil {
@@ -1373,6 +1444,7 @@ func (m *Manager) Close() error {
 		m.closing = true
 		m.trafficOn = false
 		proxies, recorder, pg := m.taskProxy, m.traffic, m.pg
+		forwarder := m.forwardProxy
 		taskIDs := make([]string, 0, len(m.tasks))
 		for id := range m.tasks {
 			taskIDs = append(taskIDs, id)
@@ -1391,6 +1463,9 @@ func (m *Manager) Close() error {
 		}
 		// Never hold the global lock while proxy teardown waits for a refresh
 		// that may call GlobalProxy() under the task-proxy lock.
+		if forwarder != nil {
+			errs = append(errs, forwarder.Close())
+		}
 		if proxies != nil {
 			proxies.Close()
 		}
@@ -1463,7 +1538,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		Remark:     pt.Remark,
 		CategoryID: cloneInt64Ptr(pt.CategoryID), CategoryName: pt.CategoryName,
 		PinnedAt:    unixOrZero(pt.PinnedAt),
-		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, Queued: pt.Queued,
+		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, PauseReason: pt.PauseReason, Queued: pt.Queued,
 		QueuedAt: unixNanoOrZero(pt.QueuedAt), QueueMode: pt.QueueMode,
 		CompletedAt: unixOrZero(pt.CompletedAt), Status: pt.Status, ParentRef: pt.ParentRef,
 		LLMProfileID:  pt.LLMProfileID,
@@ -1781,12 +1856,16 @@ func (m *Manager) SetTaskPaused(id string, paused bool) error {
 // admission keeps its FIFO timestamp; a task that was explicitly paused and is
 // now re-queued receives a fresh tail position.
 func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued bool, mode string, preservePosition bool) error {
-	return m.applyTaskAdmission(id, expectedStatus, status, queued, mode, preservePosition, nil)
+	return m.applyTaskAdmissionWithSchedule(id, expectedStatus, status, queued, mode, preservePosition, nil, false)
 }
 
 // Manual task control records its schedule override in the admission commit, so
 // failed resumes cannot bypass a calendar and FIFO promotion preserves it.
 func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued bool, mode string, preservePosition bool, manualUntil *time.Time) error {
+	return m.applyTaskAdmissionWithSchedule(id, expectedStatus, status, queued, mode, preservePosition, manualUntil, false)
+}
+
+func (m *Manager) applyTaskAdmissionWithSchedule(id, expectedStatus, status string, queued bool, mode string, preservePosition bool, manualUntil *time.Time, preserveSchedule bool) error {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
@@ -1810,8 +1889,9 @@ func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued b
 	        WHEN $2 IN ('done','failed','timeout') THEN COALESCE(completed_at, now())
 	        ELSE NULL
 	    END,
-	    paused=false, schedule_paused=false,
-	    schedule_manual_until=COALESCE($7::timestamptz, schedule_manual_until),
+	    paused=false, pause_reason='',
+	    schedule_paused=CASE WHEN $8 THEN schedule_paused ELSE false END,
+	    schedule_manual_until=CASE WHEN $8 THEN schedule_manual_until ELSE COALESCE($7::timestamptz, schedule_manual_until) END,
 	    queued=$3,
 	    queued_at=CASE
 	        WHEN NOT $3 THEN NULL
@@ -1834,7 +1914,7 @@ func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued b
 	    ,active_run_seconds=active_run_seconds + CASE WHEN ($3 OR $2 IN ('done','failed','timeout')) AND run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END
 	    ,run_segment_started_at=CASE WHEN $3 OR $2 IN ('done','failed','timeout') THEN NULL ELSE run_segment_started_at END
 	WHERE id=$1 AND deleted_at IS NULL AND status=$6
-	RETURNING queued_at, queue_mode, completed_at, first_run_at, deadline_at, active_run_seconds, run_segment_started_at`, n, status, queued, mode, preservePosition, expectedStatus, manualUntil).
+	RETURNING queued_at, queue_mode, completed_at, first_run_at, deadline_at, active_run_seconds, run_segment_started_at`, n, status, queued, mode, preservePosition, expectedStatus, manualUntil, preserveSchedule).
 		Scan(&queuedAt, &committedMode, &completedAt, &firstRunAt, &deadlineAt, &activeRunSeconds, &segmentStartedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("task %s lifecycle changed before admission (expected status %q)", id, expectedStatus)
@@ -1848,6 +1928,7 @@ func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued b
 		t.updateLifecycle(func(state *taskLifecycleState) {
 			state.Status = status
 			state.Paused = false
+			state.PauseReason = ""
 			state.Queued = queued
 			state.QueueMode = committedMode
 			state.QueuedAt = 0
@@ -1871,6 +1952,11 @@ func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued b
 			if segmentStartedAt.Valid {
 				state.RunSegmentStartedAt = segmentStartedAt.Time.Unix()
 			}
+			state.ReconnectAttempt = 0
+			state.ReconnectMax = 0
+			state.ReconnectNextAt = 0
+			state.ReconnectExhausted = false
+			state.ReconnectLastError = ""
 		})
 	}
 	m.mu.Unlock()
@@ -1884,6 +1970,12 @@ func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued b
 func (m *Manager) ApplyTaskPause(id string) error { return m.ApplyTaskPauseOrigin(id, false) }
 
 func (m *Manager) ApplyTaskPauseOrigin(id string, scheduled bool) error {
+	return m.ApplyTaskPauseOriginReason(id, map[bool]string{true: "paused_by_schedule", false: "paused_by_user"}[scheduled], scheduled)
+}
+
+// ApplyTaskPauseOriginReason persists a pause cause and keeps it on the live handle.
+// reason is a stable API value such as user, schedule, orchestrator, or proxy.
+func (m *Manager) ApplyTaskPauseOriginReason(id, reason string, scheduled bool) error {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
@@ -1894,12 +1986,12 @@ func (m *Manager) ApplyTaskPauseOrigin(id string, scheduled bool) error {
 	var activeRunSeconds int64
 	var segmentStartedAt sql.NullTime
 	err = m.pg.QueryRow(`UPDATE tasks
-		SET paused=true, queued=false, queued_at=NULL, schedule_paused=$2, schedule_manual_until=NULL,
+		SET paused=true, pause_reason=$3, queued=false, queued_at=NULL, schedule_paused=$2, schedule_manual_until=NULL,
 		    active_run_seconds=active_run_seconds + CASE WHEN run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END,
 		    run_segment_started_at=NULL
 		WHERE id=$1 AND deleted_at IS NULL AND paused=false
 		  AND status NOT IN ('done','failed','timeout')
-		RETURNING COALESCE(queue_mode,''), active_run_seconds, run_segment_started_at`, n, scheduled).Scan(&mode, &activeRunSeconds, &segmentStartedAt)
+		RETURNING COALESCE(queue_mode,''), active_run_seconds, run_segment_started_at`, n, scheduled, reason).Scan(&mode, &activeRunSeconds, &segmentStartedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("task %s is unavailable for pause", id)
 	}
@@ -1910,6 +2002,12 @@ func (m *Manager) ApplyTaskPauseOrigin(id string, scheduled bool) error {
 	if t := m.tasks[id]; t != nil {
 		t.updateLifecycle(func(state *taskLifecycleState) {
 			state.Paused = true
+			state.PauseReason = reason
+			state.ReconnectAttempt = 0
+			state.ReconnectMax = 0
+			state.ReconnectNextAt = 0
+			state.ReconnectExhausted = false
+			state.ReconnectLastError = ""
 			state.Queued = false
 			state.QueuedAt = 0
 			state.QueueMode = mode
@@ -1921,6 +2019,110 @@ func (m *Manager) ApplyTaskPauseOrigin(id string, scheduled bool) error {
 		})
 	}
 	m.mu.Unlock()
+	return nil
+}
+
+// ApplyProxyPause atomically pauses a running task and marks it eligible for
+// reconnect auto-resume. Already-paused tasks retain their original reason.
+func (m *Manager) ApplyProxyPause(id string) error {
+	_, err := m.ApplyProxyPauseWithCallback(id, nil)
+	return err
+}
+
+// ApplyProxyPauseWithCallback is the locked proxy-pause transition. When the
+// task actually changes from running to paused, callback runs while the
+// Server's task-control mutex is still held, after the DB and live lifecycle
+// state have committed. This lets callers install the Engine barrier before a
+// concurrent user/orchestrator pause can observe the new paused state.
+func (m *Manager) ApplyProxyPauseWithCallback(id string, callback func()) (transitioned bool, err error) {
+	if m.controlMu != nil {
+		m.controlMu.Lock()
+		defer m.controlMu.Unlock()
+	}
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return false, err
+	}
+	var mode string
+	var active int64
+	var started sql.NullTime
+	err = m.pg.QueryRow(`UPDATE tasks SET paused=true, pause_reason='paused_by_proxy', queued=false, queued_at=NULL,
+ active_run_seconds=active_run_seconds + CASE WHEN run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END,
+ run_segment_started_at=NULL WHERE id=$1 AND deleted_at IS NULL AND paused=false AND status NOT IN ('done','failed','timeout')
+ RETURNING COALESCE(queue_mode,''), active_run_seconds, run_segment_started_at`, n).Scan(&mode, &active, &started)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	m.mu.RLock()
+	t := m.tasks[id]
+	m.mu.RUnlock()
+	if t != nil {
+		t.updateLifecycle(func(s *taskLifecycleState) {
+			s.Paused = true
+			s.PauseReason = "paused_by_proxy"
+			s.Queued = false
+			s.QueuedAt = 0
+			s.QueueMode = mode
+			s.ActiveRunSeconds = active
+			s.RunSegmentStartedAt = 0
+		})
+	}
+	if callback != nil {
+		callback()
+	}
+	return true, nil
+}
+
+// ClearPauseReason removes auto-resume eligibility without changing lifecycle.
+func (m *Manager) ClearPauseReason(id string) error {
+	if _, err := m.pg.Exec(`UPDATE tasks SET pause_reason='' WHERE id=$1 AND pause_reason='paused_by_proxy'`, id); err != nil {
+		return err
+	}
+	m.mu.RLock()
+	t := m.tasks[id]
+	m.mu.RUnlock()
+	if t != nil && t.lifecycleSnapshot().PauseReason == "paused_by_proxy" {
+		t.updateLifecycle(func(s *taskLifecycleState) {
+			s.PauseReason = ""
+			s.ReconnectAttempt, s.ReconnectMax, s.ReconnectNextAt = 0, 0, 0
+			s.ReconnectExhausted, s.ReconnectLastError = false, ""
+		})
+	}
+	return nil
+}
+
+// ConvertProxyPauseToSchedule records that a calendar window ended while a
+// task was waiting for proxy recovery. It preserves the Engine pause barrier
+// and removes proxy auto-resume eligibility until the next window.
+func (m *Manager) ConvertProxyPauseToSchedule(id string) error {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return err
+	}
+	res, err := m.pg.Exec(`UPDATE tasks SET pause_reason='paused_by_schedule', schedule_paused=true WHERE id=$1 AND paused=true AND pause_reason='paused_by_proxy' AND status NOT IN ('done','failed','timeout')`, n)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return nil
+	}
+	m.mu.RLock()
+	t := m.tasks[id]
+	m.mu.RUnlock()
+	if t != nil {
+		t.updateLifecycle(func(v *taskLifecycleState) {
+			v.PauseReason = "paused_by_schedule"
+			v.ReconnectAttempt, v.ReconnectMax, v.ReconnectNextAt = 0, 0, 0
+			v.ReconnectExhausted, v.ReconnectLastError = false, ""
+		})
+	}
 	return nil
 }
 
@@ -2142,6 +2344,10 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 			state.RunSegmentStartedAt = unixOrZero(started)
 			if pgdb.IsTerminal(status) {
 				state.RunSegmentStartedAt = 0
+				state.Paused = false
+				state.PauseReason = ""
+				state.ReconnectAttempt, state.ReconnectMax, state.ReconnectNextAt = 0, 0, 0
+				state.ReconnectExhausted, state.ReconnectLastError = false, ""
 				if state.CompletedAt == 0 {
 					state.CompletedAt = time.Now().Unix()
 				}
@@ -2178,6 +2384,10 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 			state.RunSegmentStartedAt = unixOrZero(started)
 			if pgdb.IsTerminal(status) {
 				state.RunSegmentStartedAt = 0
+				state.Paused = false
+				state.PauseReason = ""
+				state.ReconnectAttempt, state.ReconnectMax, state.ReconnectNextAt = 0, 0, 0
+				state.ReconnectExhausted, state.ReconnectLastError = false, ""
 				if state.CompletedAt == 0 {
 					state.CompletedAt = time.Now().Unix()
 				}

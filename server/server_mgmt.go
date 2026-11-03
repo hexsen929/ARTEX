@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -25,6 +24,8 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/intercept/jev"
+	"github.com/Autumn-27/artex/llmhttp"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/skill"
 )
@@ -101,7 +102,14 @@ func (s *Server) beginTaskDelete(taskID string) bool {
 	if s.engine.IsDeleting(taskID) {
 		return false
 	}
-	return s.engine.BeginDelete(taskID)
+	ok := s.engine.BeginDelete(taskID)
+	if ok {
+		// A user delete/archive action is an explicit override of proxy recovery.
+		if s.m != nil && s.m.pg != nil {
+			_ = s.m.ClearPauseReason(taskID)
+		}
+	}
+	return ok
 }
 
 // abortTaskDelete restores the execution barrier from the committed task row,
@@ -425,6 +433,10 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if err := pg.SetAgentLLMProfile(a.Key, id); err != nil {
+			if errors.Is(err, db.ErrJevProfileJudgeOnly) {
+				writeErr(w, 400, err.Error())
+				return
+			}
 			writeErr(w, 500, err.Error())
 			return
 		}
@@ -549,6 +561,9 @@ func (s *Server) pgGetAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	llmProfiles := make([]map[string]any, 0, len(profs))
 	for _, p := range profs {
+		if p.Format == "jev" {
+			continue
+		}
 		llmProfiles = append(llmProfiles, map[string]any{
 			"id": p.ID, "name": p.Name, "model": p.Model, "is_default": p.IsDefault,
 		})
@@ -1958,6 +1973,10 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := pg.SaveProfile(&p)
 	if err != nil {
+		if errors.Is(err, db.ErrJevProfileJudgeOnly) {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -2070,6 +2089,14 @@ func (s *Server) pgActivateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := pg.SetActiveProfile(body.ID); err != nil {
+		if errors.Is(err, db.ErrJevProfileJudgeOnly) {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		if errors.Is(err, db.ErrLLMProfileNotFound) {
+			writeErr(w, 404, "LLM 配置不存在")
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -2130,6 +2157,7 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	provider := strings.TrimSpace(req.Provider)
 	// Resolve API key: form input > profile stored key.
 	apiKey := strings.TrimSpace(req.APIKey)
 	if req.ProfileID != nil && (apiKey == "" || req.Context1M == nil || req.UserAgent == nil) {
@@ -2150,8 +2178,28 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if provider == "jev" {
+		baseURL, proxy := strings.TrimSpace(req.BaseURL), strings.TrimSpace(req.Proxy)
+		if req.ProfileID != nil {
+			if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
+				if baseURL == "" {
+					baseURL = p.BaseURL
+				}
+				if proxy == "" {
+					proxy = p.Proxy
+				}
+			}
+		}
+		models, err := (jev.Config{BaseURL: baseURL, APIKey: apiKey, Proxy: proxy}).ListModels(r.Context())
+		if err != nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "models": models})
+		return
+	}
+
 	baseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
-	provider := strings.TrimSpace(req.Provider)
 	userAgent := ""
 	if req.UserAgent != nil {
 		userAgent = agent.ResolveUserAgent(*req.UserAgent)
@@ -2212,14 +2260,13 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build HTTP client with optional proxy.
-	transport := &http.Transport{}
-	if p := strings.TrimSpace(req.Proxy); p != "" {
-		if pu, err := url.Parse(p); err == nil {
-			transport.Proxy = http.ProxyURL(pu)
-		}
+	// Build HTTP client with the same profile proxy semantics as LLM calls.
+	client, err := llmhttp.NewClient(req.Proxy)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	client.Timeout = 30 * time.Second
 
 	// Try each candidate; return the first that yields a non-empty model list.
 	var lastErr string

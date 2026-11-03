@@ -21,6 +21,13 @@ const fixture = () => ({
   browser_screenshot_timestamp_enabled: false,
   agent_traffic_binding: false,
   llm_record: false,
+  deepseek_search_key_set: false,
+  proxy_pool: [], proxy_pool_active_id: "", proxy_pool_switch_log: [],
+  proxy_rotate_timed_enabled: false, proxy_rotate_interval_seconds: 30,
+  proxy_rotate_on_failure: false, proxy_rotate_strategy: "sequential",
+  proxy_health_fail_threshold: 3, proxy_health_cooldown_seconds: 60,
+  proxy_health_check_interval_seconds: 30, proxy_reconnect_max_attempts: 5,
+  proxy_reconnect_interval_seconds: 30,
   web_search_enabled: false,
   web_search_backend: "ddgs",
   web_search_proxy: "",
@@ -150,4 +157,36 @@ test("egress provider suppresses stale results and consumes rejected UI promises
   assert.match(provider, /if \(!snapshot\.enabled\) \{\s*clearProbe\(\)/);
   assert.match(provider, /onClick=\{\(\) => void probeEgress\(\)\.catch/);
   assert.match(provider, /void dismiss\(\)\.catch/);
+});
+
+
+test("proxy snapshots reject unknown routes and malformed policies without inventing defaults", () => {
+  for (const key of ["proxy_pool", "proxy_pool_switch_log"]) {
+    for (const value of [undefined, null, {}]) {
+      assert.throws(() => assertSettingsSnapshot({ ...fixture(), [key]: value }, 50), /代理池/);
+    }
+  }
+  for (const key of ["proxy_rotate_interval_seconds", "proxy_health_fail_threshold", "proxy_health_cooldown_seconds", "proxy_health_check_interval_seconds", "proxy_reconnect_max_attempts", "proxy_reconnect_interval_seconds"]) {
+    for (const value of [undefined, null, "30", 0, -1, 1.5, Number.NaN]) {
+      assert.throws(() => assertSettingsSnapshot({ ...fixture(), [key]: value }, 50), /代理池/);
+    }
+  }
+  for (const strategy of ["", "RANDOM", "unknown"]) {
+    assert.throws(() => assertSettingsSnapshot({ ...fixture(), proxy_rotate_strategy: strategy }, 50), /轮换策略/);
+  }
+  assert.throws(() => assertSettingsSnapshot({ ...fixture(), proxy_pool_active_id: "missing" }, 50), /选择未知/);
+  const entry = { id: "fixture-proxy", url: "http://127.0.0.1:8080", enabled: true };
+  const settings = { ...fixture(), proxy_pool: [entry], proxy_pool_active_id: entry.id };
+  const before = structuredClone(settings);
+  assert.doesNotThrow(() => assertSettingsSnapshot(settings, 50));
+  assert.deepEqual(settings, before);
+  assert.throws(() => assertSettingsSnapshot({ ...settings, proxy_pool: [entry, entry] }, 50), /条目无效/);
+});
+
+test("proxy tests do not silently request task resume and mutations reload the persisted route", () => {
+  const page = readFileSync(new URL("../app/(main)/system/settings/page.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(page, /resume:\s*true/);
+  assert.match(page, /apply\(await api\.settings\(\)\)/);
+  assert.match(page, /fieldset disabled=\{!loaded \|\| proxyPoolBusy\}/);
+  assert.match(page, /api\.activateProxyPool\(id\)/);
 });

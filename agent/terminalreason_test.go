@@ -181,7 +181,7 @@ func TestTerminalTextModelErrorDoesNotInventCauseOrRetryOutcome(t *testing.T) {
 
 func TestAbortCausesAreWellFormed(t *testing.T) {
 	all := []*AbortCause{
-		AbortPausedByUser, AbortPausedByOrchestrator, AbortTaskDeleted, AbortPausedOnReload,
+		AbortPausedByUser, AbortPausedByProxy, AbortPausedByOrchestrator, AbortTaskDeleted, AbortPausedOnReload,
 		AbortGoalMet, AbortSettleDrainTimeout, AbortKilledByPlanner, AbortKilledByMainagent, AbortWorkPausedByUser,
 		AbortWorkCancelledByUser, AbortWorkFinished, AbortPausedRaceGuard,
 		AbortChatStoppedByUser, AbortChatPausedWithTask, AbortChatTurnFinished,

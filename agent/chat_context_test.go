@@ -198,3 +198,24 @@ func TestConcurrentTaskChatsKeepPrivateProxyAndAttribution(t *testing.T) {
 		t.Fatal("concurrent turn changed shared proxy settings")
 	}
 }
+
+func TestChatProxyOverrideBeatsDynamicGlobalProxy(t *testing.T) {
+	chat := NewChatAgent(nil, "fixture", t.TempDir(), nil, 0)
+	chat.SetProxy("http://old-global.invalid:8788", "global-ca")
+	global := "http://new-global.invalid:8788"
+	calls := 0
+	chat.SetProxyProvider(func() string { calls++; return global })
+	if addr, ca := chat.proxyForChat(t.Context()); addr != global || ca != "global-ca" || calls != 1 {
+		t.Fatal("ordinary chat did not resolve current global proxy")
+	}
+	for _, override := range []struct{ addr, ca string }{{"http://task.invalid:21100", "task-ca"}, {"", ""}} {
+		addr, ca := chat.proxyForChat(WithChatProxyOverride(t.Context(), override.addr, override.ca))
+		if addr != override.addr || ca != override.ca || calls != 1 {
+			t.Fatal("global provider overwrote task override or explicit direct")
+		}
+	}
+	global = ""
+	if addr, _ := chat.proxyForChat(t.Context()); addr != "" {
+		t.Fatal("explicit dynamic direct fell back to stale proxy")
+	}
+}

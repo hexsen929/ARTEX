@@ -64,6 +64,11 @@ func (s *sideQuestionState) ensureCheckpointMaps() {
 }
 
 func (s *sideQuestionState) publishCheckpoint(snap sidequestion.Snapshot) {
+	// Synthetic task/finding contexts are rebuilt for each question. They must
+	// never poison real checkpoint ordering, retry state, or deletion barriers.
+	if snap.RunID == 0 {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureCheckpointMaps()

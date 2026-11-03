@@ -123,6 +123,7 @@ func TestWorkerPoolSettingsRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := New(ctx, m, t.TempDir(), t.TempDir(), t.TempDir())
+	defer func() { cancel(); s.Close() }()
 	if _, err := m.pg.Exec("DELETE FROM settings WHERE key=$1", settingWorkerPools); err != nil {
 		t.Fatal(err)
 	}

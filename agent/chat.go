@@ -32,6 +32,7 @@ type ChatAgent struct {
 	tx             *transcript.Store
 	window         int
 	proxyAddr      string
+	proxyAddrFn    func() string
 	proxyCACert    string
 	webSearch      WebSearchOpts
 	guard          *guard.Guard // optional; nil disables intercept hooks for chat
@@ -68,7 +69,8 @@ func (c *ChatAgent) maxTokens() int {
 
 // SetProxy points the chat agent's WebFetch/Bash at the recording proxy plus the
 // CA cert it trusts (empty addr = direct). Kept for parity with the other agents.
-func (c *ChatAgent) SetProxy(addr, caCert string) { c.proxyAddr, c.proxyCACert = addr, caCert }
+func (c *ChatAgent) SetProxy(addr, caCert string)      { c.proxyAddr, c.proxyCACert = addr, caCert }
+func (c *ChatAgent) SetProxyProvider(fn func() string) { c.proxyAddrFn = fn }
 
 type chatProxyOverrideKey struct{}
 type chatProxyOverride struct{ addr, caCert string }
@@ -85,7 +87,11 @@ func (c *ChatAgent) proxyForChat(ctx context.Context) (string, string) {
 	if proxy, ok := ctx.Value(chatProxyOverrideKey{}).(chatProxyOverride); ok {
 		return proxy.addr, proxy.caCert
 	}
-	return c.proxyAddr, c.proxyCACert
+	addr := c.proxyAddr
+	if c.proxyAddrFn != nil {
+		addr = c.proxyAddrFn()
+	}
+	return addr, c.proxyCACert
 }
 
 // SetWebSearch selects the web_search backend for the chat agent (off by default).
@@ -175,7 +181,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	restricted := agentKey == db.CredentialAgentKey || agentKey == "goals" || agentKey == "asset_mapper"
 	// gate the global web-search opts by this agent's own flag.
 	ws := c.webSearch
-	if !webSearch {
+	if !webSearch || restricted {
 		ws.Enabled = false
 	}
 
@@ -197,6 +203,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	runInfo := RunInfoFrom(ctx)
 	runInfo.SessionID = sessionID
 	ctx = WithRunInfo(ctx, runInfo)
+	base = append(base, deepSeekTools(ws)...)
 	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
 	defer cleanup()
 	if def.AssemblyError != nil {
@@ -217,20 +224,17 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		WebFetchCACert:  proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
-		EnableWebSearch:       ws.Enabled && !restricted,
-		WebSearchBackend:      ws.Backend,
-		BraveSearchAPIKey:     ws.BraveKey,
-		TavilySearchAPIKey:    ws.TavilyKey,
-		DeepSeekSearchBaseURL: ws.DeepSeekBaseURL,
-		DeepSeekSearchAPIKey:  ws.DeepSeekAPIKey,
-		DeepSeekSearchModel:   ws.DeepSeekModel,
-		WebSearchProxy:        ws.Proxy,
-		BashEnv:               proxyEnv(proxyAddr, proxyCACert), // 本轮代理，不修改共享 ChatAgent
-		WorkingDir:            sessionWorkDir,
-		MaxTurns:              maxTurns,
-		MaxDuration:           maxDuration,
-		Compaction:            compactionConfig(c.window),
-		Todos:                 actool.NewTodoStore(),
+		EnableWebSearch:    ws.Enabled && !restricted && ws.Backend != "deepseek",
+		WebSearchBackend:   ws.Backend,
+		BraveSearchAPIKey:  ws.BraveKey,
+		TavilySearchAPIKey: ws.TavilyKey,
+		WebSearchProxy:     ws.Proxy,
+		BashEnv:            proxyEnv(proxyAddr, proxyCACert), // 本轮代理，不修改共享 ChatAgent
+		WorkingDir:         sessionWorkDir,
+		MaxTurns:           maxTurns,
+		MaxDuration:        maxDuration,
+		Compaction:         compactionConfig(c.window),
+		Todos:              actool.NewTodoStore(),
 		// large tool output spills to cmd-output/ under the session dir.
 		// 截断上限用 SDK 默认(tool.Capture 的 30000 字符)。
 		ToolOutputDir: filepath.Join(sessionWorkDir, "cmd-output"),

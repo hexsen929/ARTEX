@@ -29,27 +29,17 @@ import (
 // WebSearchOpts is the web-search backend selection the server pushes into each
 // agent (planner/worker/main). Enabled=false leaves the web_search tool off.
 // Backend is "ddgs" (no key), "brave-free" (BraveKey required), "tavily"
-// (TavilyKey required), or "deepseek" (DeepSeek* required, filled from the
-// active LLM profile). It maps directly onto agentcore.Options.
+// (TavilyKey required), or "deepseek" (uses DeepSeek's independent Search API).
 // Proxy is a dedicated egress proxy for the search request (http/https/socks5),
 // independent of the traffic-recording MITM proxy — set it when the search endpoint
 // is only reachable via a VPN/SOCKS proxy. Empty = direct.
-//
-// 注意 deepseek 后端与其它三个的性质不同：DeepSeek 没有可直接调用的搜索接口，
-// 搜索只存在于其 Anthropic 兼容 messages 接口内部(web_search_20250305 server
-// tool)，因此每次搜索会消耗一次模型调用，且搜索请求由 DeepSeek 服务端发出——
-// 不经过本机 Proxy，也不会进流量留痕。
 type WebSearchOpts struct {
-	Enabled   bool
-	Backend   string
-	BraveKey  string
-	TavilyKey string
-	Proxy     string
-	// DeepSeek* 来自当前激活的 LLM 配置(仅 anthropic 格式的 DeepSeek 官方端点)，
-	// 不单独配置，随 LLM 配置切换而变。
-	DeepSeekBaseURL string
-	DeepSeekAPIKey  string
-	DeepSeekModel   string
+	Enabled        bool
+	Backend        string
+	BraveKey       string
+	TavilyKey      string
+	Proxy          string
+	DeepSeekAPIKey string
 }
 
 type Worker struct {
@@ -57,6 +47,7 @@ type Worker struct {
 	prov            llm.Provider
 	model           string
 	workDir         string
+	proxyAddrFn     func() string
 	proxyAddr       string
 	proxyCACert     string // recording proxy's CA cert path (for WebFetch HTTPS verify)
 	// taskProxyFn, when set, resolves the task's own MITM instance (期 3b 按任务
@@ -222,6 +213,8 @@ func (w *Worker) compactionWindow() int {
 // that MITM proxy. Empty addr disables the hint.
 func (w *Worker) SetProxy(addr, caCert string) { w.proxyAddr, w.proxyCACert = addr, caCert }
 
+func (w *Worker) SetProxyProvider(fn func() string) { w.proxyAddrFn = fn }
+
 // SetTaskProxyResolver installs the per-task proxy resolver (期 3b): each run
 // asks it for the task's own MITM instance; empty result falls back to SetProxy.
 func (w *Worker) SetTaskProxyResolver(fn func(taskID int64) (addr, caCert string)) {
@@ -244,7 +237,8 @@ func (w *Worker) resolveTaskProxy(ctx context.Context, taskID int64) (string, st
 			return addr, ca, nil
 		}
 		// An empty successful resolution explicitly means no task-specific proxy.
-		return w.proxyAddr, w.proxyCACert, nil
+		addr, ca = w.defaultProxy()
+		return addr, ca, nil
 	}
 	addr, ca := w.proxyForTask(taskID)
 	return addr, ca, nil
@@ -259,7 +253,15 @@ func (w *Worker) proxyForTask(taskID int64) (addr, caCert string) {
 			return a, c
 		}
 	}
-	return w.proxyAddr, w.proxyCACert
+	return w.defaultProxy()
+}
+
+func (w *Worker) defaultProxy() (string, string) {
+	addr := w.proxyAddr
+	if w.proxyAddrFn != nil {
+		addr = w.proxyAddrFn()
+	}
+	return addr, w.proxyCACert
 }
 
 // SetWebSearch selects the web_search backend for this worker (off by default).
@@ -510,6 +512,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		skillAgent = "worker.intranet"
 	}
 	ctx = WithSkillVisibilityAgent(ctx, "worker", skillAgent)
+	base = append(base, deepSeekTools(w.webSearch)...)
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
 	if def.AssemblyError != nil {
@@ -583,14 +586,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		WebFetchCACert: proxyCA,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立的出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
-		EnableWebSearch:       w.webSearch.Enabled,
-		WebSearchBackend:      w.webSearch.Backend,
-		BraveSearchAPIKey:     w.webSearch.BraveKey,
-		TavilySearchAPIKey:    w.webSearch.TavilyKey,
-		DeepSeekSearchBaseURL: w.webSearch.DeepSeekBaseURL,
-		DeepSeekSearchAPIKey:  w.webSearch.DeepSeekAPIKey,
-		DeepSeekSearchModel:   w.webSearch.DeepSeekModel,
-		WebSearchProxy:        w.webSearch.Proxy,
+		EnableWebSearch:    w.webSearch.Enabled && w.webSearch.Backend != "deepseek",
+		WebSearchBackend:   w.webSearch.Backend,
+		BraveSearchAPIKey:  w.webSearch.BraveKey,
+		TavilySearchAPIKey: w.webSearch.TavilyKey,
+		WebSearchProxy:     w.webSearch.Proxy,
 		// Bash 子命令的 HTTP 默认走记录代理 + 信任其 CA（工具无需 -x/-k）;
 		// 另注入 ARTEX_UA=本任务稳定分配的客户端 UA(批 5 B4,curl/httpx 等统一使用)。
 		BashEnv:    uaEnv(proxyEnv(proxyAddr, proxyCA), w.uaForTask(taskID)),

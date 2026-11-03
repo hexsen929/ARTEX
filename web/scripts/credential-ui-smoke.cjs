@@ -156,11 +156,12 @@ async function readJSON(request) {
 async function serveAPI(request, response, url) {
   const endpoint = url.pathname;
   const method = request.method || "GET";
-  if (endpoint !== "/api/health" && !request.headers.authorization?.startsWith("Bearer ")) {
+  if (!request.headers.authorization?.startsWith("Bearer ")) {
     return sendJSON(response, 401, { error: "Synthetic fixture requires the UI token" });
   }
   const body = method === "GET" ? undefined : await readJSON(request);
   requests.push({ method, path: endpoint, task: url.searchParams.get("task_id"), body });
+  if (endpoint === "/api/version") return sendJSON(response, 200, { ok: true, service: "artex-ui-fixture", version: "ui-fixture" });
   if (endpoint === "/api/health") return sendJSON(response, 200, { ok: true, service: "artex-ui-fixture", version: "ui-fixture" });
   if (endpoint === "/api/update/check") return sendJSON(response, 200, { has_update: false, current: "ui-fixture" });
   if (endpoint === "/api/intercept/pending") return sendJSON(response, 200, { pending: [] });

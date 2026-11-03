@@ -11,6 +11,7 @@ func newTestServer(t *testing.T, parent context.Context, manager *Manager, skill
 	s := New(ctx, manager, skillDir, dataDir, keyDir)
 	t.Cleanup(func() {
 		cancel()
+		s.Close()
 		for _, task := range manager.List() {
 			s.engine.StopTask(task.ID)
 		}

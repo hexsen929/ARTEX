@@ -116,6 +116,9 @@ jobs:
           go test -race ./traffic -run 'TestSharedProxy' -count=1 -timeout=3m
           go test -race ./agent -run 'Test(ChatProxyOverride|ChatPreservesParent|ConcurrentTaskChats)' -count=1 -timeout=3m
           go test -race ./server -run 'Test(SideCheckpoint|TaskDeleteCheckpoint|SideTaskDrain)' -count=1 -timeout=3m
+          go test -race ./server -run 'Test(Proxy|DynamicForward|DialHTTPConnect|SideTaskContext|SideTaskSynthetic|SideTaskFallback|HealthGate|VersionRequires)' -count=1 -timeout=5m
+          go test -race ./agent ./guard ./intercept/... ./llmhttp -run 'Test(DeepSeek|Jev|NewClient|Review|Confidence)' -count=1 -timeout=5m
+          go test -race ./db -run 'Test(JevProfile|ActiveProfileActivation|ActiveLLMProfileLock)' -count=1 -timeout=5m
           go test -race ./agent -run 'Test(TaskAssociatedVerifierSideCapture|SideCaptureParent)' -count=1 -timeout=3m
           go test -race ./agent ./llmguard -run 'Test(ResponsesError|StructuredProviderError|StructuredStatus|OnlyConcreteTransport|CancellationWinsOverStructured)' -count=1 -timeout=3m
           go test -race ./server -run 'Test(RuntimeMerge|MergeScreenshot|MergeAutoTitle|MergeFindingSide)' -count=1 -timeout=3m
@@ -176,6 +179,7 @@ jobs:
       - name: Frontend unit tests
         run: |
           node --experimental-strip-types --test src/lib/*.test.mjs
+          node --test src/lib/*.test.cjs
           node --test src/lib/mock/*.test.cjs
         working-directory: web
       - run: npx tsc --noEmit

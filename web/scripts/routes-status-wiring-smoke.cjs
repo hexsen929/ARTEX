@@ -22,6 +22,7 @@ function error(response, message) { json(response, 503, { error: message }); }
 async function serveAPI(request, response, url) {
   const endpoint = url.pathname, method = request.method || "GET";
   requests.push({ endpoint, method, query: Object.fromEntries(url.searchParams) });
+  if (endpoint === "/api/version") return json(response, 200, { ok: true, service: "synthetic", version: "fixture" });
   if (endpoint === "/api/health") return json(response, 200, { ok: true, service: "synthetic", version: "fixture" });
   if (endpoint === "/api/auth/status") return json(response, 200, { initialized: true });
   if (endpoint === "/api/update/check") return json(response, 200, { has_update: false, current: "fixture" });

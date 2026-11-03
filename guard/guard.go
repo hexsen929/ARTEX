@@ -119,13 +119,14 @@ func (g *Guard) checkEgress(ev hook.Event, cmd string) (hook.Result, bool) {
 	if cmd != "" {
 		texts = append(texts, cmd)
 	}
-	if ev.ToolName == "WebFetch" {
+	if ev.ToolName == "WebFetch" || ev.ToolName == "deepseek_fetch" || ev.ToolName == "deepseek_search" {
 		var in struct {
-			URL  string `json:"url"`
-			Body string `json:"body"`
+			URL   string `json:"url"`
+			Body  string `json:"body"`
+			Query string `json:"query"`
 		}
 		if json.Unmarshal(ev.Input, &in) == nil {
-			texts = append(texts, in.URL, in.Body)
+			texts = append(texts, in.URL, in.Body, in.Query)
 		}
 	}
 	if ev.ToolName == "session_write" {

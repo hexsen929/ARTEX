@@ -37,6 +37,7 @@ async function serveAPI(request, response, url) {
     body = raw ? JSON.parse(raw) : {};
   }
   requests.push({ endpoint, method, body });
+  if (endpoint === "/api/version") return json(response, 200, { ok: true, version: "fixture" });
   if (endpoint === "/api/health") return json(response, 200, { ok: true, version: "fixture" });
   if (endpoint === "/api/auth/status") return json(response, 200, { initialized: true });
   if (endpoint === "/api/update/check") return json(response, 200, { current: "fixture", has_update: false });
