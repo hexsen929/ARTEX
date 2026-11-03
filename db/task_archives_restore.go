@@ -60,11 +60,15 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	retestScope, err := validateRetestArchiveCompaction(tx, taskID, expID, snapshot)
+	if err != nil {
+		return err
+	}
 	// Prevent task/asset ownership from changing while exclusivity is rechecked.
 	if _, err := tx.Exec(`LOCK TABLE assets, exploration_anchors IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM intercept_pending WHERE COALESCE(task_id,'')=$1`, strconv.FormatInt(taskID, 10)); err != nil {
+	if _, err := tx.Exec(`DELETE FROM intercept_pending WHERE id=ANY($1::bigint[])`, retestScope.ApprovalIDs); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM llm_records WHERE COALESCE(task_id,'')=$1`, strconv.FormatInt(taskID, 10)); err != nil {
@@ -78,8 +82,13 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 			return err
 		}
 	}
-	if _, err := tx.Exec(`DELETE FROM side_question_sessions WHERE task_id=$1`, taskID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM side_question_sessions WHERE session_key=ANY($1::text[])`, retestScope.SideSessionKeys); err != nil {
 		return err
+	}
+	if len(retestScope.ConversationIDs) > 0 {
+		if _, err := tx.Exec(`DELETE FROM conversations WHERE id=ANY($1::bigint[]) AND agent_key=$2`, retestScope.ConversationIDs, FindingRetestAgentKey); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(`DELETE FROM findings WHERE task_id=$1`, taskID); err != nil {
 		return err
@@ -201,6 +210,14 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 		return nil, fmt.Errorf("%w: restore snapshot identity/state mismatch", ErrTaskArchiveState)
 	}
 	warnings := []string{}
+	if snapshot.FormatVersion < 6 {
+		if _, present := snapshot.Tables["finding_retests"]; !present {
+			warnings = append(warnings, "旧格式归档未包含独立复测历史，未补造缺失记录")
+		}
+	}
+	if err := requireRetestArchiveTables(snapshot); err != nil {
+		return nil, err
+	}
 	assetMap, assetWarnings, err := restoreArchiveAssets(tx, taskID, snapshot.Tables["assets"])
 	if err != nil {
 		return nil, err
@@ -262,11 +279,6 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	} else {
 		warnings = append(warnings, warning...)
 	}
-	for _, table := range []string{"side_question_sessions", "side_question_requests"} {
-		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
-			return nil, fmt.Errorf("restore %s: %w", table, err)
-		}
-	}
 	if warning, err := restoreTaskScopes(tx, remappedTables["task_scope"]); err != nil {
 		return nil, err
 	} else {
@@ -282,6 +294,11 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
 	}
+	retestWarnings, err := restoreRetestArchiveRows(tx, taskID, expID, remappedTables, snapshot.FormatVersion >= 6)
+	if err != nil {
+		return nil, fmt.Errorf("restore retest history: %w", err)
+	}
+	warnings = append(warnings, retestWarnings...)
 	if err := restoreIntranetArchiveRows(tx, taskID, remappedTables); err != nil {
 		return nil, fmt.Errorf("restore intranet state: %w", err)
 	}
@@ -306,6 +323,19 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	}
 	if err := restoreInterceptRows(tx, remappedTables["intercept_pending"]); err != nil {
 		return nil, err
+	}
+	// Approval and conversation parents must exist before their /btw history.
+	for _, table := range []string{"side_question_sessions", "side_question_requests"} {
+		raw := remappedTables[table]
+		if table == "side_question_requests" {
+			raw, err = stopArchivedSideRequests(raw)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if err := insertArchiveRows(tx, table, raw); err != nil {
+			return nil, fmt.Errorf("restore %s: %w", table, err)
+		}
 	}
 	warningsRaw, _ := json.Marshal(warnings)
 	if _, err := tx.Exec(`UPDATE task_archives SET warnings=$2,phase='database_restored',progress=85,error='' WHERE id=$1`, archiveID, string(warningsRaw)); err != nil {
@@ -407,6 +437,7 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	}
 	allowed := map[string]bool{
 		"credentials": true, "pending_scope": true, "task_session_bindings": true, "finding_checks": true,
+		"finding_retests": true, "conversations": true, "conversation_activities": true,
 		"finding_verification_events": true, "finding_inline_merge_events": true,
 		"exploration_nodes": true, "exploration_edges": true, "exploration_anchors": true,
 		"task_intelligence": true, "task_constraints": true, "activity": true, "task_asset_links": true, "findings": true,

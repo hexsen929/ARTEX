@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	// v5 carries intranet ciphertext/resources and independent check/raw-report
-	// audit. Older binaries must reject it rather than silently omit those rows.
-	TaskArchiveFormatVersion       = 5
+	// v6 additionally preserves independent retest conversations and their FK
+	// history. Older binaries must reject it rather than silently drop rows.
+	TaskArchiveFormatVersion       = 6
 	TaskArchiveLegacyFormatVersion = 1
 	TaskArchiveLLMRecordsPath      = "database/llm_records.ndjson"
 )
@@ -603,6 +603,9 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"task_session_bindings", `SELECT * FROM task_session_bindings WHERE task_id=$1 ORDER BY session_id`, []any{taskID}},
 		{"tunnels", `SELECT * FROM tunnels WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"finding_checks", `SELECT c.* FROM finding_checks c JOIN findings f ON f.id=c.finding_id WHERE f.task_id=$1 ORDER BY c.id`, []any{taskID}},
+		{"finding_retests", `SELECT r.* FROM finding_retests r JOIN findings f ON f.id=r.finding_id WHERE f.task_id=$1 ORDER BY r.id`, []any{taskID}},
+		{"conversations", `SELECT c.* FROM conversations c WHERE c.id IN (` + archiveRetestConversationIDsQuery() + `) ORDER BY c.id`, []any{taskID}},
+		{"conversation_activities", `SELECT a.* FROM conversation_activities a WHERE a.conversation_id IN (` + archiveRetestConversationIDsQuery() + `) ORDER BY a.id`, []any{taskID}},
 		{"finding_verification_events", `SELECT e.* FROM finding_verification_events e JOIN findings f ON f.id=e.finding_id WHERE f.task_id=$1 ORDER BY e.id`, []any{taskID}},
 		{"finding_inline_merge_events", `SELECT e.* FROM finding_inline_merge_events e JOIN findings f ON f.id=e.finding_id WHERE f.task_id=$1 ORDER BY e.id`, []any{taskID}},
 		{"finding_traffic_bindings", `SELECT b.* FROM finding_traffic_bindings b JOIN findings f ON f.id=b.finding_id WHERE f.task_id=$1 ORDER BY b.finding_id,b.position,b.id`, []any{taskID}},
@@ -611,9 +614,9 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"llm_usage", `SELECT * FROM llm_usage WHERE COALESCE(task_id,'')=$1 OR exploration_id=$2 ORDER BY id`, []any{strconv.FormatInt(taskID, 10), expID}},
 		{"skill_usage", `SELECT * FROM skill_usage WHERE task_id=$1 OR exploration_id=$2 ORDER BY id`, []any{taskID, expID}},
 		{"tool_usage", `SELECT * FROM tool_usage WHERE task_id=$1 OR exploration_id=$2 ORDER BY id`, []any{taskID, expID}},
-		{"intercept_pending", `SELECT * FROM intercept_pending WHERE COALESCE(task_id,'')=$1 ORDER BY id`, []any{strconv.FormatInt(taskID, 10)}},
-		{"side_question_sessions", `SELECT * FROM side_question_sessions WHERE task_id=$1 ORDER BY session_key`, []any{taskID}},
-		{"side_question_requests", `SELECT r.* FROM side_question_requests r JOIN side_question_sessions s ON s.session_key=r.session_key WHERE s.task_id=$1 ORDER BY r.ordinal`, []any{taskID}},
+		{"intercept_pending", `SELECT * FROM intercept_pending WHERE id IN (` + archiveTaskApprovalIDsQuery() + `) ORDER BY id`, []any{taskID}},
+		{"side_question_sessions", `SELECT s.* FROM side_question_sessions s WHERE ` + archiveTaskSideSessionPredicate("s") + ` ORDER BY s.session_key`, []any{taskID}},
+		{"side_question_requests", `SELECT r.* FROM side_question_requests r JOIN side_question_sessions s ON s.session_key=r.session_key WHERE ` + archiveTaskSideSessionPredicate("s") + ` ORDER BY r.ordinal`, []any{taskID}},
 		{"assets", `SELECT asset.* FROM assets asset WHERE asset.id IN (` + archiveAssetIDsQuery() + `) ORDER BY asset.id`, []any{taskID, expID}},
 	}
 	counts := make(map[string]int64, len(queries))
