@@ -2257,7 +2257,7 @@ BEGIN
       tags=CASE WHEN clear_body THEN '[]'::jsonb ELSE tags END,
       evidence_ids=CASE WHEN clear_body THEN '[]'::jsonb ELSE evidence_ids END
       WHERE source_ref=source_ref_id AND state<>'deleted';
-    UPDATE memory_jobs SET state='skipped',result='skipped',lease_token='',lease_until=NULL,updated_at=now()
+    UPDATE memory_jobs SET state='skipped',result='source_changed',lease_token='',lease_until=NULL,updated_at=now()
       WHERE source_ref=source_ref_id AND state IN ('queued','running','failed');
 END; $$;
 

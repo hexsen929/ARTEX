@@ -44,7 +44,7 @@ func TestMemoryExperienceLearningStatusIsAnObservation(t *testing.T) {
 		{name: "queued", snapshot: db.MemoryLearningSnapshot{Queued: 2}, available: true, wantStatus: "queued"},
 		{name: "retry waits", snapshot: db.MemoryLearningSnapshot{RetryableFailed: 1, Failed: 1}, available: true, wantStatus: "retry_wait"},
 		{name: "running native stage", snapshot: db.MemoryLearningSnapshot{WaitingStage: true}, available: true, wantStatus: "waiting_stage", wantText: "阶段结束"},
-		{name: "processed without experience is normal", snapshot: db.MemoryLearningSnapshot{Done: 1, LastJob: &db.MemoryLearningLastJob{ID: 7, Result: "no_experience", UpdatedAt: stamp}}, available: true, wantStatus: "idle", wantText: "没有值得保留"},
+		{name: "legacy unclassified result is not proven empty", snapshot: db.MemoryLearningSnapshot{Done: 1, LastJob: &db.MemoryLearningLastJob{ID: 7, Result: "no_experience", UpdatedAt: stamp}}, available: true, wantStatus: "idle", wantText: "历史未细分"},
 		{name: "failed attempt not learned", snapshot: db.MemoryLearningSnapshot{Failed: 1, LastJob: &db.MemoryLearningLastJob{ID: 8, Result: "failed", UpdatedAt: stamp}}, available: true, wantStatus: "idle", wantText: "失败"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

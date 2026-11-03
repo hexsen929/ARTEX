@@ -81,7 +81,7 @@ func (d *DB) UpdateMemorySettings(ctx context.Context, in MemorySettings, expect
 	}
 	// Jobs admitted under old settings are not silently carried into new model
 	// or sharing choices. Fresh incremental discovery can queue them anew.
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state='skipped',lease_token='',lease_until=NULL,updated_at=now()
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state='skipped',result='settings_changed',lease_token='',lease_until=NULL,updated_at=now()
 		WHERE state IN ('queued','running','failed')`); err != nil {
 		return current, err
 	}
@@ -480,7 +480,7 @@ func (d *DB) ClearMemoryEntries(ctx context.Context) error {
 		applicability='',target='',tags='[]',evidence_ids='[]',source_fingerprint='',version=version+1,epoch=epoch+1,updated_at=now() WHERE state<>'deleted'`); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state='skipped',lease_token='',lease_until=NULL,updated_at=now() WHERE state IN ('queued','running','failed')`); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state='skipped',result='cleared',lease_token='',lease_until=NULL,updated_at=now() WHERE state IN ('queued','running','failed')`); err != nil {
 		return err
 	}
 	if err := memoryAuditTx(ctx, tx, 0, 0, 0, MemoryAdmission{}, "cleared"); err != nil {

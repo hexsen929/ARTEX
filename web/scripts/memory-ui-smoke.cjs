@@ -27,6 +27,7 @@ const fixture = {
 const learning = {
   status: "waiting_stage", message: "等待阶段结束并稳定后再总结，不逐条调用模型。",
   queued: 0, running: 0, failed: 0, processed: 0, starts_last_hour: 0, attempts_last_hour: 0, max_calls_per_hour: 3,
+  retryable_failed: 0, stopped_failed: 0, entry_count: 1, outcome_counts: {},
 };
 let entries = [{ ...fixture }], nextId = 8;
 const state = { failList: false, conflictEdit: false, conflictSettings: false, failUsage: false, failLearning: false, learningDelay: 0 };
@@ -153,14 +154,65 @@ async function main() {
       ["model_unavailable", "总结模型不可用"], ["waiting_stage", "等待阶段结束"],
     ];
     for (const [status, label] of stageStates) {
-      Object.assign(learning, { status, starts_last_hour: status === "budget_wait" ? 3 : 0, attempts_last_hour: 0 });
+      Object.assign(learning, { status, starts_last_hour: status === "budget_wait" ? 3 : 0, attempts_last_hour: 0, next_budget_at: status === "budget_wait" ? "2026-11-03T14:18:49Z" : undefined });
       await page.getByRole("button", { name: "刷新学习状态", exact: true }).click();
       await page.getByText(label, { exact: true }).waitFor();
-      if (status === "budget_wait") await page.getByText(/领取阶段 3 \/ 3；实际 HTTP 尝试 0 \/ 3/).waitFor();
+      if (status === "budget_wait") {
+        await page.getByText(/领取阶段 3 \/ 3；实际 HTTP 尝试 0 \/ 3/).waitFor();
+        await page.getByText(/最早释放一个预算名额：/).waitFor();
+        await page.getByText(/不是整点重置/).waitFor();
+      }
     }
-    Object.assign(learning, { status: "idle", processed: 2, last_result: "no_experience", last_completed_at: "2026-10-30T05:00:00Z" });
+    Object.assign(learning, { status: "budget_wait", processed: 181, failed: 27, last_result: "no_experience", last_completed_at: "2026-10-30T05:00:00Z" });
+    for (const key of ["retryable_failed", "stopped_failed", "entry_count", "outcome_counts", "next_budget_at"]) delete learning[key];
     await page.getByRole("button", { name: "刷新学习状态", exact: true }).click();
-    await page.getByText("上次阶段总结已完成，未发现值得保存的通用经验；这不是学习失败。", { exact: true }).waitFor();
+    await page.getByText("上次记录为历史未细分的“未新增经验”；原记录混合了空结果与拒绝等情况，具体原因未记录。", { exact: true }).waitFor();
+    await page.getByText("服务未提供阶段结果分类；缺失分类未显示为零。", { exact: true }).waitFor();
+    await page.getByText(/服务未提供预算恢复时间/).waitFor();
+    assert.equal(await page.getByText("未删除记忆条目 0", { exact: true }).count(), 0, "Missing old-server telemetry was shown as zero");
+    assert.equal(await page.getByText(/这不是学习失败/).count(), 0, "Legacy unclassified results were claimed to be healthy empty results");
+
+    Object.assign(learning, { status: "idle", retryable_failed: 0, stopped_failed: 27, entry_count: 0, outcome_counts: { saved: 1, no_experience: 180, failed: 27 }, last_result: "saved" });
+    await page.getByRole("button", { name: "刷新学习状态", exact: true }).click();
+    await page.getByText("未删除记忆条目 0", { exact: true }).waitFor();
+    await page.getByText("曾保存经验 1", { exact: true }).waitFor();
+    await page.getByText("历史未细分未新增 180", { exact: true }).waitFor();
+    await page.getByText("待有限重试 0", { exact: true }).waitFor();
+    await page.getByText("已终止或不再重试 27", { exact: true }).waitFor();
+    await page.getByText(/上次阶段曾保存经验；当前条目是否保留及有效，以记忆列表为准/).waitFor();
+    const classifiedOutcomes = [
+      ["empty", "模型明确返回空结果", /上次模型返回了合法空结果/],
+      ["duplicate", "与已有条目重复", /上次候选经验与已有条目重复/],
+      ["input_invalid", "来源格式不合格", /上次阶段来源格式不满足总结条件/],
+      ["input_sensitive", "来源敏感信息拒绝", /上次来源命中敏感信息保护/],
+      ["output_invalid", "输出格式错误", /上次模型输出格式不合格/],
+      ["output_truncated", "输出被截断", /上次模型输出被截断/],
+      ["output_rejected", "候选筛选未采纳", /上次候选未通过经验筛选/],
+      ["output_sensitive", "候选敏感信息拒绝", /上次候选命中敏感信息保护/],
+      ["source_changed", "来源已变化", /上次阶段来源已变化/],
+      ["settings_changed", "设置已变化", /上次总结期间设置已变化/],
+      ["cleared", "受清理操作影响", /上次阶段受清理操作影响/],
+      ["budget_deferred", "等待发送预算", /本轮未发送请求；不是提供方或 API 失败/],
+      ["provider_error", "模型调用错误", /上次模型调用发生错误/],
+      ["timeout", "总结超时", /上次阶段总结超时/],
+      ["storage_error", "结果保存错误", /上次阶段结果保存发生错误/],
+      ["lease_expired", "处理租约过期", /上次阶段处理租约已过期/],
+      ["legacy_unknown", "历史结果未分类", /上次历史结果未分类/],
+    ];
+    for (const [result, label, description] of classifiedOutcomes) {
+      Object.assign(learning, { last_result: result, outcome_counts: { [result]: 1 } });
+      await page.getByRole("button", { name: "刷新学习状态", exact: true }).click();
+      await page.getByText(`${label} 1`, { exact: true }).waitFor();
+      await page.getByText(description).waitFor();
+    }
+    Object.assign(learning, { processed: 2, last_result: "output_invalid", outcome_counts: { output_invalid: 2 } });
+    await page.getByRole("button", { name: "刷新学习状态", exact: true }).click();
+    await page.getByText("输出格式错误 2", { exact: true }).waitFor();
+    learning.outcome_counts = { unknown_future_result: 1 };
+    await page.getByRole("button", { name: "刷新学习状态", exact: true }).click();
+    await page.getByText(/学习状态读取失败：学习状态不完整或无效/).waitFor();
+    await page.getByText("输出格式错误 2", { exact: true }).waitFor();
+    learning.outcome_counts = { output_invalid: 2 };
     state.failLearning = true;
     await page.getByRole("button", { name: "刷新学习状态", exact: true }).click();
     await page.getByText(/学习状态读取失败：fixture learning unavailable/).waitFor();
@@ -168,7 +220,7 @@ async function main() {
     state.failLearning = false;
     await page.getByRole("button", { name: "刷新学习状态", exact: true }).click();
     await eventually(async () => await page.getByText(/学习状态读取失败/).count() === 0, "Learning-status error did not clear after an authoritative read");
-    console.log("PASS phase waiting, model unavailability, budgets, retries and empty successful summaries stay distinct");
+    console.log("PASS classified outcomes, legacy unknowns, entry counts, rolling budgets and stale failed reads remain distinct");
 
     state.learningDelay = 200;
     const beforeSlow = requests.filter((item) => item.endpoint === "/api/memories/learning").length;
