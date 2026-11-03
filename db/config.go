@@ -164,7 +164,7 @@ func (d *DB) ProfileByID(id int64) (*LLMProfile, error) {
 // walk the slice front to back.
 func (d *DB) PoolProfiles() ([]*LLMProfile, error) {
 	rows, err := d.Query(`SELECT ` + profileColsKey + ` FROM llm_profiles
-WHERE COALESCE(api_key,'') <> '' AND (is_default OR NOT pool_exclude)
+WHERE format <> 'jev' AND COALESCE(api_key,'') <> '' AND (is_default OR NOT pool_exclude)
 ORDER BY is_default DESC, priority DESC, id ASC`)
 	if err != nil {
 		return nil, err
@@ -183,6 +183,9 @@ ORDER BY is_default DESC, priority DESC, id ASC`)
 
 // SaveProfile inserts (id==0) or updates a profile. Empty apiKey on update keeps existing.
 func (d *DB) SaveProfile(p *LLMProfile) (int64, error) {
+	if p.Format == "jev" && p.IsDefault {
+		return 0, ErrJevProfileJudgeOnly
+	}
 	files := p.ModelInstructionsFiles
 	if files == nil {
 		files = []string{}
@@ -204,22 +207,66 @@ VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,NULLIF($6,''),NULLIF($7,''),$8,$9,$
 			r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, p.ModelInstructionsFile, string(instructionsFiles), p.CodexConfigFile).Scan(&id)
 		return id, err
 	}
+	// Serialize format changes with activation and reference admission. A
+	// separate is_default read can become stale before UPDATE; FOR UPDATE also
+	// excludes FK/reference key-share locks while Jev admission is checked.
+	tx, err := d.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var active bool
+	if err := tx.QueryRow(`SELECT is_default FROM llm_profiles WHERE id=$1 FOR UPDATE`, p.ID).Scan(&active); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, ErrLLMProfileNotFound
+		}
+		return 0, err
+	}
+	if p.Format == "jev" {
+		if active {
+			return 0, ErrJevProfileJudgeOnly
+		}
+		// Do not acquire child-row locks while holding the profile. Reference
+		// writers own the child first and then take a key-share profile lock;
+		// their post-lock format check prevents a new binding after this commits.
+		// Historical usage alone is not a binding and does not block conversion.
+		var bound bool
+		if err := tx.QueryRow(`SELECT
+    EXISTS (SELECT 1 FROM agents WHERE llm_profile_id=$1)
+ OR EXISTS (SELECT 1 FROM conversations WHERE llm_profile_id=$1)
+ OR EXISTS (SELECT 1 FROM tasks t
+            WHERE t.deleted_at IS NULL
+              AND (t.llm_profile_id=$1 OR t.active_llm_profile_id=$1
+                   OR EXISTS (SELECT 1 FROM task_llm_profiles x WHERE x.task_id=t.id AND x.profile_id=$1)))`, p.ID).Scan(&bound); err != nil {
+			return 0, err
+		}
+		if bound {
+			return 0, ErrJevProfileJudgeOnly
+		}
+	}
 	if p.APIKey == "" {
-		_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,rate_per_second=$6,rate_per_minute=$7,context_window_k=$8,context_1m=$9,user_agent=$10,reasoning_effort=$11,priority=$12,pool_exclude=$13,thinking_type=$14,streaming=$15,max_tokens=$16,max_tokens_field=$17,session_header_key=$18,retry_connect_attempts=$19,retry_connect_interval_ms=$20,retry_empty_attempts=$21,retry_empty_interval_ms=$22,retry_stream_attempts=$23,retry_stream_interval_ms=$24,model_instructions_file=$25,model_instructions_files=$26,codex_config_file=$27 WHERE id=$28`,
+		_, err := tx.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,rate_per_second=$6,rate_per_minute=$7,context_window_k=$8,context_1m=$9,user_agent=$10,reasoning_effort=$11,priority=$12,pool_exclude=$13,thinking_type=$14,streaming=$15,max_tokens=$16,max_tokens_field=$17,session_header_key=$18,retry_connect_attempts=$19,retry_connect_interval_ms=$20,retry_empty_attempts=$21,retry_empty_interval_ms=$22,retry_stream_attempts=$23,retry_stream_interval_ms=$24,model_instructions_file=$25,model_instructions_files=$26,codex_config_file=$27 WHERE id=$28`,
 			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.Context1M, p.UserAgent, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
 			r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, p.ModelInstructionsFile, string(instructionsFiles), p.CodexConfigFile, p.ID)
-		return p.ID, err
+		if err != nil {
+			return 0, err
+		}
+		return p.ID, tx.Commit()
 	}
-	_, err = d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,api_key=$6,api_key_hint=$7,rate_per_second=$8,rate_per_minute=$9,context_window_k=$10,context_1m=$11,user_agent=$12,reasoning_effort=$13,priority=$14,pool_exclude=$15,thinking_type=$16,streaming=$17,max_tokens=$18,max_tokens_field=$19,session_header_key=$20,retry_connect_attempts=$21,retry_connect_interval_ms=$22,retry_empty_attempts=$23,retry_empty_interval_ms=$24,retry_stream_attempts=$25,retry_stream_interval_ms=$26,model_instructions_file=$27,model_instructions_files=$28,codex_config_file=$29 WHERE id=$30`,
+	_, err = tx.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,api_key=$6,api_key_hint=$7,rate_per_second=$8,rate_per_minute=$9,context_window_k=$10,context_1m=$11,user_agent=$12,reasoning_effort=$13,priority=$14,pool_exclude=$15,thinking_type=$16,streaming=$17,max_tokens=$18,max_tokens_field=$19,session_header_key=$20,retry_connect_attempts=$21,retry_connect_interval_ms=$22,retry_empty_attempts=$23,retry_empty_interval_ms=$24,retry_stream_attempts=$25,retry_stream_interval_ms=$26,model_instructions_file=$27,model_instructions_files=$28,codex_config_file=$29 WHERE id=$30`,
 		p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.APIKey, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.Context1M, p.UserAgent, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
 		r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, p.ModelInstructionsFile, string(instructionsFiles), p.CodexConfigFile, p.ID)
-	return p.ID, err
+	if err != nil {
+		return 0, err
+	}
+	return p.ID, tx.Commit()
 }
 
 var (
 	ErrActiveLLMProfileDelete      = errors.New("cannot delete the active LLM profile; activate another profile first")
 	ErrLLMProfileReferencesChanged = errors.New("LLM profile references changed while deleting; retry the request")
 	ErrLLMProfileNotFound          = errors.New("LLM profile not found")
+	ErrJevProfileJudgeOnly         = errors.New("Jev System One 配置仅可用于拦截判定模型，不能用于对话或任务")
 )
 
 func (d *DB) DeleteProfile(id int64) error {
@@ -448,6 +495,11 @@ func lockProfileReferenceRows(ctx context.Context, tx *sql.Tx, query string, pro
 	return locked, nil
 }
 
+// Serializes default switches before any profile row is locked. Two switches
+// may target each other's current default; target-row locking alone can deadlock
+// and a stale UPDATE predicate can otherwise leave two defaults.
+const activeLLMProfileLockKey int64 = 7337741007
+
 // SetActiveProfile makes one profile the global default (single-default invariant).
 func (d *DB) SetActiveProfile(id int64) error {
 	tx, err := d.Begin()
@@ -455,6 +507,19 @@ func (d *DB) SetActiveProfile(id int64) error {
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, activeLLMProfileLockKey); err != nil {
+		return err
+	}
+	var format string
+	if err := tx.QueryRow(`SELECT format FROM llm_profiles WHERE id=$1 FOR UPDATE`, id).Scan(&format); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrLLMProfileNotFound
+		}
+		return err
+	}
+	if format == "jev" {
+		return ErrJevProfileJudgeOnly
+	}
 	if _, err := tx.Exec(`UPDATE llm_profiles SET is_default=false WHERE is_default`); err != nil {
 		return err
 	}
@@ -658,12 +723,15 @@ func lockLLMProfileForReference(tx *sql.Tx, profileID *int64) error {
 	if profileID == nil {
 		return nil
 	}
-	var lockedID int64
-	if err := tx.QueryRow(`SELECT id FROM llm_profiles WHERE id=$1 FOR KEY SHARE`, *profileID).Scan(&lockedID); err != nil {
+	var format string
+	if err := tx.QueryRow(`SELECT format FROM llm_profiles WHERE id=$1 FOR KEY SHARE`, *profileID).Scan(&format); err != nil {
 		if err == sql.ErrNoRows {
 			return ErrLLMProfileNotFound
 		}
 		return err
+	}
+	if format == "jev" {
+		return ErrJevProfileJudgeOnly
 	}
 	return nil
 }

@@ -90,7 +90,7 @@ func (s *Server) findingReportTaskContext(ctx context.Context, c *db.Conversatio
 				return ctx, errors.New("报告流量录制代理未就绪，未执行本轮操作")
 			}
 		} else {
-			addr, ca = s.m.GlobalProxy(), ""
+			addr, ca = s.m.ProxyAddr(), ""
 		}
 	}
 	ctx = agent.WithRunInfo(ctx, agent.RunInfo{TaskID: parent.ID, ExplorationID: parent.ExplorationID})

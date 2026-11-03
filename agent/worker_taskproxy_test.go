@@ -1,6 +1,10 @@
 package agent
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+)
 
 // proxyForTask:任务 resolver 命中用任务实例,未命中/未设置回落全局 SetProxy。
 func TestWorkerProxyForTask(t *testing.T) {
@@ -29,5 +33,30 @@ func TestWorkerProxyForTask(t *testing.T) {
 	a, c = w.proxyForTask(7)
 	if a != "http://task:21100" || c != "/data/traffic-tasks/7/_ca/cert.pem" {
 		t.Errorf("resolver 命中应用任务实例, got (%q, %q)", a, c)
+	}
+}
+
+func TestWorkerDynamicProxyRemainsTaskScoped(t *testing.T) {
+	w := &Worker{proxyAddr: "http://old.invalid:8788", proxyCACert: "global-ca"}
+	global := "http://new.invalid:8788"
+	w.SetProxyProvider(func() string { return global })
+	if addr, ca, err := w.resolveTaskProxy(t.Context(), 7); err != nil || addr != global || ca != "global-ca" {
+		t.Fatal("worker did not resolve current global fallback")
+	}
+	w.SetTaskProxyResolverChecked(func(context.Context, int64) (string, string, error) {
+		return "http://task.invalid:21100", "task-ca", nil
+	})
+	if addr, ca, err := w.resolveTaskProxy(t.Context(), 7); err != nil || addr != "http://task.invalid:21100" || ca != "task-ca" {
+		t.Fatal("global provider replaced task proxy")
+	}
+	problem := errors.New("fixture task tunnel unavailable")
+	w.SetTaskProxyResolverChecked(func(context.Context, int64) (string, string, error) { return "", "", problem })
+	if addr, ca, err := w.resolveTaskProxy(t.Context(), 7); !errors.Is(err, problem) || addr != "" || ca != "" {
+		t.Fatal("task proxy failure fell back to global")
+	}
+	w.SetTaskProxyResolverChecked(nil)
+	global = ""
+	if addr, _, err := w.resolveTaskProxy(t.Context(), 7); err != nil || addr != "" {
+		t.Fatal("dynamic direct revived stale global proxy")
 	}
 }

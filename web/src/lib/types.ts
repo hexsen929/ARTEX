@@ -42,6 +42,8 @@ export interface Task {
   active_run_seconds?: number; // completed running segments in seconds
   run_segment_started_unix?: number; // current running segment start; 0 when inactive
   paused?: boolean;
+  pause_reason?: string;
+  reconnect?: { attempt: number; max: number; next_at?: number; exhausted: boolean; last_error?: string };
   queued?: boolean;
   active?: boolean;
   in_flight?: number;
@@ -1028,9 +1030,11 @@ export interface Settings {
   web_search_backend: string; // "ddgs" | "brave-free" | "tavily" | "deepseek"
   brave_key_set: boolean;
   tavily_key_set: boolean;
+  deepseek_search_key_set: boolean;
   // write-only: only sent on PUT to store/clear the key.
   brave_search_api_key?: string;
   tavily_search_api_key?: string;
+  deepseek_search_api_key?: string;
   // 独立出口代理(http/https/socks5)，用于访问搜索端点；与记录流量的 MITM 代理无关。空=直连。
   web_search_proxy?: string;
   // 全局出口代理(http/https/socks5，可带 user:pass)，所有目标流量走它。开启流量捕获时作为
@@ -1040,6 +1044,18 @@ export interface Settings {
   callback_addr_source?: "env" | "settings" | "config" | "unset";
   callback_addr_locked?: boolean; // 显式环境变量覆盖时，后台保留只读。
   callback_addr_error?: string; // 既有地址格式错误仍可在后台修复；运行时拒绝使用。
+  proxy_pool?: ProxyPoolEntry[];
+  proxy_pool_active_id?: string;
+  proxy_pool_switch_log?: ProxySwitchLog[];
+  proxy_rotate_timed_enabled?: boolean;
+  proxy_rotate_interval_seconds?: number;
+  proxy_rotate_on_failure?: boolean;
+  proxy_rotate_strategy?: "sequential" | "random";
+  proxy_health_fail_threshold?: number;
+  proxy_health_cooldown_seconds?: number;
+  proxy_health_check_interval_seconds?: number;
+  proxy_reconnect_max_attempts?: number;
+  proxy_reconnect_interval_seconds?: number;
   show_egress_ip?: boolean; // 在顶栏显示直连 / 全局代理出口 IP；默认关闭
   python_interpreter?: string; // 自定义脚本工具的 python 解释器路径(空=运行时检测)
   workers?: number; // 并发工作 agent 数(默认3)；对之后启动的任务生效
@@ -1064,6 +1080,22 @@ export interface Settings {
   notify_public_base_url?: string; // 漏洞详情回链的外部访问地址；空=消息不带回链
   notify_digest_interval_min?: number; // 汇总模式周期（分钟），默认 30
 }
+
+export interface ProxyPoolEntry {
+  id: string;
+  url: string;
+  name?: string;
+  remark?: string;
+  enabled: boolean;
+  egress_ip?: string;
+  latency_ms?: number;
+  last_error?: string;
+  last_checked_at?: string;
+  consecutive_failures: number;
+  health: "healthy" | "unhealthy-cooling" | "disabled" | string;
+}
+
+export interface ProxySwitchLog { at: string; from: string; to: string; reason: string }
 
 export interface WorkerPool {
   profile_id: string;
@@ -1163,7 +1195,7 @@ export interface CodexInstructionsSource {
 export interface LLMProfile {
   id: string;
   name: string;
-  format: "openai" | "anthropic" | "openai-responses";
+  format: "openai" | "anthropic" | "openai-responses" | "jev";
   base_url?: string;
   proxy?: string;
   model: string;
@@ -1541,6 +1573,7 @@ export interface JudgeConfig {
   ask_timeout_seconds: number; // 模型判 ask 转人工后的审批等待超时
   ask_timeout_action: "allow" | "deny"; // 审批超时后的默认动作
   incomplete_script_action: "ask" | "model"; // 脚本快照不完整时：人工审查或继续模型审查
+  confidence_threshold: number; // Jev 置信度低于此值时转人工
 }
 
 // JudgeUsage: 模型兜底审批(judge 通道)的累计 token 用量 + 近 N 天每日序列。

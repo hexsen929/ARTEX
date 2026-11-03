@@ -14,7 +14,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/llmguard"
+	"github.com/Autumn-27/artex/llmhttp"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/memcontext"
 	"github.com/Autumn-27/norma/agentcore"
@@ -33,7 +33,10 @@ import (
 
 // Config describes the LLM backend resolved from the environment.
 type Config struct {
-	Format  llm.Format
+	Format llm.Format
+	// Jev marks the TypeSafe System One judge protocol. It must never be sent
+	// through the chat/completions provider path.
+	Jev     bool
 	BaseURL string
 	APIKey  string
 	Model   string
@@ -233,6 +236,11 @@ func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
 		Stream:  true, // 默认流式;调用方按 profile 覆盖
 	}
 	switch strings.TrimSpace(provider) {
+	case "jev":
+		c.Jev = true
+		if c.Model == "" {
+			c.Model = "jev-latest"
+		}
 	case "openai":
 		c.Format = llm.FormatOpenAI
 		// provider appends "/chat/completions"; tolerate a full endpoint URL.
@@ -270,6 +278,9 @@ func isFalsy(s string) bool {
 
 // Provider returns the short provider name ("anthropic"/"openai").
 func (c Config) Provider() string {
+	if c.Jev {
+		return "jev"
+	}
 	switch c.Format {
 	case llm.FormatOpenAI:
 		return "openai"
@@ -288,6 +299,9 @@ func (c Config) NewProvider() (llm.Provider, error) {
 // NewProviderWithLimiter reuses quota history across provider rebuilds. Callers
 // sharing a profile must retain the same limiter outside their provider cache.
 func (c Config) NewProviderWithLimiter(limiter *RequestLimiter) (llm.Provider, error) {
+	if c.Jev {
+		return nil, fmt.Errorf("Jev System One 仅可用于拦截判定模型，不能作为聊天 provider")
+	}
 	if c.ConfigError != nil {
 		return nil, c.ConfigError
 	}
@@ -582,30 +596,17 @@ func quotaAwareHTTPClient(proxy, sessionHeaderKey string) (*http.Client, error) 
 }
 
 func quotaAwareHTTPClientWithOptions(proxy, sessionHeaderKey string, anthropicContext1M bool, userAgent string) (*http.Client, error) {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	proxy = strings.TrimSpace(proxy)
-	if proxy == "" {
-		transport.Proxy = nil // 留空=直连,不回退 HTTP_PROXY/HTTPS_PROXY 环境变量
-	} else {
-		proxyURL, err := url.Parse(proxy)
-		if err != nil {
-			return nil, fmt.Errorf("llm: invalid proxy %q: %w", proxy, err)
-		}
-		switch proxyURL.Scheme {
-		case "http", "https", "socks5":
-		case "":
-			return nil, fmt.Errorf("llm: proxy %q missing scheme (use http://, https:// or socks5://)", proxy)
-		default:
-			return nil, fmt.Errorf("llm: unsupported proxy scheme %q (use http, https or socks5)", proxyURL.Scheme)
-		}
-		transport.Proxy = http.ProxyURL(proxyURL)
+	client, err := llmhttp.NewClient(proxy)
+	if err != nil {
+		return nil, err
 	}
-	return &http.Client{Transport: quotaAwareTransport{
-		base:               transport,
+	client.Transport = quotaAwareTransport{
+		base:               client.Transport,
 		sessionHeaderKey:   strings.TrimSpace(sessionHeaderKey),
 		anthropicContext1M: anthropicContext1M,
 		userAgent:          strings.TrimSpace(userAgent),
-	}}, nil
+	}
+	return client, nil
 }
 
 // logTestConnection prints the raw HTTP status code(s) and response body of a

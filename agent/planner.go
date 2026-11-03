@@ -32,16 +32,17 @@ type Planner struct {
 	maxTurns          int                                    // max agent turns per run (0 = unlimited)
 	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
 	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
-	proxyAddr         string                                 // recording proxy for WebFetch (empty = direct)
-	proxyCACert       string                                 // recording proxy's CA cert path (HTTPS verify)
-	webSearch         WebSearchOpts                          // web_search tool backend selection (off by default)
-	workDir           string                                 // shared work dir (surfaced in prompt as artifact-output target)
-	injectConstraints func() bool                            // resolver: inject task operation constraints into system prompt? (nil = yes)
-	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
-	noaEnabledFn      func() bool                            // resolver: use experimental noa compaction? (nil = off)
-	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
-	compactor         *Compactor                             // cold-node compaction (§7); nil = disabled
-	guard             *guard.Guard                           // optional; nil disables intercept hooks for planner tool calls
+	proxyAddrFn       func() string
+	proxyAddr         string        // recording proxy for WebFetch (empty = direct)
+	proxyCACert       string        // recording proxy's CA cert path (HTTPS verify)
+	webSearch         WebSearchOpts // web_search tool backend selection (off by default)
+	workDir           string        // shared work dir (surfaced in prompt as artifact-output target)
+	injectConstraints func() bool   // resolver: inject task operation constraints into system prompt? (nil = yes)
+	nonStreamingFn    func() bool   // resolver: use non-streaming (Complete) path? (nil = streaming)
+	noaEnabledFn      func() bool   // resolver: use experimental noa compaction? (nil = off)
+	maxTokensFn       func() int    // resolver: per-reply output cap (nil/0 = send no cap)
+	compactor         *Compactor    // cold-node compaction (§7); nil = disabled
+	guard             *guard.Guard  // optional; nil disables intercept hooks for planner tool calls
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -93,7 +94,8 @@ func (p *Planner) compactionWindow() int {
 
 // SetProxy points the planner's WebFetch at the recording proxy plus the CA cert
 // it trusts to verify HTTPS through it (empty addr = direct).
-func (p *Planner) SetProxy(addr, caCert string) { p.proxyAddr, p.proxyCACert = addr, caCert }
+func (p *Planner) SetProxy(addr, caCert string)      { p.proxyAddr, p.proxyCACert = addr, caCert }
+func (p *Planner) SetProxyProvider(fn func() string) { p.proxyAddrFn = fn }
 
 // SetWebSearch selects the web_search backend for the planner (off by default).
 func (p *Planner) SetWebSearch(o WebSearchOpts) { p.webSearch = o }
@@ -390,6 +392,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	domain := tsx.capFrontierTools(tsx.DropCoverageTools(tsx.PlannerTools()))
 	base := append(domain, actool.DefaultTools()...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
+	base = append(base, deepSeekTools(p.webSearch)...)
 	tools, def, cleanup := AugmentTools(ctx, "planner", base)
 	defer cleanup()
 	if def.AssemblyError != nil {
@@ -421,6 +424,10 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	if tc.DeadlineUnix > 0 {
 		settle = wrapupSettlementForTask("planner", nil, clamped)
 	}
+	proxyAddr := p.proxyAddr
+	if p.proxyAddrFn != nil {
+		proxyAddr = p.proxyAddrFn()
+	}
 	opts := agentcore.Options{
 		Provider:        p.prov,
 		SystemPrompt:    system,
@@ -430,24 +437,21 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		UnlockSet:       def.Unlock,
 		PermissionMode:  permission.ModeBypass,
 		EnableWebFetch:  true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
-		WebFetchProxy:   p.proxyAddr,
+		WebFetchProxy:   proxyAddr,
 		WebFetchCACert:  p.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
-		EnableWebSearch:       p.webSearch.Enabled,
-		WebSearchBackend:      p.webSearch.Backend,
-		BraveSearchAPIKey:     p.webSearch.BraveKey,
-		TavilySearchAPIKey:    p.webSearch.TavilyKey,
-		DeepSeekSearchBaseURL: p.webSearch.DeepSeekBaseURL,
-		DeepSeekSearchAPIKey:  p.webSearch.DeepSeekAPIKey,
-		DeepSeekSearchModel:   p.webSearch.DeepSeekModel,
-		WebSearchProxy:        p.webSearch.Proxy,
-		BashEnv:               proxyEnv(p.proxyAddr, p.proxyCACert), // Bash 子命令默认走代理+信任 CA
-		WorkingDir:            taskDir,                              // 本任务工作目录 <workDir>/tasks/<taskID>
-		ToolOutputDir:         cmdOutDir(taskDir),
-		MaxTurns:              p.maxTurns, // 0 = unlimited (configurable in agent management)
-		MaxDuration:           maxDur,     // 0=不限;有 deadline 时=距 deadline 剩余
-		Compaction:            compactionConfig(p.compactionWindow()),
+		EnableWebSearch:    p.webSearch.Enabled && p.webSearch.Backend != "deepseek",
+		WebSearchBackend:   p.webSearch.Backend,
+		BraveSearchAPIKey:  p.webSearch.BraveKey,
+		TavilySearchAPIKey: p.webSearch.TavilyKey,
+		WebSearchProxy:     p.webSearch.Proxy,
+		BashEnv:            proxyEnv(proxyAddr, p.proxyCACert), // Bash 子命令默认走代理+信任 CA
+		WorkingDir:         taskDir,                            // 本任务工作目录 <workDir>/tasks/<taskID>
+		ToolOutputDir:      cmdOutDir(taskDir),
+		MaxTurns:           p.maxTurns, // 0 = unlimited (configurable in agent management)
+		MaxDuration:        maxDur,     // 0=不限;有 deadline 时=距 deadline 剩余
+		Compaction:         compactionConfig(p.compactionWindow()),
 		// 跨唤醒共享的规划待办：让串行链在多轮之间保留（session 是新的，store 不是）。
 		Todos: p.todoFor(ts.ID()),
 		// 命中【本轮】步数预算→ SDK 跑收尾:把本轮已想清楚的结论落地(该派的 add_intent、

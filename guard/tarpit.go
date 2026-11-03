@@ -61,7 +61,7 @@ func (c TarpitConfig) budget() int {
 // 之后对该 host 一律 warn 放行(只记审计,不 block)。非 WebFetch / 无法解析
 // host 的调用直接放行。
 func (g *Guard) checkTarpit(ev hook.Event) {
-	if ev.ToolName != "WebFetch" {
+	if ev.ToolName != "WebFetch" && ev.ToolName != "deepseek_fetch" {
 		return
 	}
 	g.mu.Lock()

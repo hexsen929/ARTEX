@@ -625,6 +625,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetKillWork(s.engine.KillWork)
 	pl.SetSteerWork(s.engine.SteerWork)
 	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	pl.SetProxyProvider(s.m.ProxyAddr)
 	pl.SetWebSearch(s.webSearchFor("planner"))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开)
 	pl.SetGuard(s.agentGuard())                       // 审批门:planner 的工具调用同样过 PreToolUse 拦截
@@ -639,6 +640,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	main.SetMaxTokens(mainRuntime.maxTokens)
 	main.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
 	main.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	main.SetProxyProvider(s.m.ProxyAddr)
 	main.SetWebSearch(s.webSearchFor("mainagent"))
 	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
 	main.SetKillWork(func(intentID int64) error {
@@ -664,6 +666,7 @@ func (s *Server) configureTaskWorker(wk *agent.Worker, runtime *taskLLMRuntime) 
 	wk.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	wk.SetProxyProvider(s.m.ProxyAddr)
 	wk.SetTaskProxyResolverChecked(s.m.TaskProxyForTaskChecked) // route failures stop this run instead of silently changing egress
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)

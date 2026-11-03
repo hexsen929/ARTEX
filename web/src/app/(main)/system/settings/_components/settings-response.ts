@@ -55,6 +55,9 @@ const requiredBooleanSettings = [
   "web_search_enabled",
   "brave_key_set",
   "tavily_key_set",
+  "deepseek_search_key_set",
+  "proxy_rotate_timed_enabled",
+  "proxy_rotate_on_failure",
   "task_auto_title_enabled",
   "chat_auto_title_enabled",
   "browser_screenshot_enabled",
@@ -77,6 +80,8 @@ const requiredStringSettings = [
   "web_search_backend",
   "web_search_proxy",
   "global_proxy",
+  "proxy_pool_active_id",
+  "proxy_rotate_strategy",
   "python_interpreter",
   "callback_addr",
   "notify_public_base_url",
@@ -94,6 +99,34 @@ export function assertSettingsSnapshot(value: unknown, maxWorkers: number): asse
   }
   if (requiredStringSettings.some((key) => typeof settings[key] !== "string")) {
     throw new Error("服务未返回完整代理和地址设置，已有配置保持不变");
+  }
+  if (!["sequential", "random"].includes(String(settings.proxy_rotate_strategy))) {
+    throw new Error("服务返回的代理池轮换策略无效，已有配置保持不变");
+  }
+  for (const [key, min] of [
+    ["proxy_rotate_interval_seconds", 3], ["proxy_health_fail_threshold", 1],
+    ["proxy_health_cooldown_seconds", 1], ["proxy_health_check_interval_seconds", 1],
+    ["proxy_reconnect_max_attempts", 1], ["proxy_reconnect_interval_seconds", 1],
+  ] as const) {
+    const count = settings[key];
+    if (typeof count !== "number" || !Number.isSafeInteger(count) || count < min) {
+      throw new Error("服务返回的代理池周期或重连设置无效，已有配置保持不变");
+    }
+  }
+  if (!Array.isArray(settings.proxy_pool) || !Array.isArray(settings.proxy_pool_switch_log)) {
+    throw new Error("服务未返回完整代理池，已有配置保持不变");
+  }
+  const proxyIDs = new Set<string>();
+  for (const entry of settings.proxy_pool) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) ||
+        typeof entry.id !== "string" || !entry.id || proxyIDs.has(entry.id) ||
+        typeof entry.url !== "string" || typeof entry.enabled !== "boolean") {
+      throw new Error("服务返回的代理池条目无效，已有配置保持不变");
+    }
+    proxyIDs.add(entry.id);
+  }
+  if (settings.proxy_pool_active_id !== "" && !proxyIDs.has(settings.proxy_pool_active_id as string)) {
+    throw new Error("服务返回的代理池选择未知，已有配置保持不变");
   }
   readRoEEnforcement(settings);
   readLLMRecordsRetentionDays(settings);

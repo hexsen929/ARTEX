@@ -14,6 +14,13 @@ const settings = {
   task_intelligence_enabled: false, task_auto_title_enabled: false, chat_auto_title_enabled: false,
   traffic_capture: false, browser_screenshot_enabled: false, browser_screenshot_timestamp_enabled: false,
   opsec_enabled: false, agent_traffic_binding: false, llm_record: false,
+  deepseek_search_key_set: false,
+  proxy_pool: [], proxy_pool_active_id: "", proxy_pool_switch_log: [],
+  proxy_rotate_timed_enabled: false, proxy_rotate_interval_seconds: 30,
+  proxy_rotate_on_failure: false, proxy_rotate_strategy: "sequential",
+  proxy_health_fail_threshold: 3, proxy_health_cooldown_seconds: 60,
+  proxy_health_check_interval_seconds: 30, proxy_reconnect_max_attempts: 5,
+  proxy_reconnect_interval_seconds: 30,
   web_search_enabled: false, web_search_backend: "ddgs", web_search_proxy: "",
   brave_key_set: false, tavily_key_set: false, global_proxy: "", show_egress_ip: false,
   python_interpreter: "", workers: 3, worker_pools: [], callback_addr: "", callback_addr_source: "unset", callback_addr_locked: false,
@@ -42,8 +49,12 @@ async function serveAPI(request, response, url) {
     if (raw) body = JSON.parse(raw);
   }
   requests.push({ scenario: s.name, endpoint, method });
-  if (endpoint === "/api/health") {
-    if (!request.headers.authorization) {
+  if (endpoint === "/api/health") return json(response, 200, { ok: true });
+  if (endpoint === "/api/version") {
+    assert.ok(request.headers.authorization?.startsWith("Bearer "), "Version poll omitted its admin token");
+    // The layout performs one initial version GET; only updater polls carry the
+    // cache bypass used for restart verification.
+    if (s.applyAttempts > 0 || s.rollbackRequests > 0) {
       s.rawHealth++;
       if (s.holdHealth) {
         const pending = { response, aborted: false, release: () => json(response, 200, { ok: true, version: s.healthVersion }) };
@@ -51,7 +62,7 @@ async function serveAPI(request, response, url) {
         s.heldHealth.push(pending); return;
       }
     }
-    return json(response, 200, { ok: true, service: "synthetic", version: s.healthVersion });
+    return json(response, 200, { version: s.healthVersion });
   }
   if (endpoint === "/api/update/settings") {
     if (method === "PUT") s.proxy = body.proxy;

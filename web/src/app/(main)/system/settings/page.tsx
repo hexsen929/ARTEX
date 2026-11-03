@@ -19,12 +19,13 @@ import { MemorySettingsCard } from "@/components/memory-settings-card";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, FieldContent, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSendMode } from "@/lib/chat-send-mode";
-import { MAX_TASK_WORKER_COUNT, type EgressReport, type LLMProfile, type Settings, type WorkerPool } from "@/lib/types";
+import { MAX_TASK_WORKER_COUNT, type EgressReport, type LLMProfile, type ProxyPoolEntry, type Settings, type WorkerPool } from "@/lib/types";
 
 import { useEgressIp } from "../../_components/egress-ip-banner";
 import { BasicAuthCard } from "./_components/basic-auth-card";
@@ -57,11 +58,30 @@ export default function SystemSettingsPage() {
   const [braveKeyInput, setBraveKeyInput] = React.useState("");
   const [tavilyKeySet, setTavilyKeySet] = React.useState(false);
   const [tavilyKeyInput, setTavilyKeyInput] = React.useState("");
+  const [deepSeekKeySet, setDeepSeekKeySet] = React.useState(false);
+  const [deepSeekKeyInput, setDeepSeekKeyInput] = React.useState("");
+  const [savingDeepSeekKey, setSavingDeepSeekKey] = React.useState(false);
   const [savingTavilyKey, setSavingTavilyKey] = React.useState(false);
   const [proxyInput, setProxyInput] = React.useState("");
   const [savingProxy, setSavingProxy] = React.useState(false);
   const [globalProxyInput, setGlobalProxyInput] = React.useState("");
   const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
+  const [proxyPoolBusy, setProxyPoolBusy] = React.useState(false);
+  const [proxyPool, setProxyPool] = React.useState<ProxyPoolEntry[]>([]);
+  const [proxyPoolActiveId, setProxyPoolActiveId] = React.useState("");
+  const [proxyPoolText, setProxyPoolText] = React.useState("");
+  const [proxyPoolTimed, setProxyPoolTimed] = React.useState(false);
+  const [proxyPoolInterval, setProxyPoolInterval] = React.useState("30");
+  const [proxyPoolFailure, setProxyPoolFailure] = React.useState(false);
+  const [proxyPoolStrategy, setProxyPoolStrategy] = React.useState<"sequential" | "random">("sequential");
+  const [proxyPoolThreshold, setProxyPoolThreshold] = React.useState("3");
+  const [proxyPoolCooldown, setProxyPoolCooldown] = React.useState("60");
+  const [proxyPoolHealthInterval, setProxyPoolHealthInterval] = React.useState("30");
+  const [proxyPoolLogs, setProxyPoolLogs] = React.useState<
+    Array<{ at: string; from: string; to: string; reason: string }>
+  >([]);
+  const [proxyReconnectMax, setProxyReconnectMax] = React.useState("5");
+  const [proxyReconnectInterval, setProxyReconnectInterval] = React.useState("30");
   const [savingEgressVisibility, setSavingEgressVisibility] = React.useState(false);
   // 出口探测：测一次真实请求，拿到"直连 / 经全局代理"两条出口 IP。
   const [egressTesting, setEgressTesting] = React.useState(false);
@@ -126,8 +146,21 @@ export default function SystemSettingsPage() {
     if (typeof s.web_search_backend === "string") setBackend(s.web_search_backend);
     setBraveKeySet(s.brave_key_set);
     setTavilyKeySet(s.tavily_key_set);
+    setDeepSeekKeySet(s.deepseek_search_key_set);
     if (typeof s.web_search_proxy === "string") setProxyInput(s.web_search_proxy);
     if (typeof s.global_proxy === "string") setGlobalProxyInput(s.global_proxy);
+    setProxyPool(s.proxy_pool!);
+    setProxyPoolActiveId(s.proxy_pool_active_id!);
+    setProxyPoolTimed(s.proxy_rotate_timed_enabled!);
+    setProxyPoolInterval(String(s.proxy_rotate_interval_seconds ?? 30));
+    setProxyPoolFailure(s.proxy_rotate_on_failure!);
+    setProxyPoolStrategy(s.proxy_rotate_strategy === "random" ? "random" : "sequential");
+    setProxyPoolThreshold(String(s.proxy_health_fail_threshold ?? 3));
+    setProxyPoolCooldown(String(s.proxy_health_cooldown_seconds ?? 60));
+    setProxyPoolHealthInterval(String(s.proxy_health_check_interval_seconds ?? 30));
+    setProxyPoolLogs(s.proxy_pool_switch_log!);
+    setProxyReconnectMax(String(s.proxy_reconnect_max_attempts ?? 5));
+    setProxyReconnectInterval(String(s.proxy_reconnect_interval_seconds ?? 30));
     if (typeof s.python_interpreter === "string") setPyInterp(s.python_interpreter);
     setWorkers(String(s.workers));
     setWorkerPools(s.worker_pools.map((pool) => ({ ...pool })));
@@ -435,6 +468,16 @@ export default function SystemSettingsPage() {
       .finally(() => setSavingTavilyKey(false));
   };
 
+  const saveDeepSeekKey = () => {
+    setSavingDeepSeekKey(true);
+    api.setSettings({ deepseek_search_api_key: deepSeekKeyInput }).then((s) => {
+      apply(s);
+      setDeepSeekKeyInput("");
+      toast.success("已保存 DeepSeek Search API Key");
+    }).catch((e) => toast.error(`保存失败：${(e as Error).message}`))
+      .finally(() => setSavingDeepSeekKey(false));
+  };
+
   const saveProxy = () => {
     setSavingProxy(true);
     api
@@ -448,6 +491,10 @@ export default function SystemSettingsPage() {
   };
 
   const saveGlobalProxy = () => {
+    if (proxyPool.length > 0) {
+      toast.info("代理池非空时，全局代理输入框仅用于回显，请在代理池中编辑或切换");
+      return;
+    }
     setSavingGlobalProxy(true);
     api
       .setSettings({ global_proxy: globalProxyInput.trim() })
@@ -462,6 +509,72 @@ export default function SystemSettingsPage() {
       .finally(() => setSavingGlobalProxy(false));
   };
 
+  // Refresh the full persisted snapshot after a pool mutation. Keeping only
+  // the active ID would leave the proxy test form pointed at the previous exit.
+  const runProxyPoolOperation = async (operation: () => Promise<unknown>, success?: string) => {
+    if (!loaded || proxyPoolBusy) return;
+    setProxyPoolBusy(true);
+    try {
+      await operation();
+      apply(await api.settings());
+      clearEgressReport();
+      if (success) toast.success(success);
+    } catch (error) {
+      toast.error("代理池操作未确认：" + (error as Error).message);
+    } finally {
+      setProxyPoolBusy(false);
+    }
+  };
+  const importProxyPool = () => void runProxyPoolOperation(async () => {
+    const result = await api.importProxyPool({ text: proxyPoolText });
+    setProxyPoolText("");
+    if (result.errors.length) toast.error(result.errors.map((e) => `第${e.line}行：${e.error}`).join("；"));
+    else toast.success("代理池已导入");
+  });
+  const saveProxyPoolStrategy = () => {
+    const interval = Number(proxyPoolInterval);
+    if (!Number.isFinite(interval) || !Number.isInteger(interval) || interval < 3) {
+      toast.error("定时轮换间隔必须是大于等于 3 秒的整数");
+      return;
+    }
+    api
+      .setSettings({
+        proxy_rotate_timed_enabled: proxyPoolTimed,
+        proxy_rotate_interval_seconds: Number(proxyPoolInterval),
+        proxy_rotate_on_failure: proxyPoolFailure,
+        proxy_rotate_strategy: proxyPoolStrategy,
+        proxy_health_fail_threshold: Number(proxyPoolThreshold),
+        proxy_health_cooldown_seconds: Number(proxyPoolCooldown),
+        proxy_health_check_interval_seconds: Number(proxyPoolHealthInterval),
+      })
+      .then((s) => {
+        apply(s);
+        toast.success("代理池轮换策略已保存");
+      })
+      .catch((e) => toast.error("保存失败：" + (e as Error).message));
+  };
+  const testAllProxyPool = () => void runProxyPoolOperation(() => api.testAllProxyPool(), "已完成全部代理探测");
+  const testOneProxyPool = (id: string) => void runProxyPoolOperation(() => api.testProxyPoolEntry(id));
+  const toggleProxyPoolEntry = (entry: ProxyPoolEntry) =>
+    void runProxyPoolOperation(() => api.updateProxyPool(entry.id, { enabled: !entry.enabled }));
+  const deleteProxyPoolEntry = (id: string) =>
+    void runProxyPoolOperation(() => api.deleteProxyPool(id));
+  const activateProxyPoolEntry = (id: string) =>
+    void runProxyPoolOperation(() => api.activateProxyPool(id), "已切换全局代理");
+
+  const saveProxyReconnect = () => {
+    api
+      .setSettings({
+        proxy_reconnect_max_attempts: Number(proxyReconnectMax),
+        proxy_reconnect_interval_seconds: Number(proxyReconnectInterval),
+      })
+      .then((s) => {
+        apply(s);
+        toast.success("已保存代理重连策略");
+      })
+      .catch((e) => toast.error("保存失败：" + (e as Error).message));
+  };
+
   // 测表单里当前的值，不要求先保存；后端返回直连 / 经代理两条。
   const testEgress = () => {
     const seq = ++egressSeq.current;
@@ -470,7 +583,6 @@ export default function SystemSettingsPage() {
     api
       .testEgressProxy({
         global_proxy: globalProxyInput.trim(),
-
         ...(egressProbeUrl.trim() ? { probe_url: egressProbeUrl.trim() } : {}),
       })
       .then((rep) => {
@@ -516,6 +628,7 @@ export default function SystemSettingsPage() {
         web_search_proxy: proxyInput.trim(),
         brave_search_api_key: braveKeyInput,
         tavily_search_api_key: tavilyKeyInput,
+        deepseek_search_api_key: deepSeekKeyInput,
       })
       .then((r) => {
         if (r.ok) toast.success(`搜索测试成功 · ${r.backend} 返回 ${r.count} 条结果`);
@@ -797,47 +910,82 @@ export default function SystemSettingsPage() {
                   全局代理
                 </CardTitle>
                 <CardDescription>
-                  所有 Agent 的<b>目标流量</b>经此代理出网（隐藏源 IP / 走跳板）。支持 <b>http / https / socks5</b>
-                  ，可带 <code>user:pass</code> 认证。留空=直连。
-                  <br />
-                  开启<b>流量捕获</b>时，它作为记录代理的<b>上游</b>
-                  （流量仍全量落库，再经此代理出网）；关闭捕获时，直接注入 Agent 的 bash / WebFetch
-                  出网。与网络搜索代理、LLM 代理相互独立。
-                  <br />
-                  <b>提示</b>：socks5 在<b>关闭捕获</b>时依赖各命令行工具对 <code>ALL_PROXY</code> 的支持——curl
-                  可用，python urllib 等会直接报错； 若主要用 socks5，建议开启流量捕获——此路径由 MITM
-                  亲自拨号，工具无感知、稳定生效。
+                  设置未使用独立任务隧道的目标流量出口。留空时直连；任务专属代理、网络搜索和 LLM 代理不受影响。
                 </CardDescription>
               </CardHeader>
-              <CardContent className="flex flex-col gap-2">
-                <Label htmlFor="global-proxy" className="text-sm font-normal text-muted-foreground">
-                  代理地址
-                </Label>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Input
-                    id="global-proxy"
-                    className="min-w-0 flex-1"
-                    autoComplete="off"
-                    placeholder="socks5://user:pass@host:1080 或 http://host:port（留空=直连）"
-                    value={globalProxyInput}
-                    disabled={!loaded || savingGlobalProxy}
-                    onChange={(e) => {
-                      setGlobalProxyInput(e.target.value);
-                      // 旧结果对应的是上一次的地址，留着会让人以为新值已经测过。
-                      clearEgressReport();
-                    }}
-                  />
-                  <Button type="button" onClick={saveGlobalProxy} disabled={!loaded || savingGlobalProxy}>
-                    保存
-                  </Button>
-                  {/* 测表单里当前的值，不要求先保存。 */}
-                  <Button type="button" variant="outline" onClick={testEgress} disabled={!loaded || egressTesting}>
-                    {egressTesting ? "测试中…" : "测试"}
-                  </Button>
-                </div>
-                <p className="text-muted-foreground text-xs">
-                  {globalProxyInput.trim() ? "已配置 · 所有目标流量经此代理出网" : "未配置 · 目标流量直连出网"}
-                </p>
+              <CardContent>
+                <fieldset disabled={!loaded || proxyPoolBusy} className="flex min-w-0 flex-col gap-5">
+                <section className="space-y-2">
+                  <Label htmlFor="global-proxy" className="text-sm font-normal text-muted-foreground">
+                    代理地址
+                  </Label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Input
+                      id="global-proxy"
+                      className="min-w-0 flex-1"
+                      autoComplete="off"
+                      placeholder="socks5://user:pass@host:1080 或 http://host:port（留空=直连）"
+                      value={globalProxyInput}
+                      disabled={!loaded || savingGlobalProxy}
+                      onChange={(e) => {
+                        setGlobalProxyInput(e.target.value);
+                        // 旧结果对应的是上一次的地址，留着会让人以为新值已经测过。
+                        clearEgressReport();
+                      }}
+                    />
+                    <Button type="button" onClick={saveGlobalProxy} disabled={!loaded || savingGlobalProxy}>
+                      保存
+                    </Button>
+                    {/* 测表单里当前的值，不要求先保存。 */}
+                    <Button type="button" variant="outline" onClick={testEgress} disabled={!loaded || egressTesting}>
+                      {egressTesting ? "测试中…" : "测试代理"}
+                    </Button>
+                  </div>
+                  <p className="text-muted-foreground text-xs">
+                    {globalProxyInput.trim() ? "已配置 · 使用全局出口的目标流量经此代理出网" : "未配置 · 目标流量直连出网"}
+                  </p>
+                  <details className="text-xs">
+                    <summary className="text-muted-foreground cursor-pointer select-none">代理工作方式</summary>
+                    <p className="text-muted-foreground mt-2 max-w-4xl leading-relaxed">
+                      开启流量捕获时，此代理作为记录代理的上游；关闭时，代理会注入 Agent 的 bash / WebFetch 出网。支持
+                      http、https 和 socks5，可带账号密码。关闭流量捕获使用 socks5 时，命令行工具需支持
+                      ALL_PROXY；Python urllib 等工具可能不支持，开启流量捕获可避免此限制。
+                    </p>
+                  </details>
+                </section>
+                <details className="text-xs">
+                  <summary className="text-muted-foreground cursor-pointer select-none">异常重连策略</summary>
+                  <div className="mt-3 space-y-3 rounded-md border p-3 sm:p-4">
+                    <p className="text-muted-foreground">
+                      代理异常暂停的任务按此策略探测；次数耗尽后保持暂停，可手动恢复。
+                    </p>
+                    <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="proxy-reconnect-max">最大重连次数</Label>
+                        <Input
+                          id="proxy-reconnect-max"
+                          type="number"
+                          min={1}
+                          value={proxyReconnectMax}
+                          onChange={(e) => setProxyReconnectMax(e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="proxy-reconnect-interval">重连间隔（秒）</Label>
+                        <Input
+                          id="proxy-reconnect-interval"
+                          type="number"
+                          min={1}
+                          value={proxyReconnectInterval}
+                          onChange={(e) => setProxyReconnectInterval(e.target.value)}
+                        />
+                      </div>
+                      <Button type="button" variant="outline" className="w-full sm:w-auto" onClick={saveProxyReconnect}>
+                        保存策略
+                      </Button>
+                    </div>
+                  </div>
+                </details>
                 <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
                   <div className="min-w-0">
                     <Label htmlFor="show-egress-ip" className="text-sm font-normal">
@@ -855,11 +1003,13 @@ export default function SystemSettingsPage() {
                   />
                 </div>
                 {/* 紧贴结果区：用户看两行时正好需要它。细节放文档。 */}
-                <p className="text-muted-foreground text-xs leading-relaxed">
-                  点<b>测试</b>会访问 IP 回显服务（默认 <code>api.ipify.org</code>，失败自动换 <code>ifconfig.me</code>
-                  ），它返回"这个请求从哪个 IP 来"。 ① 是不走代理时的 IP，② 是经全局代理出网时的
-                  IP。改完不用先保存，直接测。
-                </p>
+                <details className="text-xs">
+                  <summary className="text-muted-foreground cursor-pointer select-none">出口 IP 测试说明</summary>
+                  <p className="text-muted-foreground mt-2 leading-relaxed">
+                    测试会访问 IP 回显服务（默认 api.ipify.org，失败时改用 ifconfig.me）。结果中的直连 IP 与代理 IP
+                    可用于确认代理是否生效。修改地址后无需保存即可测试。
+                  </p>
+                </details>
                 {/* 内网里公网回显不可达，两行都会失败——不是代理坏了。 */}
                 <details className="text-xs">
                   <summary className="text-muted-foreground cursor-pointer select-none">
@@ -944,6 +1094,224 @@ export default function SystemSettingsPage() {
                     ))}
                   </div>
                 )}
+                <section className="space-y-3 border-t pt-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-medium">
+                        代理池 <span className="text-muted-foreground font-normal">{proxyPool.length}</span>
+                      </p>
+                      <p className="text-muted-foreground mt-1 text-xs">
+                        当前：
+                        {proxyPool.find((entry) => entry.id === proxyPoolActiveId)?.name ??
+                          (proxyPoolActiveId ? "已选择代理" : "直连")}
+                      </p>
+                    </div>
+                    <Button type="button" variant="outline" size="sm" onClick={testAllProxyPool}>
+                      测试全部
+                    </Button>
+                  </div>
+                  <details className="rounded-md border px-3 py-2 text-xs">
+                    <summary className="text-muted-foreground cursor-pointer select-none">批量导入代理</summary>
+                    <Textarea
+                      className="mt-3 font-mono"
+                      rows={3}
+                      placeholder="每行一个代理：URL|名称|备注"
+                      value={proxyPoolText}
+                      onChange={(e) => setProxyPoolText(e.target.value)}
+                    />
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <Button type="button" size="sm" onClick={importProxyPool} disabled={!proxyPoolText.trim()}>
+                        导入
+                      </Button>
+                      <span className="text-muted-foreground">显示代理地址时会隐藏账号密码。</span>
+                    </div>
+                  </details>
+                  <div className="space-y-2">
+                    {proxyPool.length === 0 ? (
+                      <p className="text-muted-foreground text-xs">暂无代理池条目。</p>
+                    ) : (
+                      proxyPool.map((entry) => (
+                        <div
+                          key={entry.id}
+                          className="grid gap-3 rounded-md border p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+                        >
+                          <div className="flex min-w-0 items-start gap-3">
+                            <Switch
+                              checked={entry.enabled}
+                              onCheckedChange={() => toggleProxyPoolEntry(entry)}
+                              aria-label="启用代理"
+                            />
+                            <div className="grid min-w-0 flex-1 gap-x-5 gap-y-2 text-xs sm:grid-cols-2">
+                              <div className="min-w-0">
+                                <p className="text-muted-foreground">代理地址</p>
+                                <p className="truncate font-mono" title={entry.url}>
+                                  {entry.name ? `${entry.name} · ` : ""}
+                                  {entry.url}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-muted-foreground">测试出口 IP</p>
+                                <p className="break-all font-mono">
+                                  {entry.egress_ip || (entry.last_error ? "探测失败" : "尚未测试")}
+                                </p>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                <span
+                                  className={
+                                    entry.health === "healthy"
+                                      ? "text-emerald-600"
+                                      : entry.health === "disabled"
+                                        ? "text-muted-foreground"
+                                        : "text-amber-600"
+                                  }
+                                >
+                                  {!entry.enabled
+                                    ? "已停用"
+                                    : entry.health === "healthy"
+                                      ? "健康"
+                                      : entry.health === "unhealthy-cooling"
+                                        ? "冷却中"
+                                        : "待检测"}
+                                </span>
+                                {entry.id === proxyPoolActiveId && <span className="text-primary">当前使用</span>}
+                                <span className="text-muted-foreground">失败 {entry.consecutive_failures} 次</span>
+                              </div>
+                              <div className="text-muted-foreground">
+                                {entry.latency_ms != null ? `${entry.latency_ms} ms` : "暂无延迟数据"}
+                                {entry.last_checked_at &&
+                                  !entry.last_checked_at.startsWith("0001-") &&
+                                  ` · ${new Date(entry.last_checked_at).toLocaleTimeString()}`}
+                                {entry.last_error && <span className="text-destructive"> · {entry.last_error}</span>}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex justify-end gap-1">
+                            <Button type="button" variant="ghost" size="sm" disabled={!entry.enabled || entry.id === proxyPoolActiveId} onClick={() => activateProxyPoolEntry(entry.id)}>
+                              使用
+                            </Button>
+                            <Button type="button" variant="ghost" size="sm" onClick={() => testOneProxyPool(entry.id)}>
+                              测试
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => deleteProxyPoolEntry(entry.id)}
+                            >
+                              删除
+                            </Button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <details className="rounded-md border px-3 py-2 text-xs">
+                    <summary className="text-muted-foreground cursor-pointer select-none">轮换与健康检查策略</summary>
+                    <div className="mt-3 space-y-3">
+                      <p className="text-muted-foreground">设置代理池的切换条件与健康检查频率。</p>
+                      <div className="flex flex-wrap items-center gap-x-8 gap-y-3 border-b pb-3">
+                        <div className="flex items-center gap-3">
+                          <Label htmlFor="proxy-pool-timed">定时轮换</Label>
+                          <Switch id="proxy-pool-timed" checked={proxyPoolTimed} onCheckedChange={setProxyPoolTimed} />
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <Label htmlFor="proxy-pool-failure">失效轮换</Label>
+                          <Switch
+                            id="proxy-pool-failure"
+                            checked={proxyPoolFailure}
+                            onCheckedChange={setProxyPoolFailure}
+                          />
+                        </div>
+                      </div>
+                      <div className="grid max-w-2xl grid-cols-1 gap-x-5 gap-y-4 sm:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <Label htmlFor="proxy-pool-strategy">切换顺序</Label>
+                          <Select
+                            value={proxyPoolStrategy}
+                            onValueChange={(v) => setProxyPoolStrategy(v as "sequential" | "random")}
+                          >
+                            <SelectTrigger id="proxy-pool-strategy" className="w-full">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="sequential">顺序</SelectItem>
+                              <SelectItem value="random">随机</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="proxy-pool-interval">轮换间隔（秒，≥3）</Label>
+                          <Input
+                            id="proxy-pool-interval"
+                            type="number"
+                            min={3}
+                            value={proxyPoolInterval}
+                            onChange={(e) => setProxyPoolInterval(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="proxy-pool-threshold">连续失败阈值（次）</Label>
+                          <Input
+                            id="proxy-pool-threshold"
+                            type="number"
+                            min={1}
+                            value={proxyPoolThreshold}
+                            onChange={(e) => setProxyPoolThreshold(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="proxy-pool-cooldown">故障冷却时间（秒）</Label>
+                          <Input
+                            id="proxy-pool-cooldown"
+                            type="number"
+                            min={1}
+                            value={proxyPoolCooldown}
+                            onChange={(e) => setProxyPoolCooldown(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="proxy-pool-health-interval">健康检查间隔（秒）</Label>
+                          <Input
+                            id="proxy-pool-health-interval"
+                            type="number"
+                            min={1}
+                            value={proxyPoolHealthInterval}
+                            onChange={(e) => setProxyPoolHealthInterval(e.target.value)}
+                          />
+                        </div>
+                      </div>
+                      <div className="flex justify-end border-t pt-3">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="w-full sm:w-auto"
+                          onClick={saveProxyPoolStrategy}
+                        >
+                          保存轮换策略
+                        </Button>
+                      </div>
+                    </div>
+                  </details>
+                  {proxyPoolLogs.length > 0 && (
+                    <details className="text-xs">
+                      <summary className="text-muted-foreground cursor-pointer select-none">
+                        最近切换记录（{proxyPoolLogs.length}）
+                      </summary>
+                      <div className="mt-2 space-y-1">
+                        {proxyPoolLogs
+                          .slice(-5)
+                          .reverse()
+                          .map((log) => (
+                            <p key={`${log.at}-${log.to}`} className="text-muted-foreground">
+                              {new Date(log.at).toLocaleTimeString()} · {log.from || "直连"} → {log.to || "直连"} ·{" "}
+                              {log.reason}
+                            </p>
+                          ))}
+                      </div>
+                    </details>
+                  )}
+                </section>
+                </fieldset>
               </CardContent>
             </Card>
 
@@ -1143,11 +1511,11 @@ export default function SystemSettingsPage() {
                 </CardTitle>
                 <CardDescription>
                   这是网络搜索的<b>总开关 + 来源配置</b>。开启后，才能在<b>每个 Agent 的配置</b>里单独选择是否启用
-                  <b>web_search</b>（仅返回标题/链接/摘要，不抓取正文；抓取由 WebFetch 负责）。网络搜索<b>不走</b>
-                  记录代理，独立于流量捕获。
+                  <b>网络搜索</b>。常规搜索返回标题、链接和摘要；DeepSeek 还提供网页提取工具。
+                  搜索服务调用使用独立出口代理，不经过流量记录代理。
                   <br />
                   来源可选 <b>DuckDuckGo（ddgs）</b>（无需 Key）、<b>Brave（免费版）</b>（需填写 Brave API Key）、{" "}
-                  <b>Tavily</b>（需填写 Tavily API Key）或 <b>DeepSeek</b>（复用当前 LLM 配置）。总开关关闭时，各 Agent
+                  <b>Tavily</b>（需填写 Tavily API Key）或 <b>DeepSeek</b>（需单独配置 Search API Key）。总开关关闭时，各 Agent
                   的网络搜索开关不可用。
                 </CardDescription>
               </CardHeader>
@@ -1193,21 +1561,32 @@ export default function SystemSettingsPage() {
 
                 {webSearch && backend === "deepseek" && (
                   <div className="border-border/60 bg-muted/30 flex flex-col gap-2 rounded-md border p-3">
-                    <p className="text-sm font-medium">DeepSeek 官方联网搜索</p>
+                    <p className="text-sm font-medium">DeepSeek 联网搜索</p>
                     <p className="text-muted-foreground text-xs leading-relaxed">
-                      该来源直接复用<b>当前激活的 LLM 配置</b>。因此它
-                      <b>仅支持 DeepSeek 官方模型</b>，且该配置<b>必须使用 anthropic 协议</b>
-                      ——DeepSeek 的 OpenAI 协议端点不支持服务端搜索。切换 LLM 配置后此来源可能失效。
+                      通过 DeepSeek 独立 Search / Fetch API 提供搜索与网页提取，使用当前 Agent 选择的模型生成查询和整理结果。
                     </p>
                     <p className="text-muted-foreground text-xs leading-relaxed">
-                      与其它来源不同，搜索由 <b>DeepSeek 服务端执行</b>：每次搜索会额外消耗一次模型调用（产生 Token
-                      费用），搜索请求<b>不经过上面的出口代理</b>，也<b>不计入流量留痕</b>；返回结果
-                      <b>只有标题和链接</b>
-                      （无摘要），需要正文时由 WebFetch 抓取。
+                      查询和待提取 URL 会发送到 DeepSeek；提取由其服务访问页面，不使用任务目标代理，也不形成 ARTEX 抓包证据。
+                      ARTEX 到 DeepSeek 的调用可使用独立搜索代理。API Key 仅保存于服务端，不会回显。
                     </p>
-                    <p className="text-muted-foreground text-xs leading-relaxed">
-                      是否满足上述条件由你自行确认，系统不做拦截；可用下方「测试搜索」按钮实际跑一次来验证。
-                    </p>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type="password"
+                        autoComplete="off"
+                        placeholder={deepSeekKeySet ? "已配置（留空则不变）" : "DeepSeek Search API Key"}
+                        value={deepSeekKeyInput}
+                        disabled={!loaded || savingDeepSeekKey}
+                        onChange={(e) => setDeepSeekKeyInput(e.target.value)}
+                      />
+                      <Button
+                        type="button"
+                        onClick={saveDeepSeekKey}
+                        disabled={!loaded || savingDeepSeekKey || deepSeekKeyInput.trim() === ""}
+                      >
+                        保存
+                      </Button>
+                    </div>
+                    {deepSeekKeySet && <span className="text-xs text-emerald-500">API Key 已配置</span>}
                   </div>
                 )}
 
@@ -1406,11 +1785,13 @@ export default function SystemSettingsPage() {
                             {!selected && pool.profile_id ? (
                               <SelectItem value={pool.profile_id}>配置 #{pool.profile_id} 已删除/不可用</SelectItem>
                             ) : null}
-                            {llmProfiles.map((profile) => (
-                              <SelectItem key={profile.id} value={profile.id}>
-                                {profile.name} · {profile.model}
-                              </SelectItem>
-                            ))}
+                            {llmProfiles
+                              .filter((profile) => profile.format !== "jev")
+                              .map((profile) => (
+                                <SelectItem key={profile.id} value={profile.id}>
+                                  {profile.name} · {profile.model}
+                                </SelectItem>
+                              ))}
                           </SelectContent>
                         </Select>
                         <Input

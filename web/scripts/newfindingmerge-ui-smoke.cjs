@@ -68,6 +68,7 @@ async function serveAPI(request, response, url) {
     response.writeHead(200, { "Content-Type": "image/png", "Content-Length": png.length, "Cache-Control": "no-store", "X-Report-Screenshot-Timestamp": stamp });
     return response.end(png);
   }
+  if (endpoint === "/api/version") return json(response, 200, { ok: true, service: "synthetic", version: "fixture" });
   if (endpoint === "/api/health") return json(response, 200, { ok: true, service: "synthetic", version: "fixture" });
   if (endpoint === "/api/auth/status") return json(response, 200, { initialized: true });
   if (endpoint === "/api/update/check") return json(response, 200, { has_update: false, current: "fixture" });

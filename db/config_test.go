@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 )
 
 // TestPoolProfilesOrder pins the failover chain query: keyless profiles can't
@@ -181,6 +183,296 @@ func TestConfigStores(t *testing.T) {
 		t.Fatalf("skill visibility should be cleared on delete: %+v", names2)
 	}
 	d.DeleteMCP(mid)
+}
+
+func TestJevProfileCannotBeActivatedOrAgentBound(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+	id, err := d.SaveProfile(&LLMProfile{Name: "t-jev-only", Format: "jev", Model: "jev-latest", APIKey: "jev-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM llm_profiles WHERE id=$1`, id) })
+	if err := d.SetActiveProfile(id); !errors.Is(err, ErrJevProfileJudgeOnly) {
+		t.Fatalf("activate Jev error=%v, want %v", err, ErrJevProfileJudgeOnly)
+	}
+	if err := d.SetAgentLLMProfile("planner", &id); !errors.Is(err, ErrJevProfileJudgeOnly) {
+		t.Fatalf("bind Jev error=%v, want %v", err, ErrJevProfileJudgeOnly)
+	}
+}
+
+func TestJevProfileCannotBeSavedAsDefault(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+	if _, err := d.SaveProfile(&LLMProfile{Name: "t-jev-default", Format: "jev", Model: "jev-latest", APIKey: "jev-key", IsDefault: true}); !errors.Is(err, ErrJevProfileJudgeOnly) {
+		t.Fatalf("SaveProfile Jev default error=%v, want %v", err, ErrJevProfileJudgeOnly)
+	}
+}
+
+// The writer must re-read is_default after acquiring its lock, rather than use
+// the value observed before a concurrent activation committed.
+func TestJevProfileConversionWaitsForActivation(t *testing.T) {
+	dsn := testDSN(t)
+	d, err := Open(dsn)
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	previous, err := d.ActiveProfile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := &LLMProfile{Name: fmt.Sprintf("jev-convert-active-%d", time.Now().UnixNano()), Format: "openai", Model: "fixture", APIKey: "fixture-key"}
+	profile.ID, err = d.SaveProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.Exec(`UPDATE llm_profiles SET is_default=false WHERE id=$1`, profile.ID)
+		if previous != nil {
+			_ = d.SetActiveProfile(previous.ID)
+		}
+		_, _ = d.Exec(`DELETE FROM llm_profiles WHERE id=$1`, profile.ID)
+	})
+	blocker, err := d.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
+	if _, err := blocker.Exec(`SELECT id FROM llm_profiles WHERE id=$1 FOR UPDATE`, profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.Exec(`UPDATE llm_profiles SET is_default=false WHERE is_default`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.Exec(`UPDATE llm_profiles SET is_default=true WHERE id=$1`, profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	writer, pid := openSingleConnectionTestDB(t, dsn)
+	done := make(chan error, 1)
+	profile.Format = "jev"
+	go func() { _, err := writer.SaveProfile(profile); done <- err }()
+	if err := waitForBackendBlock(d, pid, done); err != nil {
+		t.Fatal(err)
+	}
+	if err := blocker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForMutationResult(done); !errors.Is(err, ErrJevProfileJudgeOnly) {
+		t.Fatalf("format conversion error=%v, want %v", err, ErrJevProfileJudgeOnly)
+	}
+	got, err := d.ProfileByID(profile.ID)
+	if err != nil || got == nil || !got.IsDefault || got.Format != "openai" {
+		t.Fatalf("concurrent activation was changed by rejected conversion: %+v err=%v", got, err)
+	}
+}
+
+// New bindings use a key-share profile lock. Conversion must exclude that lock,
+// wait for its commit, and only then check live references without locking any
+// child row in the opposite order.
+func TestJevProfileConversionWaitsForReferenceCommit(t *testing.T) {
+	dsn := testDSN(t)
+	d, err := Open(dsn)
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	suffix := time.Now().UnixNano()
+	profile := &LLMProfile{Name: fmt.Sprintf("jev-convert-bound-%d", suffix), Format: "openai", Model: "fixture", APIKey: "fixture-key"}
+	profile.ID, err = d.SaveProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM llm_profiles WHERE id=$1`, profile.ID) })
+	agent, err := d.CreateAgent(fmt.Sprintf("jev_bound_%d", suffix), "fixture", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteAgent(agent.Key) })
+	blocker, err := d.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
+	if _, err := blocker.Exec(`SELECT id FROM agents WHERE id=$1 FOR UPDATE`, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := lockLLMProfileForReference(blocker, &profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.Exec(`UPDATE agents SET llm_profile_id=$1 WHERE id=$2`, profile.ID, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	writer, pid := openSingleConnectionTestDB(t, dsn)
+	done := make(chan error, 1)
+	profile.Format = "jev"
+	go func() { _, err := writer.SaveProfile(profile); done <- err }()
+	if err := waitForBackendBlock(d, pid, done); err != nil {
+		t.Fatal(err)
+	}
+	if err := blocker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForMutationResult(done); !errors.Is(err, ErrJevProfileJudgeOnly) {
+		t.Fatalf("bound format conversion error=%v, want %v", err, ErrJevProfileJudgeOnly)
+	}
+	got, err := d.ProfileByID(profile.ID)
+	if err != nil || got == nil || got.Format != "openai" {
+		t.Fatalf("bound profile changed on rejection: %+v err=%v", got, err)
+	}
+}
+
+func TestJevProfileReferenceChecksCommittedFormat(t *testing.T) {
+	dsn := testDSN(t)
+	d, err := Open(dsn)
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	profile := &LLMProfile{Name: fmt.Sprintf("jev-convert-admit-%d", time.Now().UnixNano()), Format: "openai", Model: "fixture", APIKey: "fixture-key"}
+	profile.ID, err = d.SaveProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM llm_profiles WHERE id=$1`, profile.ID) })
+	blocker, err := d.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
+	if _, err := blocker.Exec(`SELECT id FROM llm_profiles WHERE id=$1 FOR UPDATE`, profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.Exec(`UPDATE llm_profiles SET format='jev' WHERE id=$1`, profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	writer, pid := openSingleConnectionTestDB(t, dsn)
+	done := make(chan error, 1)
+	go func() {
+		_, err := writer.CreateConversation("auto", "must not bind Jev", &profile.ID)
+		done <- err
+	}()
+	if err := waitForBackendBlock(d, pid, done); err != nil {
+		t.Fatal(err)
+	}
+	if err := blocker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForMutationResult(done); !errors.Is(err, ErrJevProfileJudgeOnly) {
+		t.Fatalf("conversation admission error=%v, want %v", err, ErrJevProfileJudgeOnly)
+	}
+	var count int
+	if err := d.QueryRow(`SELECT count(*) FROM conversations WHERE llm_profile_id=$1`, profile.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("rejected conversation persisted a binding: count=%d err=%v", count, err)
+	}
+}
+
+func TestJevProfileUnboundConversionPreservesInstructions(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	profile := &LLMProfile{
+		Name: fmt.Sprintf("jev-convert-free-%d", time.Now().UnixNano()), Format: "openai-responses", Model: "fixture", APIKey: "fixture-key",
+		ModelInstructionsFile: "fixture.md", ModelInstructionsFiles: []string{"fixture.md", "second.md"}, CodexConfigFile: "fixture.toml",
+	}
+	profile.ID, err = d.SaveProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM llm_profiles WHERE id=$1`, profile.ID) })
+	profile.Format = "jev"
+	profile.APIKey = "" // Empty on update must retain the stored key.
+	if _, err := d.SaveProfile(profile); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.ProfileByID(profile.ID)
+	if err != nil || got == nil || got.Format != "jev" || got.APIKey != "fixture-key" || got.ModelInstructionsFile != "fixture.md" || got.CodexConfigFile != "fixture.toml" || len(got.ModelInstructionsFiles) != 2 || got.ModelInstructionsFiles[1] != "second.md" {
+		t.Fatalf("unbound conversion lost profile fields: %+v err=%v", got, err)
+	}
+}
+
+func TestActiveLLMProfileLockNamespace(t *testing.T) {
+	for _, reserved := range []int64{schemaMigrationLockKey, 7337741002, companyScopeMutationLock, findingEvidenceLockKey, 7337741006} {
+		if activeLLMProfileLockKey == reserved {
+			t.Fatal("active profile lock collides with an infrastructure lock")
+		}
+	}
+}
+
+func TestActiveProfileActivationSerializesBeforeRowLocks(t *testing.T) {
+	dsn := testDSN(t)
+	d, err := Open(dsn)
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	previous, err := d.ActiveProfile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	t.Cleanup(func() {
+		for _, id := range ids {
+			_, _ = d.Exec(`UPDATE llm_profiles SET is_default=false WHERE id=$1`, id)
+		}
+		if previous != nil {
+			_ = d.SetActiveProfile(previous.ID)
+		}
+		for _, id := range ids {
+			_, _ = d.Exec(`DELETE FROM llm_profiles WHERE id=$1`, id)
+		}
+	})
+	for i := 0; i < 2; i++ {
+		id, err := d.SaveProfile(&LLMProfile{Name: fmt.Sprintf("activate-serial-%d-%d", time.Now().UnixNano(), i), Format: "openai", Model: "fixture"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	blocker, err := d.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
+	if _, err := blocker.Exec(`SELECT pg_advisory_xact_lock($1)`, activeLLMProfileLockKey); err != nil {
+		t.Fatal(err)
+	}
+	dones := make([]chan error, 0, 2)
+	for _, id := range ids {
+		writer, pid := openSingleConnectionTestDB(t, dsn)
+		done := make(chan error, 1)
+		dones = append(dones, done)
+		go func() { done <- writer.SetActiveProfile(id) }()
+		if err := waitForBackendBlock(d, pid, done); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Waiting on the global switch gate must not already own either target.
+	assertProfilesUnlocked(t, d, ids...)
+	if err := blocker.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	for _, done := range dones {
+		if err := waitForMutationResult(done); err != nil {
+			t.Fatalf("concurrent activation failed: %v", err)
+		}
+	}
+	var count int
+	if err := d.QueryRow(`SELECT count(*) FROM llm_profiles WHERE is_default`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("single-default invariant: count=%d err=%v", count, err)
+	}
+	got, err := d.ActiveProfile()
+	if err != nil || got == nil || (got.ID != ids[0] && got.ID != ids[1]) {
+		t.Fatalf("concurrent activation selected an unexpected profile: %+v err=%v", got, err)
+	}
 }
 
 func contains(s, sub string) bool {
