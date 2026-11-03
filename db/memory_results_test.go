@@ -280,12 +280,21 @@ func TestMemoryLateOutcomeCannotConsumeNewSourceGeneration(t *testing.T) {
 	d := memoryFixtureDB(t)
 	memoryEnableIncrementalHistory(t, d)
 	task := memoryFixtureTask(t, d)
-	source := memoryFixtureSource(t, d, task)
+	store := d.Exploration(task.ExplorationID)
+	intent, _ := memoryFixtureIntent(t, d, task, "open", 1)
+	if claimed, err := store.ClaimIntent(intent, "worker"); err != nil || !claimed {
+		t.Fatalf("claim first native generation: %v %v", claimed, err)
+	}
+	// ReopenIntent deliberately excludes successfully completed work. Start
+	// from a genuinely blocked run, then use its public rerun/claim path.
+	source := memoryFinishStage(t, d, task, intent, "blocked")
 	source.Historical = false
 	old := memoryQueueClaim(t, d, source)
-	intent := mustMemoryNodeID(t, source.ID)
-	if reopened, err := d.Exploration(task.ExplorationID).ReopenIntent(intent); err != nil || !reopened {
+	if reopened, err := store.ReopenIntent(intent); err != nil || !reopened {
 		t.Fatalf("reopen native generation: %v %v", reopened, err)
+	}
+	if claimed, err := store.ClaimIntent(intent, "worker"); err != nil || !claimed {
+		t.Fatalf("claim new native generation: %v %v", claimed, err)
 	}
 	current := memoryFinishStage(t, d, task, intent, "done")
 	current.Historical = false
