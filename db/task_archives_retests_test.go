@@ -1,10 +1,13 @@
 package db
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 type retestArchiveFixture struct {
@@ -493,5 +496,243 @@ func TestTaskArchiveRetestFormatRequiresNewHistoryTables(t *testing.T) {
 				t.Fatalf("invalid new-format history table %s was accepted", table)
 			}
 		}
+	}
+}
+
+func reverseIntentSideArchiveFixture(t *testing.T, f *retestArchiveFixture) (int64, *Task, int64, string) {
+	t.Helper()
+	intent, err := f.d.Exploration(f.task.ExplorationID).AddIntent(map[string]any{"summary": "synthetic reverse intent reference"}, 1, nil, "human")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := f.d.CreateTask("foreign intent side fixture", "preserve foreign task history", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.tasks = append(f.tasks, other.ID)
+	var approval int64
+	if err := f.d.QueryRow(`INSERT INTO intercept_pending(task_id,tool_name,status)
+ VALUES($1,'synthetic_read','pending') RETURNING id`, fmt.Sprint(other.ID)).Scan(&approval); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = f.d.Exec(`DELETE FROM intercept_pending WHERE id=$1`, approval) })
+	return intent, other, approval, fmt.Sprintf("foreign-reverse-intent-side-%d", other.ID)
+}
+
+func TestTaskArchiveRetestForeignIntentReferenceBlocksCompaction(t *testing.T) {
+	for _, moment := range []string{"before_snapshot", "after_snapshot"} {
+		t.Run(moment, func(t *testing.T) {
+			f := newRetestArchiveFixture(t)
+			intent, other, approval, key := reverseIntentSideArchiveFixture(t, f)
+			insertForeign := func() {
+				t.Helper()
+				// Approval-parent CHECK permits this mixed shape. It remains
+				// another task's row and must never be imported just to delete it.
+				if _, err := f.d.Exec(`INSERT INTO side_question_sessions(session_key,task_id,exploration_id,intent_id,approval_id,run_id,version,snapshot)
+ VALUES($1,$2,$3,$4,$5,1,1,'{}')`, key, other.ID, other.ExplorationID, intent, approval); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.d.Exec(`INSERT INTO side_question_requests(id,session_key,generation,client_id,question,answer,status,model,snapshot_at)
+ VALUES($1,$2,0,'foreign-fixture','foreign synthetic question','foreign retained answer','completed','{}',now())`, key+"-request", key); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if moment == "before_snapshot" {
+				insertForeign()
+			}
+			a, snapshot := f.snapshot(t)
+			if snapshot.DataCounts["side_question_sessions"] != 0 {
+				t.Fatal("foreign reverse-intent history was exported as task-owned")
+			}
+			if moment == "after_snapshot" {
+				insertForeign()
+			}
+			if err := f.d.CompleteTaskArchive(a.ID, snapshot, "synthetic-package", "synthetic-digest", 100, 50); err == nil {
+				t.Fatal("native-node cleanup cascaded an unarchived foreign side session")
+			}
+			requireArchiveRowCount(t, f.d, `SELECT count(*) FROM exploration_nodes WHERE id=$1 AND exploration_id=$2`, 1, intent, f.task.ExplorationID)
+			requireArchiveRowCount(t, f.d, `SELECT count(*) FROM finding_retests WHERE id=$1`, 1, f.retest.ID)
+			requireArchiveRowCount(t, f.d, `SELECT count(*) FROM conversations WHERE id=$1`, 1, f.conversation.ID)
+			requireArchiveRowCount(t, f.d, `SELECT count(*) FROM side_question_sessions WHERE session_key=$1 AND task_id=$2 AND intent_id=$3`, 1, key, other.ID, intent)
+			requireArchiveRowCount(t, f.d, `SELECT count(*) FROM side_question_requests WHERE id=$1 AND answer='foreign retained answer'`, 1, key+"-request")
+			requireArchiveRowCount(t, f.d, `SELECT count(*) FROM tasks WHERE id=$1 AND deleted_at IS NULL AND archived_at IS NULL`, 1, f.task.ID)
+		})
+	}
+}
+
+func TestTaskArchiveRetestNodeLockBlocksLateReverseIntentFK(t *testing.T) {
+	f := newRetestArchiveFixture(t)
+	intent, other, approval, key := reverseIntentSideArchiveFixture(t, f)
+	_, snapshot := f.snapshot(t)
+	locked, err := f.d.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locked.Rollback()
+	var taskID int64
+	if err := locked.QueryRow(`SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, f.task.ID).Scan(&taskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateRetestArchiveCompaction(locked, f.task.ID, f.task.ExplorationID, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	writer, err := f.d.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	if _, err := writer.ExecContext(ctx, `SET LOCAL lock_timeout='200ms'`); err != nil {
+		t.Fatal(err)
+	}
+	insert := `INSERT INTO side_question_sessions(session_key,task_id,exploration_id,intent_id,approval_id,run_id,version,snapshot)
+ VALUES($1,$2,$3,$4,$5,1,1,'{}')`
+	_, err = writer.ExecContext(ctx, insert, key, other.ID, other.ExplorationID, intent, approval)
+	var sqlState interface{ SQLState() string }
+	if !errors.As(err, &sqlState) || sqlState.SQLState() != "55P03" {
+		t.Fatalf("late reverse FK did not wait for the native-node lock: %v", err)
+	}
+	_ = writer.Rollback()
+	if err := locked.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	// The shape is legal once the archive's parent lock is released: this is
+	// not a synthetic CHECK/FK error masquerading as proof of exclusion.
+	if _, err := f.d.Exec(insert, key, other.ID, other.ExplorationID, intent, approval); err != nil {
+		t.Fatal(err)
+	}
+	requireArchiveRowCount(t, f.d, `SELECT count(*) FROM side_question_sessions WHERE session_key=$1`, 1, key)
+}
+
+func claimRetestArchiveDelete(t *testing.T, f *retestArchiveFixture, id int64) {
+	t.Helper()
+	if _, err := f.d.QueueTaskArchiveDelete(id); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := f.d.ClaimTaskArchiveJob(t.Context())
+	if err != nil || claimed == nil || claimed.ID != id || claimed.State != Deleting {
+		t.Fatalf("claim synthetic archive deletion: %+v %v", claimed, err)
+	}
+}
+
+func TestTaskArchiveRetestColdStubDeletePreservesForeignExplorationSide(t *testing.T) {
+	f := newRetestArchiveFixture(t)
+	other, err := f.d.CreateTask("cold foreign side fixture", "preserve mixed exploration reference", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.tasks = append(f.tasks, other.ID)
+	var approval int64
+	if err := f.d.QueryRow(`INSERT INTO intercept_pending(task_id,tool_name,status)
+ VALUES($1,'synthetic_read','pending') RETURNING id`, fmt.Sprint(other.ID)).Scan(&approval); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = f.d.Exec(`DELETE FROM intercept_pending WHERE id=$1`, approval) })
+	key := fmt.Sprintf("cold-foreign-exploration-side-%d", other.ID)
+	if _, err := f.d.Exec(`INSERT INTO side_question_sessions(session_key,task_id,exploration_id,approval_id,run_id,version,snapshot)
+ VALUES($1,$2,$3,$4,1,1,'{}')`, key, other.ID, f.task.ExplorationID, approval); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.d.Exec(`INSERT INTO side_question_requests(id,session_key,generation,client_id,question,answer,status,model,snapshot_at)
+ VALUES($1,$2,0,'cold-foreign-fixture','foreign question','retained foreign answer','completed','{}',now())`, key+"-request", key); err != nil {
+		t.Fatal(err)
+	}
+	a, snapshot := f.snapshot(t)
+	if snapshot.DataCounts["side_question_sessions"] != 0 {
+		t.Fatal("foreign mixed exploration side history was exported as owned")
+	}
+	if err := f.d.CompleteTaskArchive(a.ID, snapshot, "synthetic-retained-package", "synthetic-retained-digest", 100, 50); err != nil {
+		t.Fatal(err)
+	}
+	claimRetestArchiveDelete(t, f, a.ID)
+	if err := f.d.DeleteTaskArchiveStub(a.ID); !errors.Is(err, ErrTaskArchiveDeleteBlocked) {
+		t.Fatalf("cold deletion did not reject hot reverse references: %v", err)
+	}
+	requireArchiveRowCount(t, f.d, `SELECT count(*) FROM tasks WHERE id=$1 AND archived_at IS NOT NULL`, 1, f.task.ID)
+	requireArchiveRowCount(t, f.d, `SELECT count(*) FROM explorations WHERE id=$1`, 1, f.task.ExplorationID)
+	requireArchiveRowCount(t, f.d, `SELECT count(*) FROM task_archives WHERE id=$1 AND state='deleting'
+ AND archive_path='synthetic-retained-package' AND sha256='synthetic-retained-digest'`, 1, a.ID)
+	requireArchiveRowCount(t, f.d, `SELECT count(*) FROM side_question_sessions WHERE session_key=$1 AND task_id=$2 AND exploration_id=$3`, 1, key, other.ID, f.task.ExplorationID)
+	requireArchiveRowCount(t, f.d, `SELECT count(*) FROM side_question_requests WHERE id=$1 AND answer='retained foreign answer'`, 1, key+"-request")
+	requireArchiveRowCount(t, f.d, `SELECT count(*) FROM intercept_pending WHERE id=$1 AND status='pending'`, 1, approval)
+}
+
+func TestTaskArchiveRetestColdStubWithoutSideReferencesDeletes(t *testing.T) {
+	f := newRetestArchiveFixture(t)
+	a, snapshot := f.snapshot(t)
+	if err := f.d.CompleteTaskArchive(a.ID, snapshot, "synthetic-package", "synthetic-digest", 100, 50); err != nil {
+		t.Fatal(err)
+	}
+	claimRetestArchiveDelete(t, f, a.ID)
+	if err := f.d.DeleteTaskArchiveStub(a.ID); err != nil {
+		t.Fatal(err)
+	}
+	requireArchiveRowCount(t, f.d, `SELECT count(*) FROM tasks WHERE id=$1`, 0, f.task.ID)
+	requireArchiveRowCount(t, f.d, `SELECT count(*) FROM explorations WHERE id=$1`, 0, f.task.ExplorationID)
+	requireArchiveRowCount(t, f.d, `SELECT count(*) FROM task_archives WHERE id=$1`, 0, a.ID)
+}
+
+func TestTaskArchiveRetestColdStubParentsBlockLateSideFK(t *testing.T) {
+	for _, parent := range []string{"task", "exploration"} {
+		t.Run(parent, func(t *testing.T) {
+			f := newRetestArchiveFixture(t)
+			other, err := f.d.CreateTask("cold parent lock fixture", "synthetic late foreign key", nil, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.tasks = append(f.tasks, other.ID)
+			var approval int64
+			if err := f.d.QueryRow(`INSERT INTO intercept_pending(task_id,tool_name,status)
+ VALUES($1,'synthetic_read','pending') RETURNING id`, fmt.Sprint(other.ID)).Scan(&approval); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _, _ = f.d.Exec(`DELETE FROM intercept_pending WHERE id=$1`, approval) })
+			a, snapshot := f.snapshot(t)
+			if err := f.d.CompleteTaskArchive(a.ID, snapshot, "synthetic-package", "synthetic-digest", 100, 50); err != nil {
+				t.Fatal(err)
+			}
+			locked, err := f.d.BeginTx(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer locked.Rollback()
+			var id int64
+			if err := locked.QueryRow(`SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, f.task.ID).Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			if err := guardColdArchiveSideReferences(locked, f.task.ID, f.task.ExplorationID); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			writer, err := f.d.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Rollback()
+			if _, err := writer.ExecContext(ctx, `SET LOCAL lock_timeout='200ms'`); err != nil {
+				t.Fatal(err)
+			}
+			taskID, expID := other.ID, f.task.ExplorationID
+			if parent == "task" {
+				taskID, expID = f.task.ID, other.ExplorationID
+			}
+			key := fmt.Sprintf("cold-parent-side-%s-%d", parent, other.ID)
+			insert := `INSERT INTO side_question_sessions(session_key,task_id,exploration_id,approval_id,run_id,version,snapshot)
+ VALUES($1,$2,$3,$4,1,1,'{}')`
+			_, err = writer.ExecContext(ctx, insert, key, taskID, expID, approval)
+			var state interface{ SQLState() string }
+			if !errors.As(err, &state) || state.SQLState() != "55P03" {
+				t.Fatalf("late %s FK did not wait for the parent lock: %v", parent, err)
+			}
+			_ = writer.Rollback()
+			if err := locked.Rollback(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.d.Exec(insert, key, taskID, expID, approval); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

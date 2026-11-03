@@ -196,6 +196,31 @@ type retestArchiveScope struct {
 	SideSessionKeys []string
 }
 
+// Cold compaction should already have moved every owned side history row.
+// Any remaining reverse FK is hot data, possibly with an approval parent and
+// mixed legacy ownership. Refuse permanent deletion rather than cascading it.
+// The caller owns the task lock; the exploration/node locks also prevent a
+// late FK insert from racing the check without locking the global side table.
+func guardColdArchiveSideReferences(tx *sql.Tx, taskID, expID int64) error {
+	var locked int64
+	if err := tx.QueryRow(`SELECT id FROM explorations WHERE id=$1 FOR UPDATE`, expID).Scan(&locked); err != nil {
+		return err
+	}
+	if err := lockArchiveRows(tx, `SELECT id FROM exploration_nodes WHERE exploration_id=$1 ORDER BY id FOR UPDATE NOWAIT`, expID); err != nil {
+		return err
+	}
+	var referenced bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM side_question_sessions s
+ WHERE s.task_id=$1 OR s.exploration_id=$2 OR EXISTS(
+  SELECT 1 FROM exploration_nodes n WHERE n.id=s.intent_id AND n.exploration_id=$2))`, taskID, expID).Scan(&referenced); err != nil {
+		return err
+	}
+	if referenced {
+		return fmt.Errorf("%w: hot side history still references the archived task", ErrTaskArchiveDeleteBlocked)
+	}
+	return nil
+}
+
 func validateRetestArchiveCompaction(tx *sql.Tx, taskID, expID int64, snapshot *TaskArchiveSnapshot) (*retestArchiveScope, error) {
 	if err := requireRetestArchiveTables(snapshot); err != nil {
 		return nil, err
@@ -203,6 +228,13 @@ func validateRetestArchiveCompaction(tx *sql.Tx, taskID, expID int64, snapshot *
 	// Finding -> conversation -> retest/activity matches retest creation/finish
 	// and conversation-deletion triggers without acquiring an unrelated task.
 	if err := lockArchiveRows(tx, `SELECT id FROM findings WHERE task_id=$1 ORDER BY id FOR UPDATE`, taskID); err != nil {
+		return nil, err
+	}
+	// The intent FK can legally coexist with a foreign task parent when an
+	// approval parent is present. Freeze every native node before checking its
+	// reverse references. NOWAIT avoids a wait cycle with native cleanup that
+	// already owns an intent and is waiting for one of our finding rows.
+	if err := lockArchiveRows(tx, `SELECT id FROM exploration_nodes WHERE exploration_id=$1 ORDER BY id FOR UPDATE NOWAIT`, expID); err != nil {
 		return nil, err
 	}
 	conversations, err := decodeArchiveRows(snapshot.Tables["conversations"])
@@ -284,6 +316,16 @@ func validateRetestArchiveCompaction(tx *sql.Tx, taskID, expID int64, snapshot *
 			return nil, errors.New("invalid archived side session key")
 		}
 		result.SideSessionKeys = append(result.SideSessionKeys, key)
+	}
+	var outsideSideReference bool
+	if err := tx.QueryRow(`SELECT EXISTS(
+ SELECT 1 FROM side_question_sessions s JOIN exploration_nodes n ON n.id=s.intent_id
+ WHERE n.exploration_id=$1 AND NOT (s.session_key=ANY(COALESCE($2::text[],ARRAY[]::text[]))))`,
+		expID, result.SideSessionKeys).Scan(&outsideSideReference); err != nil {
+		return nil, err
+	}
+	if outsideSideReference {
+		return nil, errors.New("side history references task nodes outside the verified archive scope")
 	}
 	return result, nil
 }

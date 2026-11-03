@@ -190,6 +190,8 @@ jobs:
           grep -q -- '^--- PASS: TestTaskConversationFindingCancellationAtValidateAndStartIsStopped ' "$task_tools_log"
           grep -q -- '^--- PASS: TestTaskArchiveRetestConversationAndApprovalRoundTrip ' "$retest_archive_log"
           grep -q -- '^--- PASS: TestTaskArchiveRetestSharedConversationRemainsHotAndDetached ' "$retest_archive_log"
+          grep -q -- '^--- PASS: TestTaskArchiveRetestForeignIntentReferenceBlocksCompaction ' "$retest_archive_log"
+          grep -q -- '^--- PASS: TestTaskArchiveRetestColdStubDeletePreservesForeignExplorationSide ' "$retest_archive_log"
 
   # Run frontend checks independently: backend compilation failures must not
   # hide TypeScript or UI regressions during a cross-cutting source port.
