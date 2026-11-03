@@ -232,8 +232,11 @@ func TestTaskConversationReviewRejectedOldClaimCannotSealNewRevision(t *testing.
 		if err := s.m.pg.QueryRow(`SELECT count(*) FROM conversation_activities WHERE conversation_id=$1 AND kind='user'`, item.conversationID).Scan(&users); err != nil {
 			t.Fatal(err)
 		}
-		if row.state == "running" && users == 1 {
-			break // Claim has committed; execution is waiting on concMu.
+		if row.state == "running" {
+			if users != 0 {
+				t.Fatal("queued body was written before lifecycle admission")
+			}
+			break // Claim committed; body/execution still await concMu admission.
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("trigger did not claim its queued row before admission")

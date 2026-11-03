@@ -105,7 +105,8 @@ func (s *Server) conversationTaskContext(ctx context.Context, c *db.Conversation
 			if _, expected := s.findingCheckTasks.Load(c.ID); expected {
 				return ctx, nil, conversationAdmissionError()
 			}
-			return agent.WithExplanationOnly(ctx), nil, nil
+			owners, err := s.trustedConversationOwners(hints)
+			return agent.WithExplanationOnly(ctx), owners, err
 		}
 		if record.Status == "running" {
 			return ctx, nil, errConversationRunBusy
@@ -135,7 +136,8 @@ func (s *Server) conversationTaskContext(ctx context.Context, c *db.Conversation
 			if _, expected := s.findingCheckTasks.Load(c.ID); expected {
 				return ctx, nil, conversationAdmissionError()
 			}
-			return agent.WithExplanationOnly(ctx), nil, nil
+			owners, err := s.trustedConversationOwners(hints)
+			return agent.WithExplanationOnly(ctx), owners, err
 		}
 		if record.Status == "running" {
 			return ctx, nil, errConversationRunBusy
@@ -210,7 +212,13 @@ func (s *Server) conversationTaskContext(ctx context.Context, c *db.Conversation
 		if execute {
 			return ctx, nil, conversationAdmissionError()
 		}
-		return ctx, nil, nil
+		owners, err := s.trustedConversationOwners(hints)
+		return ctx, owners, err
+	}
+	for _, hint := range hints {
+		if hint > 0 && hint != *origin {
+			return ctx, nil, conversationAdmissionError()
+		}
 	}
 	ctx, exists, err := s.bindConversationTask(ctx, *origin, c.AgentKey, execute)
 	if err != nil || !exists {
@@ -412,9 +420,12 @@ func (s *Server) validateConversationFindingParent(ctx context.Context, findingI
 }
 
 // A failed admission never seals a different process's already-running row.
-func (s *Server) sealUnstartedConversation(c *db.Conversation, table, status string) {
+func (s *Server) sealUnstartedConversation(runCtx context.Context, c *db.Conversation, table, status string) {
 	if table != "finding_checks" && table != "finding_retests" {
 		return
+	}
+	if runCtx.Err() != nil {
+		status = "stopped"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -448,4 +459,28 @@ func (s *Server) trustedConversationOwners(hints []int64) ([]int64, error) {
 		seen[id] = true
 	}
 	return owners, nil
+}
+
+// Cancellation wins at every pre-start failure point. The injected operations
+// are the same validation/CAS used by the runner, and allow deterministic
+// synthetic regression barriers without adding global runtime test hooks.
+func (s *Server) beginFindingConversation(ctx context.Context, c *db.Conversation, table string, validate func() error, start func() (bool, error)) bool {
+	if ctx.Err() != nil {
+		s.sealUnstartedConversation(ctx, c, table, "stopped")
+		return false
+	}
+	if err := validate(); err != nil {
+		s.sealUnstartedConversation(ctx, c, table, "failed")
+		return false
+	}
+	if ctx.Err() != nil {
+		s.sealUnstartedConversation(ctx, c, table, "stopped")
+		return false
+	}
+	started, err := start()
+	if err != nil {
+		s.sealUnstartedConversation(ctx, c, table, "failed")
+		return false
+	}
+	return started
 }

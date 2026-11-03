@@ -186,6 +186,8 @@ jobs:
           grep -q -- '^--- PASS: TestTaskToolRegistryConcurrentWorkersStayIsolated ' "$task_tools_log"
           grep -q -- '^--- PASS: TestTaskConversationDeleteWaitsForActualProviderExit ' "$task_tools_log"
           grep -q -- '^--- PASS: TestTaskConversationRetestCarriesTaskContextAndPrivateProxy ' "$task_tools_log"
+          grep -q -- '^--- PASS: TestTaskConversationGenericTriggerRejectsBeforeCreatingConversationOrBody ' "$task_tools_log"
+          grep -q -- '^--- PASS: TestTaskConversationFindingCancellationAtValidateAndStartIsStopped ' "$task_tools_log"
           grep -q -- '^--- PASS: TestTaskArchiveRetestConversationAndApprovalRoundTrip ' "$retest_archive_log"
           grep -q -- '^--- PASS: TestTaskArchiveRetestSharedConversationRemainsHotAndDetached ' "$retest_archive_log"
 
