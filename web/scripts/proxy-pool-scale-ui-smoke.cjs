@@ -429,6 +429,10 @@ async function main() {
     await list().getByRole("button", { name: "全选匹配（100）", exact: true }).click();
     await list().getByText("已选 100 条（跨页保留）", { exact: true }).waitFor();
     assert.equal(await rows().count(), 50);
+    await search().fill("NO_FIXTURE_MATCH");
+    await list().getByText("已选 0 条（跨页保留）", { exact: true }).waitFor();
+    await search().fill("FIXTURE_BULK_GROUP");
+    await list().getByRole("button", { name: "全选匹配（100）", exact: true }).click();
     await list().getByRole("button", { name: "删除选中", exact: true }).click();
     await dialog().getByRole("heading", { name: "确认删除 100 条代理？", exact: true }).waitFor();
     await dialog().getByRole("button", { name: "确认删除", exact: true }).click();

@@ -165,6 +165,7 @@ export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTest
         onChange={(event) => {
           setQuery(event.target.value);
           setRequestedPage(1);
+          setSelected(new Set());
         }}
       />
       <div className="flex flex-wrap items-center gap-2 rounded-md border p-2 text-xs" data-testid="proxy-pool-bulk-toolbar">
@@ -178,7 +179,7 @@ export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTest
         <Button type="button" variant="outline" size="sm" disabled={busy || selectedCount === 0} onClick={() => confirmBulk("disable")}>禁用选中</Button>
         <Button type="button" variant="destructive" size="sm" disabled={busy || selectedCount === 0} onClick={() => confirmBulk("delete")}>删除选中</Button>
       </div>
-      <p className="text-muted-foreground text-xs">清理失效按已保存的连续失败阈值（{healthThreshold} 次）判断，跳过当前使用项和未检测项，不会发起新检测。可先测试全部，稍后刷新状态再清理。</p>
+      <p className="text-muted-foreground text-xs">更改搜索会清空选择。失效清理覆盖整个代理池，按已保存的连续失败阈值（{healthThreshold} 次）判断，跳过当前使用项和未检测项。可先测试全部，稍后刷新状态再清理。</p>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <span>共 {entries.length} 条，匹配 {filtered.length} 条，每页 {PROXY_POOL_PAGE_SIZE} 条</span>
         <div className="flex items-center gap-2">
@@ -231,7 +232,7 @@ export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTest
           <AlertDialogHeader>
             <AlertDialogTitle>{confirmation?.title}</AlertDialogTitle>
             <AlertDialogDescription>
-              {confirmation?.request.only_unhealthy ? `仅清理这批已连续失败达到 ${confirmation.threshold} 次的代理；恢复健康、失效次数不足或成为当前使用项的代理将跳过。` : `操作包含所选的全部页面，共 ${confirmation?.request.ids.length ?? 0} 条。`}
+              {confirmation?.request.only_unhealthy ? `清理整个代理池中这 ${confirmation.request.ids.length} 条已连续失败达到 ${confirmation.threshold} 次的代理；恢复健康、失效次数不足或成为当前使用项的代理将跳过。` : `操作包含所选的全部页面，共 ${confirmation?.request.ids.length ?? 0} 条。`}
               {confirmation?.request.allow_active ? "包含当前使用的代理，操作后会切换到剩余已启用代理；若仅剩失效成员则暂停相关任务，没有已启用成员时改为直连。" : "当前使用的代理保持不变。"}
               {confirmation?.request.action === "delete" ? "删除后需要重新导入才能恢复。" : "禁用后仍保留记录，可逐条重新启用。"}
             </AlertDialogDescription>
