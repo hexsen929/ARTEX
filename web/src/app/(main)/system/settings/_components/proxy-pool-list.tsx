@@ -5,7 +5,6 @@ import * as React from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
 import { filterProxyPool, PROXY_POOL_PAGE_SIZE, proxyPoolPage } from "@/lib/proxy-pool-pagination";
 import type { ProxyPoolEntry } from "@/lib/types";
 
@@ -63,10 +62,10 @@ function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy"
         批量导入代理
       </Button>
       {expanded ? <>
-        <Textarea
+        <textarea
           ref={editor}
           aria-label="批量代理文本"
-          className="mt-3 h-32 max-h-32 font-mono"
+          className="mt-3 block h-32 max-h-32 min-w-0 w-full overflow-auto rounded-md border border-input bg-transparent px-2.5 py-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-2"
           style={{ fieldSizing: "fixed" }}
           rows={3}
           wrap="off"

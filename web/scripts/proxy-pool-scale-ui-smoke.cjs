@@ -182,6 +182,7 @@ async function eventually(check, message) {
 }
 function callCount(endpoint, method = "GET") { return requests.filter((r) => r.endpoint === endpoint && r.method === method).length; }
 let browser, page;
+const importDraft = () => Array.from({ length: 5000 }, (_, i) => `http://import${i}.fixture.invalid:8080`).join("\n");
 async function main() {
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -206,6 +207,17 @@ async function main() {
       window.fixturePeakProxyRows = Math.max(window.fixturePeakProxyRows, document.querySelectorAll('[data-testid="proxy-pool-row"]').length);
     }).observe(document, { childList: true, subtree: true });
   }, { token });
+  // A plain editable control using the same browser and input helper separates
+  // driver/Chromium insertion failures from ARTEX component behavior.
+  const plainPage = await context.newPage();
+  plainPage.setDefaultTimeout(15000);
+  try {
+    await plainPage.setContent('<textarea aria-label="plain proxy input" wrap="off" spellcheck="false" style="field-sizing:fixed;height:128px;width:700px"></textarea>');
+    console.log("STAGE before plain 5,000-line CSS fill");
+    await plainPage.locator("textarea").fill(importDraft());
+    assert.equal(await plainPage.locator("textarea").inputValue(), importDraft());
+    console.log("PASS plain 5,000-line CSS fill completes in the cloud browser");
+  } finally { await plainPage.close(); }
   page = await context.newPage(); page.setDefaultTimeout(15000);
   page.on("pageerror", (error) => errors.push(error.message));
   try {
@@ -261,8 +273,8 @@ async function main() {
     console.log("PASS filtered row actions use stable proxy IDs and refresh the persisted route");
 
     await list().getByRole("button", { name: "批量导入代理", exact: true }).click();
-    const importText = () => page.getByRole("textbox", { name: "批量代理文本", exact: true });
-    const draft = Array.from({ length: 5000 }, (_, i) => `http://import${i}.fixture.invalid:8080`).join("\n");
+    const importText = () => page.locator('textarea[aria-label="批量代理文本"]');
+    const draft = importDraft();
     await importText().waitFor({ state: "visible" });
     const editorStyle = await importText().evaluate((element) => ({
       fieldSizing: getComputedStyle(element).getPropertyValue("field-sizing"),
@@ -271,8 +283,20 @@ async function main() {
     assert.equal(editorStyle.fieldSizing, "fixed", "Bulk import editor used content-based field sizing");
     assert.equal(editorStyle.wrap, "off", "Bulk import editor used line wrapping");
     assert.equal(editorStyle.spellcheck, false, "Bulk import editor enabled expensive spellchecking");
+    await importText().evaluate((element) => {
+      window.fixtureProxyInputEvents = [];
+      element.addEventListener("input", () => window.fixtureProxyInputEvents.push({ length: element.value.length, at: performance.now() }));
+    });
+    console.log("STAGE before single-line CSS fill");
+    await importText().fill("http://single.fixture.invalid:8080");
+    assert.equal(await importText().inputValue(), "http://single.fixture.invalid:8080");
+    console.log("STAGE after single-line CSS fill");
     console.log("STAGE before large import paste");
     await importText().fill(draft);
+    assert.equal(await importText().inputValue(), draft, "The complete 5,000-line paste was not accepted");
+    const inputEvents = await page.evaluate(() => window.fixtureProxyInputEvents);
+    assert.ok(inputEvents.some((event) => event.length === draft.length), "The bulk editor did not receive the complete input event");
+    console.log("STAGE bulk input lengths", inputEvents.map((event) => event.length).join(","));
     console.log("STAGE after large import paste");
     const textareaBox = await importText().boundingBox();
     assert.ok(textareaBox && textareaBox.height <= 140, "Large import draft expanded the textarea beyond its fixed height");
@@ -334,13 +358,13 @@ async function main() {
     assert.deepEqual([...external], [], "External request attempted");
     console.log("PASS bounded proxy DOM throughout; no real task, proxy probe or external request ran");
   } catch (error) {
-    console.error("Original proxy UI error:", error.message.slice(0, 3500), error.message.length > 3500 ? "[truncated] " + error.message.slice(-1000) : "");
+    console.error("Original proxy UI error:", error.message.split("\n", 1)[0], `(diagnostic characters=${error.message.length})`);
     const body = await page.locator("body").innerText({ timeout: 1000 }).catch((diagnosticError) => `[body unavailable: ${diagnosticError.message}]`);
     console.error(JSON.stringify({ route: page.url(), requests: requests.slice(-15).map(({ endpoint, method, query }) => ({ endpoint, method, query })), unexpected: [...unexpected], body: body.slice(0, 5000) }, null, 2));
     throw error;
   } finally { await context.close(); }
 }
-main().catch((error) => { console.error(error); process.exitCode = 1; }).finally(async () => {
+main().catch((error) => { console.error(error.message.split("\n", 1)[0], `(diagnostic characters=${error.message.length})`); process.exitCode = 1; }).finally(async () => {
   for (const held of heldEgress) held.release();
   if (browser) await browser.close();
   server.closeAllConnections();
