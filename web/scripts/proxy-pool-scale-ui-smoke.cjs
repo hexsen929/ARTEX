@@ -463,6 +463,18 @@ async function main() {
     assert.equal(callCount("/api/settings/proxy-pool/test-all", "POST"), probesBeforeCleanup);
     console.log("PASS cleanup uses the saved threshold, skips current/unchecked/recovered proxies and starts no probe");
 
+    await page.getByRole("checkbox", { name: "只看最近检测失败的代理", exact: true }).click();
+    await search().fill("fixture-proxy-004");
+    await list().getByRole("button", { name: "全选匹配（2）", exact: true }).waitFor();
+    await list().getByRole("button", { name: "全选匹配（2）", exact: true }).click();
+    await list().getByRole("button", { name: "删除选中", exact: true }).click();
+    await dialog().getByRole("button", { name: "确认删除", exact: true }).click();
+    await list().getByText("没有匹配的代理。", { exact: true }).waitFor();
+    assert.deepEqual([...requests.filter((r) => r.endpoint === bulkPath).at(-1).body.ids].sort(), [proxyID(403), proxyID(404)].sort());
+    assert.ok(settings.proxy_pool.some((entry) => entry.id === proxyID(401)));
+    await page.getByRole("checkbox", { name: "只看最近检测失败的代理", exact: true }).click();
+    console.log("PASS explicit recent-failure filtering supports deletion below the automatic cleanup threshold");
+
     await search().fill("fixture-proxy-0001");
     await choose(17).waitFor(); await choose(17).click(); await choose(18).click();
     await list().getByRole("button", { name: "删除选中", exact: true }).click();

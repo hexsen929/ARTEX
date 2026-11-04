@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { filterProxyPool, PROXY_POOL_PAGE_SIZE, proxyCleanupEligible, proxyPoolPage } from "@/lib/proxy-pool-pagination";
+import { filterProxyPool, PROXY_POOL_PAGE_SIZE, proxyCleanupEligible, proxyLastCheckFailed, proxyPoolPage } from "@/lib/proxy-pool-pagination";
 import type { ProxyPoolBulkRequest, ProxyPoolEntry } from "@/lib/types";
 
 type Props = {
@@ -96,12 +96,13 @@ function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy"
 
 export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTestAll, onRefresh, onToggle, onActivate, onTest, onDelete, healthThreshold, onBulk }: Props) {
   const [query, setQuery] = React.useState("");
+  const [failedOnly, setFailedOnly] = React.useState(false);
   const [requestedPage, setRequestedPage] = React.useState(1);
   const [selected, setSelected] = React.useState<Set<string>>(() => new Set());
   const [confirmation, setConfirmation] = React.useState<{ request: ProxyPoolBulkRequest; title: string; threshold: number } | null>(null);
   const submitting = React.useRef(false);
   const deferredQuery = React.useDeferredValue(query);
-  const filtered = React.useMemo(() => filterProxyPool(entries, deferredQuery), [entries, deferredQuery]);
+  const filtered = React.useMemo(() => filterProxyPool(failedOnly ? entries.filter(proxyLastCheckFailed) : entries, deferredQuery), [entries, deferredQuery, failedOnly]);
   const { items, page, pages } = proxyPoolPage(filtered, requestedPage);
   const active = React.useMemo(() => entries.find((entry) => entry.id === activeId), [entries, activeId]);
   const entryIDs = React.useMemo(() => new Set(entries.map((entry) => entry.id)), [entries]);
@@ -168,6 +169,10 @@ export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTest
           setSelected(new Set());
         }}
       />
+      <label className="flex items-center gap-2 text-xs">
+        <Checkbox aria-label="只看最近检测失败的代理" checked={failedOnly} onCheckedChange={(checked) => { setFailedOnly(checked === true); setRequestedPage(1); setSelected(new Set()); }} />
+        只看最近检测失败的代理（不限连续失败次数）
+      </label>
       <div className="flex flex-wrap items-center gap-2 rounded-md border p-2 text-xs" data-testid="proxy-pool-bulk-toolbar">
         <label className="flex items-center gap-2">
           <Checkbox aria-label="全选本页代理" checked={pageSelected === 0 ? false : pageSelected === items.length ? true : "indeterminate"} disabled={busy || items.length === 0} onCheckedChange={(checked) => togglePage(checked === true)} />
@@ -179,7 +184,7 @@ export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTest
         <Button type="button" variant="outline" size="sm" disabled={busy || selectedCount === 0} onClick={() => confirmBulk("disable")}>禁用选中</Button>
         <Button type="button" variant="destructive" size="sm" disabled={busy || selectedCount === 0} onClick={() => confirmBulk("delete")}>删除选中</Button>
       </div>
-      <p className="text-muted-foreground text-xs">更改搜索会清空选择。失效清理覆盖整个代理池，按已保存的连续失败阈值（{healthThreshold} 次）判断，跳过当前使用项和未检测项。可先测试全部，稍后刷新状态再清理。</p>
+      <p className="text-muted-foreground text-xs">更改搜索或筛选会清空选择。失效清理覆盖整个代理池，按已保存的连续失败阈值（{healthThreshold} 次）判断，跳过当前使用项和未检测项。可先测试全部，稍后刷新状态再清理。</p>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <span>共 {entries.length} 条，匹配 {filtered.length} 条，每页 {PROXY_POOL_PAGE_SIZE} 条</span>
         <div className="flex items-center gap-2">

@@ -1,10 +1,14 @@
 export const PROXY_POOL_PAGE_SIZE = 50;
 export const PROXY_IMPORT_ERROR_LIMIT = 5;
 
+export function proxyLastCheckFailed(entry: { last_checked_at?: string; last_error?: string; consecutive_failures: number }): boolean {
+  return !!entry.last_checked_at && !entry.last_checked_at.startsWith("0001-") &&
+    Number.isFinite(Date.parse(entry.last_checked_at)) && !!entry.last_error && entry.consecutive_failures > 0;
+}
+
 export function proxyCleanupEligible(entry: { health: string; last_checked_at?: string; last_error?: string; consecutive_failures: number }, threshold: number): boolean {
   return (entry.health === "unhealthy-cooling" || entry.health === "disabled") &&
-    !!entry.last_checked_at && !entry.last_checked_at.startsWith("0001-") &&
-    Number.isFinite(Date.parse(entry.last_checked_at)) && !!entry.last_error &&
+    proxyLastCheckFailed(entry) &&
     entry.consecutive_failures >= Math.max(1, threshold);
 }
 
