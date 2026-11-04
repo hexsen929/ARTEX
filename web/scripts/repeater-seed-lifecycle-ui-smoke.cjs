@@ -32,6 +32,7 @@ async function serveAPI(request, response, url) {
   if (endpoint === "/api/auth/status") return json(response, { initialized: true });
   if (endpoint === "/api/version") return json(response, { version: "fixture" });
   if (endpoint === "/api/update/check") return json(response, { has_update: false, current: "fixture" });
+  if (endpoint === "/api/settings/egress") return json(response, { show_egress_ip: false, global_proxy: "" });
   if (endpoint === "/api/settings") return json(response, { show_egress_ip: false, traffic_capture: false });
   if (endpoint === "/api/agents") return json(response, { agents: [] });
   if (endpoint === "/api/skills/missing") return json(response, { missing: [] });

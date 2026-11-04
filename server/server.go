@@ -1161,6 +1161,7 @@ func (s *Server) Handler() http.Handler {
 		s.getIntelligence(w, r)
 	})
 	mux.HandleFunc("GET /api/settings", s.getSettings)
+	mux.HandleFunc("GET /api/settings/egress", s.getEgressSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
 	mux.HandleFunc("GET /api/settings/runtime-controls/{key}", s.getRuntimeControl)
 	mux.HandleFunc("PUT /api/settings/runtime-controls/{key}", s.putRuntimeControl)

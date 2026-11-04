@@ -11,7 +11,7 @@ const compiled = ts.transpileModule(fs.readFileSync(path.join(__dirname, "api.ts
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
 
-function client(payload) {
+function client(payload, calls = []) {
   const exports = {};
   vm.runInNewContext(compiled, {
     exports,
@@ -26,12 +26,12 @@ function client(payload) {
       if (id === "@/lib/mock/handler") return { mockHandle: () => assert.fail("unexpected demo request") };
       throw new Error(`Unexpected runtime import: ${id}`);
     },
-    fetch: async () => ({ ok: true, status: 200, json: async () => payload }),
+    fetch: async (url, init) => { calls.push({ url, init }); return { ok: true, status: 200, json: async () => payload }; },
   });
   return exports.api;
 }
 
-for (const method of ["proxyPool", "importProxyPool", "testAllProxyPool"]) {
+for (const method of ["proxyPool"]) {
   for (const value of [null, undefined]) {
     test(`${method} normalizes ${value} collections before settings renders them`, async () => {
       const result = await client({ entries: value, switch_log: value, errors: value, active_id: "" })[method]({});
@@ -60,3 +60,33 @@ for (const method of ["proxyPool", "importProxyPool", "testAllProxyPool"]) {
     if (method === "importProxyPool") assert.equal(result.errors, payload.errors);
   });
 }
+
+// Batch mutations deliberately request a small acknowledgement now. The page
+// fetches and validates one persisted settings snapshot after confirmation.
+for (const [method, route] of [["importProxyPool", "/settings/proxy-pool/import"], ["testAllProxyPool", "/settings/proxy-pool/test-all"]]) {
+  test(`${method} uses a bounded queued acknowledgement without retrieving another pool`, async () => {
+    const calls = [];
+    const payload = { ok: true, probe_queued: true, errors: [] };
+    const result = await client(payload, calls)[method]({ text: "fixture.invalid:8080" });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, `/api${route}?summary=1`);
+    assert.equal(calls[0].init.method, "POST");
+    assert.equal(result, payload);
+    assert.equal(result.entries, undefined);
+    assert.equal(result.switch_log, undefined);
+  });
+  test(`${method} does not turn an unconfirmed response into completed work`, async () => {
+    const payload = { probe_queued: false, errors: null };
+    const result = await client(payload)[method]({});
+    assert.equal(result.ok, undefined);
+    assert.equal(result.probe_queued, false);
+    assert.equal(result.errors, null);
+  });
+}
+
+test("navbar egress settings uses the lightweight endpoint", async () => {
+  const calls = [];
+  const payload = { show_egress_ip: false, global_proxy: "" };
+  assert.equal(await client(payload, calls).egressSettings(), payload);
+  assert.equal(calls[0].url, "/api/settings/egress");
+});

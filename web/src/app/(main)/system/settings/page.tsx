@@ -19,7 +19,6 @@ import { MemorySettingsCard } from "@/components/memory-settings-card";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, FieldContent, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
@@ -34,6 +33,8 @@ import { UpdateCard } from "./_components/update-card";
 import { RoEEnforcementCard } from "./_components/roe-enforcement-card";
 import { FindingVerifyModeCard, LLMRecordsRetentionCard } from "./_components/policy-settings-cards";
 import { assertSettingsSnapshot } from "./_components/settings-response";
+import { ProxyPoolList } from "./_components/proxy-pool-list";
+import { summarizeProxyImportErrors } from "@/lib/proxy-pool-pagination";
 
 export default function SystemSettingsPage() {
   const [credentialAgent, setCredentialAgent] = React.useState(false);
@@ -69,7 +70,8 @@ export default function SystemSettingsPage() {
   const [proxyPoolBusy, setProxyPoolBusy] = React.useState(false);
   const [proxyPool, setProxyPool] = React.useState<ProxyPoolEntry[]>([]);
   const [proxyPoolActiveId, setProxyPoolActiveId] = React.useState("");
-  const [proxyPoolText, setProxyPoolText] = React.useState("");
+  const proxyPoolDraft = React.useRef("");
+  const proxyPoolOperationPending = React.useRef(false);
   const [proxyPoolTimed, setProxyPoolTimed] = React.useState(false);
   const [proxyPoolInterval, setProxyPoolInterval] = React.useState("30");
   const [proxyPoolFailure, setProxyPoolFailure] = React.useState(false);
@@ -512,25 +514,42 @@ export default function SystemSettingsPage() {
   // Refresh the full persisted snapshot after a pool mutation. Keeping only
   // the active ID would leave the proxy test form pointed at the previous exit.
   const runProxyPoolOperation = async (operation: () => Promise<unknown>, success?: string) => {
-    if (!loaded || proxyPoolBusy) return;
+    if (!loaded || proxyPoolOperationPending.current) return false;
+    proxyPoolOperationPending.current = true;
     setProxyPoolBusy(true);
     try {
       await operation();
       apply(await api.settings());
       clearEgressReport();
       if (success) toast.success(success);
+      return true;
     } catch (error) {
       toast.error("代理池操作未确认：" + (error as Error).message);
+      return false;
     } finally {
+      proxyPoolOperationPending.current = false;
       setProxyPoolBusy(false);
     }
   };
-  const importProxyPool = () => void runProxyPoolOperation(async () => {
-    const result = await api.importProxyPool({ text: proxyPoolText });
-    setProxyPoolText("");
-    if (result.errors.length) toast.error(result.errors.map((e) => `第${e.line}行：${e.error}`).join("；"));
+  const importProxyPool = async (text: string) => {
+    const response: { value?: Awaited<ReturnType<typeof api.importProxyPool>> } = {};
+    const confirmed = await runProxyPoolOperation(async () => {
+      response.value = await api.importProxyPool({ text });
+      const result = response.value;
+      if (result.ok !== true || result.probe_queued !== true || !Array.isArray(result.errors) || result.errors.some((error) =>
+        !error || !Number.isSafeInteger(error.line) || typeof error.error !== "string"
+      )) throw new Error("服务未确认代理导入和后台探测排队，请刷新状态后核对，避免重复导入");
+    });
+    const result = response.value;
+    if (!confirmed || !result) return false;
+    // Clear the shared draft before resolving the child callback. This remains
+    // authoritative even if the category was unmounted during the request.
+    if (proxyPoolDraft.current === text) proxyPoolDraft.current = "";
+    if (result.errors.length) toast.error(summarizeProxyImportErrors(result.errors));
     else toast.success("代理池已导入");
-  });
+    toast.info("代理探测已排队，稍后点击“刷新状态”查看结果");
+    return true;
+  };
   const saveProxyPoolStrategy = () => {
     const interval = Number(proxyPoolInterval);
     if (!Number.isFinite(interval) || !Number.isInteger(interval) || interval < 3) {
@@ -553,7 +572,20 @@ export default function SystemSettingsPage() {
       })
       .catch((e) => toast.error("保存失败：" + (e as Error).message));
   };
-  const testAllProxyPool = () => void runProxyPoolOperation(() => api.testAllProxyPool(), "已完成全部代理探测");
+  const testAllProxyPool = () => void (async () => {
+    const response: { value?: Awaited<ReturnType<typeof api.testAllProxyPool>> } = {};
+    const confirmed = await runProxyPoolOperation(async () => {
+      response.value = await api.testAllProxyPool();
+      if (response.value.ok !== true || response.value.probe_queued !== true) {
+        throw new Error("服务未确认后台探测排队，请刷新状态后核对");
+      }
+    });
+    const result = response.value;
+    if (confirmed && result) {
+      toast.success("全部代理探测已排队，稍后点击“刷新状态”查看结果");
+    }
+  })();
+  const refreshProxyPool = () => void runProxyPoolOperation(async () => undefined, "已刷新代理状态");
   const testOneProxyPool = (id: string) => void runProxyPoolOperation(() => api.testProxyPoolEntry(id));
   const toggleProxyPoolEntry = (entry: ProxyPoolEntry) =>
     void runProxyPoolOperation(() => api.updateProxyPool(entry.id, { enabled: !entry.enabled }));
@@ -901,8 +933,8 @@ export default function SystemSettingsPage() {
               </CardContent>
             </Card>
 
-            <Card
-              className={`${isSettingVisible("traffic", "全局代理 出口 IP socks5 http https") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
+            {isSettingVisible("traffic", "全局代理 代理池 出口 IP socks5 http https") ? <Card
+              className="mb-4 break-inside-avoid md:mb-6"
             >
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
@@ -1095,116 +1127,19 @@ export default function SystemSettingsPage() {
                   </div>
                 )}
                 <section className="space-y-3 border-t pt-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-medium">
-                        代理池 <span className="text-muted-foreground font-normal">{proxyPool.length}</span>
-                      </p>
-                      <p className="text-muted-foreground mt-1 text-xs">
-                        当前：
-                        {proxyPool.find((entry) => entry.id === proxyPoolActiveId)?.name ??
-                          (proxyPoolActiveId ? "已选择代理" : "直连")}
-                      </p>
-                    </div>
-                    <Button type="button" variant="outline" size="sm" onClick={testAllProxyPool}>
-                      测试全部
-                    </Button>
-                  </div>
-                  <details className="rounded-md border px-3 py-2 text-xs">
-                    <summary className="text-muted-foreground cursor-pointer select-none">批量导入代理</summary>
-                    <Textarea
-                      className="mt-3 font-mono"
-                      rows={3}
-                      placeholder="每行一个代理：URL|名称|备注"
-                      value={proxyPoolText}
-                      onChange={(e) => setProxyPoolText(e.target.value)}
-                    />
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <Button type="button" size="sm" onClick={importProxyPool} disabled={!proxyPoolText.trim()}>
-                        导入
-                      </Button>
-                      <span className="text-muted-foreground">显示代理地址时会隐藏账号密码。</span>
-                    </div>
-                  </details>
-                  <div className="space-y-2">
-                    {proxyPool.length === 0 ? (
-                      <p className="text-muted-foreground text-xs">暂无代理池条目。</p>
-                    ) : (
-                      proxyPool.map((entry) => (
-                        <div
-                          key={entry.id}
-                          className="grid gap-3 rounded-md border p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
-                        >
-                          <div className="flex min-w-0 items-start gap-3">
-                            <Switch
-                              checked={entry.enabled}
-                              onCheckedChange={() => toggleProxyPoolEntry(entry)}
-                              aria-label="启用代理"
-                            />
-                            <div className="grid min-w-0 flex-1 gap-x-5 gap-y-2 text-xs sm:grid-cols-2">
-                              <div className="min-w-0">
-                                <p className="text-muted-foreground">代理地址</p>
-                                <p className="truncate font-mono" title={entry.url}>
-                                  {entry.name ? `${entry.name} · ` : ""}
-                                  {entry.url}
-                                </p>
-                              </div>
-                              <div>
-                                <p className="text-muted-foreground">测试出口 IP</p>
-                                <p className="break-all font-mono">
-                                  {entry.egress_ip || (entry.last_error ? "探测失败" : "尚未测试")}
-                                </p>
-                              </div>
-                              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                                <span
-                                  className={
-                                    entry.health === "healthy"
-                                      ? "text-emerald-600"
-                                      : entry.health === "disabled"
-                                        ? "text-muted-foreground"
-                                        : "text-amber-600"
-                                  }
-                                >
-                                  {!entry.enabled
-                                    ? "已停用"
-                                    : entry.health === "healthy"
-                                      ? "健康"
-                                      : entry.health === "unhealthy-cooling"
-                                        ? "冷却中"
-                                        : "待检测"}
-                                </span>
-                                {entry.id === proxyPoolActiveId && <span className="text-primary">当前使用</span>}
-                                <span className="text-muted-foreground">失败 {entry.consecutive_failures} 次</span>
-                              </div>
-                              <div className="text-muted-foreground">
-                                {entry.latency_ms != null ? `${entry.latency_ms} ms` : "暂无延迟数据"}
-                                {entry.last_checked_at &&
-                                  !entry.last_checked_at.startsWith("0001-") &&
-                                  ` · ${new Date(entry.last_checked_at).toLocaleTimeString()}`}
-                                {entry.last_error && <span className="text-destructive"> · {entry.last_error}</span>}
-                              </div>
-                            </div>
-                          </div>
-                          <div className="flex justify-end gap-1">
-                            <Button type="button" variant="ghost" size="sm" disabled={!entry.enabled || entry.id === proxyPoolActiveId} onClick={() => activateProxyPoolEntry(entry.id)}>
-                              使用
-                            </Button>
-                            <Button type="button" variant="ghost" size="sm" onClick={() => testOneProxyPool(entry.id)}>
-                              测试
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => deleteProxyPoolEntry(entry.id)}
-                            >
-                              删除
-                            </Button>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
+                  <ProxyPoolList
+                    entries={proxyPool}
+                    activeId={proxyPoolActiveId}
+                    busy={!loaded || proxyPoolBusy}
+                    draft={proxyPoolDraft}
+                    onImport={importProxyPool}
+                    onTestAll={testAllProxyPool}
+                    onRefresh={refreshProxyPool}
+                    onToggle={toggleProxyPoolEntry}
+                    onActivate={activateProxyPoolEntry}
+                    onTest={testOneProxyPool}
+                    onDelete={deleteProxyPoolEntry}
+                  />
                   <details className="rounded-md border px-3 py-2 text-xs">
                     <summary className="text-muted-foreground cursor-pointer select-none">轮换与健康检查策略</summary>
                     <div className="mt-3 space-y-3">
@@ -1313,7 +1248,7 @@ export default function SystemSettingsPage() {
                 </section>
                 </fieldset>
               </CardContent>
-            </Card>
+            </Card> : null}
 
             <Card
               className={`${isSettingVisible("agent", "操作约束 allow deny planner worker 爆破") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}

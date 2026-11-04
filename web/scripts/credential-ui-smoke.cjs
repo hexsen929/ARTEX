@@ -205,6 +205,7 @@ async function serveAPI(request, response, url) {
     if (state.failToolsList) return sendJSON(response, 503, { error: "fixture tools refresh unavailable" });
     return sendJSON(response, 200, { tools: toolFixtures });
   }
+  if (endpoint === "/api/settings/egress") return sendJSON(response, 200, { show_egress_ip: false, global_proxy: "" });
   if (endpoint === "/api/settings" && method === "GET") return sendJSON(response, 200, { traffic_capture: false, web_search_enabled: false });
   const agentAction = endpoint.match(/^\/api\/agents\/(worker|fixture_custom)(?:\/(prompt(?:\/preview)?|triggers))?$/);
   if (agentAction) {

@@ -157,6 +157,12 @@ test("egress provider suppresses stale results and consumes rejected UI promises
   assert.match(provider, /if \(!snapshot\.enabled\) \{\s*clearProbe\(\)/);
   assert.match(provider, /onClick=\{\(\) => void probeEgress\(\)\.catch/);
   assert.match(provider, /void dismiss\(\)\.catch/);
+  assert.doesNotMatch(provider, /api\.settings\(\)|\.settings\(\)/);
+  assert.match(provider, /api\.egressSettings\(\)/);
+  assert.match(provider, /busy \|\| probesInFlight\.current > 0/);
+  assert.match(provider, /document\.visibilityState === "hidden"/);
+  assert.match(provider, /if \(!active \|\| !mounted\.current/);
+  assert.match(provider, /finally \{\s*busy = false/);
 });
 
 

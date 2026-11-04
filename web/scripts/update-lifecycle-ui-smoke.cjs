@@ -93,6 +93,7 @@ async function serveAPI(request, response, url) {
     return json(response, 200, { ok: true });
   }
   if (endpoint === "/api/update/rollback" && method === "POST") { s.rollbackRequests++; return json(response, 200, { ok: true }); }
+  if (endpoint === "/api/settings/egress") return json(response, 200, { show_egress_ip: settings.show_egress_ip, global_proxy: settings.global_proxy });
   if (endpoint === "/api/settings") return json(response, 200, settings);
   const control = endpoint.match(/^\/api\/settings\/runtime-controls\/(roe_enforcement|llm_records_retention_days|finding_verify_mode)$/);
   if (control && method === "GET") return json(response, 200, { [control[1]]: settings[control[1]] });

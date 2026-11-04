@@ -1059,6 +1059,7 @@ export const api = {
       `/${scope}/${scopeId}/intelligence/${intelligenceId}/traffic/${encodeURIComponent(trafficId)}`,
     ),
   settings: () => get<Settings>(`/settings`),
+  egressSettings: () => get<Pick<Settings, "show_egress_ip" | "global_proxy">>("/settings/egress"),
   getRuntimeControl: (key: RuntimeControlKey) =>
     get<Partial<Settings>>(`/settings/runtime-controls/${encodeURIComponent(key)}`),
   saveRuntimeControl: (key: RuntimeControlKey, value: string | number) =>
@@ -1085,11 +1086,10 @@ export const api = {
     ).then(normalizeProxyPool),
   importProxyPool: (payload: Record<string, unknown>) =>
     post<{
-      entries: ProxyPoolEntry[];
-      active_id: string;
-      switch_log: ProxySwitchLog[];
+      ok: boolean;
+      probe_queued: boolean;
       errors: Array<{ line: number; input: string; error: string }>;
-    }>(`/settings/proxy-pool/import`, payload).then((r) => ({ ...normalizeProxyPool(r), errors: arr(r.errors) })),
+    }>(`/settings/proxy-pool/import?summary=1`, payload),
   updateProxyPool: (id: string, payload: Partial<Pick<ProxyPoolEntry, "url" | "name" | "remark" | "enabled">>) =>
     put<{ entry: ProxyPoolEntry }>(`/settings/proxy-pool/${encodeURIComponent(id)}`, payload),
   deleteProxyPool: (id: string) => del<{ ok: boolean }>(`/settings/proxy-pool/${encodeURIComponent(id)}`),
@@ -1099,10 +1099,10 @@ export const api = {
       {},
     ),
   testAllProxyPool: () =>
-    post<{ entries: ProxyPoolEntry[]; active_id: string; switch_log: ProxySwitchLog[] }>(
-      `/settings/proxy-pool/test-all`,
+    post<{ ok: boolean; probe_queued: boolean }>(
+      `/settings/proxy-pool/test-all?summary=1`,
       {},
-    ).then(normalizeProxyPool),
+    ),
   activateProxyPool: (id: string) =>
     post<{ ok: boolean; active_id: string; active_proxy: string }>(
       `/settings/proxy-pool/${encodeURIComponent(id)}/activate`,
