@@ -213,10 +213,11 @@ async function main() {
   plainPage.setDefaultTimeout(15000);
   try {
     await plainPage.setContent('<textarea aria-label="plain proxy input" wrap="off" spellcheck="false" style="field-sizing:fixed;height:128px;width:700px"></textarea>');
-    console.log("STAGE before plain 5,000-line CSS fill");
-    await plainPage.locator("textarea").fill(importDraft());
+    console.log("STAGE before plain 5,000-line native text insertion");
+    await plainPage.locator("textarea").focus();
+    await plainPage.keyboard.insertText(importDraft());
     assert.equal(await plainPage.locator("textarea").inputValue(), importDraft());
-    console.log("PASS plain 5,000-line CSS fill completes in the cloud browser");
+    console.log("PASS plain 5,000-line native text insertion completes in the cloud browser");
   } finally { await plainPage.close(); }
   page = await context.newPage(); page.setDefaultTimeout(15000);
   page.on("pageerror", (error) => errors.push(error.message));
@@ -292,7 +293,9 @@ async function main() {
     assert.equal(await importText().inputValue(), "http://single.fixture.invalid:8080");
     console.log("STAGE after single-line CSS fill");
     console.log("STAGE before large import paste");
-    await importText().fill(draft);
+    await importText().focus();
+    await page.keyboard.press("ControlOrMeta+A");
+    await page.keyboard.insertText(draft);
     assert.equal(await importText().inputValue(), draft, "The complete 5,000-line paste was not accepted");
     const inputEvents = await page.evaluate(() => window.fixtureProxyInputEvents);
     assert.ok(inputEvents.some((event) => event.length === draft.length), "The bulk editor did not receive the complete input event");
