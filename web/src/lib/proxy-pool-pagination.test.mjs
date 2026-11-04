@@ -7,8 +7,27 @@ import {
   PROXY_POOL_PAGE_SIZE,
   proxyPoolPage,
   proxySearchAddress,
+  proxyCleanupEligible,
+  proxyLastCheckFailed,
   summarizeProxyImportErrors,
 } from "./proxy-pool-pagination.ts";
+
+test("cleanup requires a checked failure streak and skips recovered or unchecked members", () => {
+  const failed = { health: "unhealthy-cooling", last_checked_at: "2026-11-05T00:00:00Z", last_error: "fixture failure", consecutive_failures: 3 };
+  assert.equal(proxyCleanupEligible(failed, 3), true);
+  assert.equal(proxyCleanupEligible({ ...failed, health: "disabled" }, 3), true);
+  for (const patch of [{ health: "healthy" }, { health: "unknown" }, { last_checked_at: "0001-01-01T00:00:00Z" }, { last_checked_at: "bad date" }, { last_checked_at: undefined }, { last_error: "" }, { consecutive_failures: 2 }]) {
+    assert.equal(proxyCleanupEligible({ ...failed, ...patch }, 3), false);
+  }
+  assert.equal(proxyCleanupEligible(failed, 4), false);
+});
+
+test("recent-failure selection can include one failed check without changing the cleanup threshold", () => {
+  const entry = { health: "healthy", last_checked_at: "2026-11-05T00:00:00Z", last_error: "fixture failure", consecutive_failures: 1 };
+  assert.equal(proxyLastCheckFailed(entry), true);
+  assert.equal(proxyCleanupEligible(entry, 3), false);
+  for (const patch of [{ last_checked_at: undefined }, { last_checked_at: "bad date" }, { last_checked_at: "0001-01-01T00:00:00Z" }, { last_error: "" }, { consecutive_failures: 0 }]) assert.equal(proxyLastCheckFailed({ ...entry, ...patch }), false);
+});
 
 const fixture = (i) => ({
   id: `proxy-${i}`, url: `http://proxy-${i}.invalid:8080`,

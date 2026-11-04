@@ -1093,6 +1093,10 @@ export const api = {
   updateProxyPool: (id: string, payload: Partial<Pick<ProxyPoolEntry, "url" | "name" | "remark" | "enabled">>) =>
     put<{ entry: ProxyPoolEntry }>(`/settings/proxy-pool/${encodeURIComponent(id)}`, payload),
   deleteProxyPool: (id: string) => del<{ ok: boolean }>(`/settings/proxy-pool/${encodeURIComponent(id)}`),
+  bulkProxyPool: (payload: import("./types").ProxyPoolBulkRequest) =>
+    post<{ ok: boolean; changed: number; skipped: number; active_id: string; active_changed: boolean }>(
+      `/settings/proxy-pool/bulk`, payload,
+    ),
   testProxyPoolEntry: (id: string) =>
     post<{ ok: boolean; result?: EgressReport["checks"][number]["result"] }>(
       `/settings/proxy-pool/${encodeURIComponent(id)}/test`,

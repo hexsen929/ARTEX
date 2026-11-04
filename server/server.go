@@ -1180,6 +1180,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/settings/proxy/test", s.testEgressProxy)
 	mux.HandleFunc("GET /api/settings/proxy-pool", s.getProxyPool)
 	mux.HandleFunc("POST /api/settings/proxy-pool/import", s.importProxyPool)
+	mux.HandleFunc("POST /api/settings/proxy-pool/bulk", s.bulkProxyPool)
 	mux.HandleFunc("PUT /api/settings/proxy-pool/{id}", s.updateProxyPool)
 	mux.HandleFunc("DELETE /api/settings/proxy-pool/{id}", s.deleteProxyPool)
 	mux.HandleFunc("POST /api/settings/proxy-pool/{id}/test", s.testProxyPoolEntry)

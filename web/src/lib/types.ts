@@ -1097,6 +1097,14 @@ export interface ProxyPoolEntry {
 
 export interface ProxySwitchLog { at: string; from: string; to: string; reason: string }
 
+export interface ProxyPoolBulkRequest {
+  action: "delete" | "disable";
+  ids: string[];
+  only_unhealthy?: boolean;
+  allow_active?: boolean;
+  expected_active_id?: string;
+}
+
 export interface WorkerPool {
   profile_id: string;
   workers: number;
