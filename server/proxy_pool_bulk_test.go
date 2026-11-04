@@ -181,7 +181,9 @@ func TestProxyPoolBulkOneCommitAndAtomicRejection(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = m.pg.Exec(`DROP FUNCTION IF EXISTS ` + name + `()`) })
-	if _, err := m.pg.Exec(`CREATE TRIGGER ` + name + ` BEFORE INSERT OR UPDATE ON settings FOR EACH ROW EXECUTE FUNCTION ` + name + `()`); err != nil {
+	// UPSERT runs both BEFORE INSERT and BEFORE UPDATE on a conflict. Count
+	// actual row writes with AFTER so one committed UPSERT is counted once.
+	if _, err := m.pg.Exec(`CREATE TRIGGER ` + name + ` AFTER INSERT OR UPDATE ON settings FOR EACH ROW EXECUTE FUNCTION ` + name + `()`); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = m.pg.Exec(`DROP TRIGGER IF EXISTS ` + name + ` ON settings`) })
@@ -207,5 +209,11 @@ func TestProxyPoolBulkOneCommitAndAtomicRejection(t *testing.T) {
 	after, _, err := m.pg.GetSetting(settingProxyPool)
 	if err != nil || w.Code != http.StatusInternalServerError || stored != after || !reflect.DeepEqual(before, m.proxyPoolEntries()) || m.proxyPool.active != entries[0].ID || m.GlobalProxy() != entries[0].RawURL || m.proxyPool.generation != 1 {
 		t.Fatal("a rejected batch changed memory, durable state, active route or generation")
+	}
+	for key, expected := range map[string]string{settingGlobalProxy: entries[0].RawURL, settingProxyPoolActive: entries[0].ID} {
+		actual, present, err := m.pg.GetSetting(key)
+		if err != nil || !present || actual != expected {
+			t.Fatal("a rejected batch partially committed coupled route settings")
+		}
 	}
 }
