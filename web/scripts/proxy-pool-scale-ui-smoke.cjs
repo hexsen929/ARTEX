@@ -260,9 +260,17 @@ async function main() {
     assert.equal(callCount(`/api/settings/proxy-pool/${proxyID(17)}/activate`, "POST"), 1);
     console.log("PASS filtered row actions use stable proxy IDs and refresh the persisted route");
 
-    await list().locator("summary").filter({ hasText: "批量导入代理" }).click();
+    await list().getByRole("button", { name: "批量导入代理", exact: true }).click();
     const importText = () => page.getByRole("textbox", { name: "批量代理文本", exact: true });
     const draft = Array.from({ length: 5000 }, (_, i) => `http://import${i}.fixture.invalid:8080`).join("\n");
+    await importText().waitFor({ state: "visible" });
+    const editorStyle = await importText().evaluate((element) => ({
+      fieldSizing: getComputedStyle(element).getPropertyValue("field-sizing"),
+      wrap: element.wrap, spellcheck: element.spellcheck,
+    }));
+    assert.equal(editorStyle.fieldSizing, "fixed", "Bulk import editor used content-based field sizing");
+    assert.equal(editorStyle.wrap, "off", "Bulk import editor used line wrapping");
+    assert.equal(editorStyle.spellcheck, false, "Bulk import editor enabled expensive spellchecking");
     console.log("STAGE before large import paste");
     await importText().fill(draft);
     console.log("STAGE after large import paste");
@@ -275,7 +283,7 @@ async function main() {
     console.log("STAGE before remounting proxy category");
     await page.getByRole("button", { name: /^流量与安全/ }).click();
     console.log("STAGE after remounting proxy category");
-    await list().locator("summary").filter({ hasText: "批量导入代理" }).click();
+    await list().getByRole("button", { name: "批量导入代理", exact: true }).click();
     assert.equal(await importText().inputValue(), draft, "Unmounting the category discarded the unsaved import draft");
     await list().getByRole("button", { name: "导入", exact: true }).click();
     const errorToast = page.locator("[data-sonner-toast]").filter({ hasText: "共 5000 行导入失败" }).first();
@@ -326,7 +334,7 @@ async function main() {
     assert.deepEqual([...external], [], "External request attempted");
     console.log("PASS bounded proxy DOM throughout; no real task, proxy probe or external request ran");
   } catch (error) {
-    console.error("Original proxy UI error:", error.message);
+    console.error("Original proxy UI error:", error.message.slice(0, 3500), error.message.length > 3500 ? "[truncated] " + error.message.slice(-1000) : "");
     const body = await page.locator("body").innerText({ timeout: 1000 }).catch((diagnosticError) => `[body unavailable: ${diagnosticError.message}]`);
     console.error(JSON.stringify({ route: page.url(), requests: requests.slice(-15).map(({ endpoint, method, query }) => ({ endpoint, method, query })), unexpected: [...unexpected], body: body.slice(0, 5000) }, null, 2));
     throw error;

@@ -24,52 +24,70 @@ type Props = {
 };
 
 function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy" | "onImport">) {
-  // Keep a potentially large import draft out of the settings-page render path.
-  // The ref also preserves it while the category is not mounted.
-  const [text, setText] = React.useState(() => draft.current);
+  // A bulk editor must not autosize or synchronize a large string through
+  // React on every input. Keep only small UI flags in state; the shared ref
+  // preserves the full draft while this category/editor is not mounted.
+  const [expanded, setExpanded] = React.useState(false);
   const [pending, setPending] = React.useState(false);
-  const hasText = React.useMemo(() => /\S/.test(text), [text]);
+  const [hasText, setHasText] = React.useState(() => /\S/.test(draft.current));
+  const editor = React.useRef<HTMLTextAreaElement>(null);
   React.useEffect(() => {
-    // An import may finish while this category is unmounted. Read the latest
-    // draft again when the global operation lock is released.
-    if (!busy && !pending) setText(draft.current);
-  }, [busy, draft, pending]);
+    if (!busy && !pending) {
+      if (editor.current && editor.current.value !== draft.current) editor.current.value = draft.current;
+      setHasText(/\S/.test(draft.current));
+    }
+  }, [busy, draft, pending, expanded]);
   const submit = async () => {
     if (busy || pending || !hasText) return;
+    const submitted = editor.current?.value ?? draft.current;
     setPending(true);
-    const submitted = text;
     try {
       if (await onImport(submitted)) {
-        setText((current) => current === submitted ? "" : current);
+        if (editor.current?.value === submitted && draft.current === "") editor.current.value = "";
+        setHasText(/\S/.test(draft.current));
       }
     } finally {
       setPending(false);
     }
   };
   return (
-    <details className="rounded-md border px-3 py-2 text-xs">
-      <summary className="text-muted-foreground cursor-pointer select-none">批量导入代理</summary>
-      <Textarea
-        aria-label="批量代理文本"
-        className="mt-3 h-32 max-h-32 font-mono"
-        // Content-based sizing can freeze layout on thousands of pasted lines,
-        // even with a maximum height. Keep this bulk editor fixed and scrollable.
-        style={{ fieldSizing: "fixed" }}
-        rows={3}
-        placeholder="每行一个代理：URL|名称|备注"
-        value={text}
-        onChange={(event) => {
-          draft.current = event.target.value;
-          setText(event.target.value);
-        }}
-      />
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <Button type="button" size="sm" onClick={() => void submit()} disabled={busy || pending || !hasText}>
-          {pending ? "导入中…" : "导入"}
-        </Button>
-        <span className="text-muted-foreground">显示代理地址时会隐藏账号密码。</span>
-      </div>
-    </details>
+    <div className="rounded-md border px-3 py-2 text-xs">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="text-muted-foreground -ml-2"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((open) => !open)}
+      >
+        批量导入代理
+      </Button>
+      {expanded ? <>
+        <Textarea
+          ref={editor}
+          aria-label="批量代理文本"
+          className="mt-3 h-32 max-h-32 font-mono"
+          style={{ fieldSizing: "fixed" }}
+          rows={3}
+          wrap="off"
+          spellCheck={false}
+          autoCorrect="off"
+          autoCapitalize="off"
+          placeholder="每行一个代理：URL|名称|备注"
+          defaultValue={draft.current}
+          onChange={(event) => {
+            draft.current = event.target.value;
+            setHasText(/\S/.test(event.target.value));
+          }}
+        />
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Button type="button" size="sm" onClick={() => void submit()} disabled={busy || pending || !hasText}>
+            {pending ? "导入中…" : "导入"}
+          </Button>
+          <span className="text-muted-foreground">显示代理地址时会隐藏账号密码。</span>
+        </div>
+      </> : null}
+    </div>
   );
 }
 
