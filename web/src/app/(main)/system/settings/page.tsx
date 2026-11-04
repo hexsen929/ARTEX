@@ -24,7 +24,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSendMode } from "@/lib/chat-send-mode";
-import { MAX_TASK_WORKER_COUNT, type EgressReport, type LLMProfile, type ProxyPoolEntry, type Settings, type WorkerPool } from "@/lib/types";
+import { MAX_TASK_WORKER_COUNT, type EgressReport, type LLMProfile, type ProxyPoolBulkRequest, type ProxyPoolEntry, type Settings, type WorkerPool } from "@/lib/types";
 
 import { useEgressIp } from "../../_components/egress-ip-banner";
 import { BasicAuthCard } from "./_components/basic-auth-card";
@@ -77,6 +77,7 @@ export default function SystemSettingsPage() {
   const [proxyPoolFailure, setProxyPoolFailure] = React.useState(false);
   const [proxyPoolStrategy, setProxyPoolStrategy] = React.useState<"sequential" | "random">("sequential");
   const [proxyPoolThreshold, setProxyPoolThreshold] = React.useState("3");
+  const [proxyPoolSavedThreshold, setProxyPoolSavedThreshold] = React.useState(3);
   const [proxyPoolCooldown, setProxyPoolCooldown] = React.useState("60");
   const [proxyPoolHealthInterval, setProxyPoolHealthInterval] = React.useState("30");
   const [proxyPoolLogs, setProxyPoolLogs] = React.useState<
@@ -158,6 +159,7 @@ export default function SystemSettingsPage() {
     setProxyPoolFailure(s.proxy_rotate_on_failure!);
     setProxyPoolStrategy(s.proxy_rotate_strategy === "random" ? "random" : "sequential");
     setProxyPoolThreshold(String(s.proxy_health_fail_threshold ?? 3));
+    setProxyPoolSavedThreshold(s.proxy_health_fail_threshold ?? 3);
     setProxyPoolCooldown(String(s.proxy_health_cooldown_seconds ?? 60));
     setProxyPoolHealthInterval(String(s.proxy_health_check_interval_seconds ?? 30));
     setProxyPoolLogs(s.proxy_pool_switch_log!);
@@ -591,6 +593,19 @@ export default function SystemSettingsPage() {
     void runProxyPoolOperation(() => api.updateProxyPool(entry.id, { enabled: !entry.enabled }));
   const deleteProxyPoolEntry = (id: string) =>
     void runProxyPoolOperation(() => api.deleteProxyPool(id));
+  const bulkProxyPoolEntries = async (request: ProxyPoolBulkRequest) => {
+    const response: { value?: Awaited<ReturnType<typeof api.bulkProxyPool>> } = {};
+    const confirmed = await runProxyPoolOperation(async () => {
+      const result = await api.bulkProxyPool(request);
+      response.value = result;
+      if (result.ok !== true || !Number.isInteger(result.changed) || !Number.isInteger(result.skipped) || result.changed < 0 || result.skipped < 0 || result.changed + result.skipped !== new Set(request.ids).size) {
+        throw new Error("服务未确认批量操作结果，请刷新状态后核对");
+      }
+    });
+    const result = response.value;
+    if (confirmed && result) toast.success(`已${request.action === "delete" ? "删除" : "禁用"} ${result.changed} 条代理${result.skipped ? `，跳过 ${result.skipped} 条` : ""}`);
+    return confirmed;
+  };
   const activateProxyPoolEntry = (id: string) =>
     void runProxyPoolOperation(() => api.activateProxyPool(id), "已切换全局代理");
 
@@ -1139,6 +1154,8 @@ export default function SystemSettingsPage() {
                     onActivate={activateProxyPoolEntry}
                     onTest={testOneProxyPool}
                     onDelete={deleteProxyPoolEntry}
+                    healthThreshold={proxyPoolSavedThreshold}
+                    onBulk={bulkProxyPoolEntries}
                   />
                   <details className="rounded-md border px-3 py-2 text-xs">
                     <summary className="text-muted-foreground cursor-pointer select-none">轮换与健康检查策略</summary>

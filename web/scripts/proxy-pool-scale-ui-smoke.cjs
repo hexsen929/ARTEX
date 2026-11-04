@@ -51,7 +51,7 @@ const settings = {
   constraints_inject_planner: true, constraints_inject_worker: true, noa_compaction: false,
   notify_enabled: true, notify_public_base_url: "", notify_digest_interval_min: 30,
 };
-const state = { holdEgress: false, liveEgressReads: 0, peakEgressReads: 0 };
+const state = { holdEgress: false, liveEgressReads: 0, peakEgressReads: 0, failBulk: false, recoverOnCleanup: "", rotateOnBulk: "" };
 const requests = [], unexpected = new Set(), external = new Set(), errors = [], heldEgress = [];
 
 function json(response, code, value) {
@@ -120,6 +120,34 @@ async function serveAPI(request, response, url) {
       ...(url.searchParams.get("summary") === "1" ? { ok: true, count: settings.proxy_pool.length } : proxySnapshot()),
       probe_queued: true,
     });
+  }
+  if (endpoint === "/api/settings/proxy-pool/bulk" && method === "POST") {
+    assert.ok(["delete", "disable"].includes(body.action));
+    assert.ok(Array.isArray(body.ids) && body.ids.length > 0);
+    if (state.failBulk) { state.failBulk = false; return json(response, 500, { error: "FIXTURE_BULK_STORAGE_FAILURE" }); }
+    if (state.rotateOnBulk) {
+      const next = settings.proxy_pool.find((entry) => entry.id === state.rotateOnBulk);
+      settings.proxy_pool_active_id = next.id; settings.global_proxy = next.url; state.rotateOnBulk = "";
+    }
+    const ids = new Set(body.ids), active = settings.proxy_pool_active_id;
+    if (!body.only_unhealthy && ids.has(active) && !(body.allow_active && body.expected_active_id === active)) return json(response, 409, { error: "当前使用代理已变更，请刷新后重试" });
+    if (state.recoverOnCleanup) {
+      const recovered = settings.proxy_pool.find((entry) => entry.id === state.recoverOnCleanup);
+      recovered.health = "healthy"; recovered.consecutive_failures = 0; recovered.last_error = ""; state.recoverOnCleanup = "";
+    }
+    let changed = 0;
+    settings.proxy_pool = settings.proxy_pool.filter((entry) => {
+      if (!ids.has(entry.id)) return true;
+      if (body.only_unhealthy && (entry.id === active || !["unhealthy-cooling", "disabled"].includes(entry.health) || !entry.last_checked_at || !entry.last_error || entry.consecutive_failures < settings.proxy_health_fail_threshold)) return true;
+      if (body.action === "delete") { changed++; return false; }
+      if (entry.enabled) { changed++; entry.enabled = false; entry.health = "disabled"; }
+      return true;
+    });
+    if (!settings.proxy_pool.some((entry) => entry.id === active && entry.enabled)) {
+      const next = settings.proxy_pool.find((entry) => entry.enabled && entry.health !== "unhealthy-cooling") ?? settings.proxy_pool.find((entry) => entry.enabled);
+      settings.proxy_pool_active_id = next?.id ?? ""; settings.global_proxy = next?.url ?? "";
+    }
+    return json(response, 200, { ok: true, changed, skipped: ids.size - changed, active_id: settings.proxy_pool_active_id, active_changed: settings.proxy_pool_active_id !== active });
   }
   const entry = endpoint.match(/^\/api\/settings\/proxy-pool\/([^/]+)(?:\/(activate|test))?$/);
   if (entry) {
@@ -353,6 +381,112 @@ async function main() {
     await page.locator("#show-egress-ip").click();
     await eventually(() => settings.show_egress_ip === false, "Explicit egress preference close did not persist");
     console.log("PASS egress refresh is lightweight and single-flight while a response is held");
+
+    // Cross-page selection and cancellation submit no individual mutations.
+    const bulkPath = "/api/settings/proxy-pool/bulk";
+    const choose = (i) => page.getByRole("checkbox", { name: `选择代理 ${proxyID(i)}`, exact: true });
+    const dialog = () => page.getByRole("alertdialog");
+    await search().fill("");
+    await choose(0).waitFor(); await choose(0).click();
+    await list().getByRole("button", { name: "下一页代理", exact: true }).click();
+    await choose(50).waitFor(); await choose(50).click();
+    await list().getByText("已选 2 条（跨页保留）", { exact: true }).waitFor();
+    await list().getByRole("button", { name: "删除选中", exact: true }).click();
+    await dialog().getByRole("heading", { name: "确认删除 2 条代理？", exact: true }).waitFor();
+    await dialog().getByRole("button", { name: "取消", exact: true }).click();
+    assert.equal(callCount(bulkPath, "POST"), 0);
+    await list().getByRole("button", { name: "禁用选中", exact: true }).click();
+    await dialog().getByRole("button", { name: "确认禁用", exact: true }).click();
+    await list().getByText("已选 0 条（跨页保留）", { exact: true }).waitFor();
+    assert.equal(callCount(bulkPath, "POST"), 1);
+    assert.deepEqual([...requests.filter((r) => r.endpoint === bulkPath).at(-1).body.ids].sort(), [proxyID(0), proxyID(50)].sort());
+    assert.equal(settings.proxy_pool.find((entry) => entry.id === proxyID(0)).enabled, false);
+    assert.equal(settings.proxy_pool.find((entry) => entry.id === proxyID(50)).enabled, false);
+    assert.equal(settings.proxy_pool_active_id, proxyID(17));
+    console.log("PASS cross-page disable uses one request; cancellation does not mutate or change the active exit");
+
+    await choose(50).click();
+    await list().getByRole("button", { name: "下一页代理", exact: true }).click();
+    await choose(100).waitFor(); await choose(100).click();
+    state.failBulk = true;
+    await list().getByRole("button", { name: "删除选中", exact: true }).click();
+    await dialog().getByRole("button", { name: "确认删除", exact: true }).click();
+    await page.locator("[data-sonner-toast]").filter({ hasText: "FIXTURE_BULK_STORAGE_FAILURE" }).first().waitFor();
+    await eventually(async () => await list().getByRole("button", { name: "删除选中", exact: true }).isEnabled(), "Failed batch kept controls busy");
+    await list().getByText("已选 2 条（跨页保留）", { exact: true }).waitFor();
+    assert.equal(callCount(bulkPath, "POST"), 2, "Failed batch automatically replayed");
+    assert.ok(settings.proxy_pool.some((entry) => entry.id === proxyID(50)) && settings.proxy_pool.some((entry) => entry.id === proxyID(100)));
+    await list().getByRole("button", { name: "删除选中", exact: true }).click();
+    await dialog().getByRole("button", { name: "确认删除", exact: true }).click();
+    await list().getByText("已选 0 条（跨页保留）", { exact: true }).waitFor();
+    assert.equal(callCount(bulkPath, "POST"), 3);
+    console.log("PASS failed bulk delete preserves selection and requires an explicit retry");
+
+    for (let i = 200; i < 300; i++) settings.proxy_pool.find((entry) => entry.id === proxyID(i)).name = "FIXTURE_BULK_GROUP";
+    await list().getByRole("button", { name: "刷新状态", exact: true }).click();
+    await search().fill("FIXTURE_BULK_GROUP");
+    await list().getByText("第 1 / 2 页", { exact: true }).waitFor();
+    await list().getByRole("button", { name: "全选匹配（100）", exact: true }).click();
+    await list().getByText("已选 100 条（跨页保留）", { exact: true }).waitFor();
+    assert.equal(await rows().count(), 50);
+    await list().getByRole("button", { name: "删除选中", exact: true }).click();
+    await dialog().getByRole("heading", { name: "确认删除 100 条代理？", exact: true }).waitFor();
+    await dialog().getByRole("button", { name: "确认删除", exact: true }).click();
+    await list().getByText("没有匹配的代理。", { exact: true }).waitFor();
+    assert.equal(requests.filter((r) => r.endpoint === bulkPath).at(-1).body.ids.length, 100);
+    console.log("PASS select-all matching includes every filtered page with only 50 mounted rows");
+
+    await search().fill("");
+    const failedPatch = { health: "unhealthy-cooling", last_checked_at: "2026-11-05T00:00:00Z", last_error: "FIXTURE_FAILED_PROXY", consecutive_failures: 3 };
+    for (const i of [17, 400, 401, 403, 404]) Object.assign(settings.proxy_pool.find((entry) => entry.id === proxyID(i)), failedPatch);
+    settings.proxy_pool.find((entry) => entry.id === proxyID(403)).consecutive_failures = 2;
+    settings.proxy_pool.find((entry) => entry.id === proxyID(404)).health = "healthy";
+    await list().getByRole("button", { name: "刷新状态", exact: true }).click();
+    await list().getByRole("button", { name: "清理失效（2）", exact: true }).waitFor();
+    await page.locator("details").filter({ has: page.getByText("轮换与健康检查策略", { exact: true }) }).locator("summary").click();
+    await page.locator("#proxy-pool-threshold").fill("1");
+    state.recoverOnCleanup = proxyID(401);
+    const probesBeforeCleanup = callCount("/api/settings/proxy-pool/test-all", "POST");
+    await list().getByRole("button", { name: "清理失效（2）", exact: true }).click();
+    await dialog().getByRole("heading", { name: "确认清理 2 条失效代理？", exact: true }).waitFor();
+    await dialog().getByRole("button", { name: "确认删除", exact: true }).click();
+    await page.locator("[data-sonner-toast]").filter({ hasText: "已删除 1 条代理，跳过 1 条" }).first().waitFor();
+    const cleanup = requests.filter((r) => r.endpoint === bulkPath).at(-1).body;
+    assert.equal(cleanup.only_unhealthy, true); assert.equal(cleanup.allow_active, false);
+    assert.deepEqual([...cleanup.ids].sort(), [proxyID(400), proxyID(401)].sort());
+    for (const i of [17, 401, 402, 403, 404]) assert.ok(settings.proxy_pool.some((entry) => entry.id === proxyID(i)));
+    assert.equal(settings.proxy_pool_active_id, proxyID(17));
+    assert.equal(callCount("/api/settings/proxy-pool/test-all", "POST"), probesBeforeCleanup);
+    console.log("PASS cleanup uses the saved threshold, skips current/unchecked/recovered proxies and starts no probe");
+
+    await search().fill("fixture-proxy-0001");
+    await choose(17).waitFor(); await choose(17).click(); await choose(18).click();
+    await list().getByRole("button", { name: "删除选中", exact: true }).click();
+    assert.match(await dialog().innerText(), /包含当前使用的代理/);
+    state.rotateOnBulk = proxyID(18);
+    await dialog().getByRole("button", { name: "确认删除", exact: true }).click();
+    await page.locator("[data-sonner-toast]").filter({ hasText: "当前使用代理已变更" }).first().waitFor();
+    await eventually(async () => await list().getByRole("button", { name: "刷新状态", exact: true }).isEnabled(), "Stale active acknowledgement stayed busy");
+    assert.ok(settings.proxy_pool.some((entry) => entry.id === proxyID(17)) && settings.proxy_pool.some((entry) => entry.id === proxyID(18)));
+    await list().getByRole("button", { name: "刷新状态", exact: true }).click();
+    await eventually(async () => await list().getByRole("button", { name: "删除选中", exact: true }).isEnabled(), "Refresh stayed busy");
+    await list().getByRole("button", { name: "删除选中", exact: true }).click();
+    await dialog().getByRole("button", { name: "确认删除", exact: true }).click();
+    await list().getByText("已选 0 条（跨页保留）", { exact: true }).waitFor();
+    assert.ok(![proxyID(17), proxyID(18)].includes(settings.proxy_pool_active_id));
+    console.log("PASS current-proxy changes reject stale confirmation and require an explicit refreshed confirmation");
+
+    await search().fill("");
+    await list().getByRole("button", { name: /^全选匹配（/ }).click();
+    const remainingCount = settings.proxy_pool.length;
+    await list().getByRole("button", { name: "删除选中", exact: true }).click();
+    await dialog().getByRole("heading", { name: `确认删除 ${remainingCount} 条代理？`, exact: true }).waitFor();
+    assert.match(await dialog().innerText(), /没有可用成员时改为直连/);
+    await dialog().getByRole("button", { name: "确认删除", exact: true }).click();
+    await list().getByText("暂无代理池条目。", { exact: true }).waitFor();
+    assert.equal(settings.proxy_pool.length, 0); assert.equal(settings.global_proxy, ""); assert.equal(settings.proxy_pool_active_id, "");
+    assert.equal(requests.filter((r) => r.endpoint === bulkPath).at(-1).body.ids.length, remainingCount);
+    console.log("PASS thousands of selected proxies clear with one confirmed request and no hidden remaining exit");
 
     assert.ok(await page.evaluate(() => window.fixturePeakProxyRows) <= 50, "A transition temporarily mounted more than one page of proxies");
     assert.equal(requests.filter((r) => r.endpoint.startsWith("/api/tasks/") && r.method !== "GET").length, 0);

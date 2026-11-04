@@ -5,8 +5,10 @@ import * as React from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { filterProxyPool, PROXY_POOL_PAGE_SIZE, proxyPoolPage } from "@/lib/proxy-pool-pagination";
-import type { ProxyPoolEntry } from "@/lib/types";
+import { Checkbox } from "@/components/ui/checkbox";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import { filterProxyPool, PROXY_POOL_PAGE_SIZE, proxyCleanupEligible, proxyPoolPage } from "@/lib/proxy-pool-pagination";
+import type { ProxyPoolBulkRequest, ProxyPoolEntry } from "@/lib/types";
 
 type Props = {
   entries: ProxyPoolEntry[];
@@ -20,6 +22,8 @@ type Props = {
   onActivate: (id: string) => void;
   onTest: (id: string) => void;
   onDelete: (id: string) => void;
+  healthThreshold: number;
+  onBulk: (request: ProxyPoolBulkRequest) => Promise<boolean>;
 };
 
 function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy" | "onImport">) {
@@ -90,13 +94,53 @@ function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy"
   );
 }
 
-export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTestAll, onRefresh, onToggle, onActivate, onTest, onDelete }: Props) {
+export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTestAll, onRefresh, onToggle, onActivate, onTest, onDelete, healthThreshold, onBulk }: Props) {
   const [query, setQuery] = React.useState("");
   const [requestedPage, setRequestedPage] = React.useState(1);
+  const [selected, setSelected] = React.useState<Set<string>>(() => new Set());
+  const [confirmation, setConfirmation] = React.useState<{ request: ProxyPoolBulkRequest; title: string; threshold: number } | null>(null);
+  const submitting = React.useRef(false);
   const deferredQuery = React.useDeferredValue(query);
   const filtered = React.useMemo(() => filterProxyPool(entries, deferredQuery), [entries, deferredQuery]);
   const { items, page, pages } = proxyPoolPage(filtered, requestedPage);
   const active = React.useMemo(() => entries.find((entry) => entry.id === activeId), [entries, activeId]);
+  const entryIDs = React.useMemo(() => new Set(entries.map((entry) => entry.id)), [entries]);
+  const invalidIDs = React.useMemo(() => entries.filter((entry) => entry.id !== activeId && proxyCleanupEligible(entry, healthThreshold)).map((entry) => entry.id), [entries, activeId, healthThreshold]);
+  const selectedCount = React.useMemo(() => [...selected].filter((id) => entryIDs.has(id)).length, [selected, entryIDs]);
+  const pageSelected = items.filter((entry) => selected.has(entry.id)).length;
+  React.useEffect(() => {
+    setSelected((previous) => {
+      const next = new Set([...previous].filter((id) => entryIDs.has(id)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [entryIDs]);
+  const togglePage = (checked: boolean) => setSelected((previous) => {
+    const next = new Set(previous);
+    for (const entry of items) { if (checked) next.add(entry.id); else next.delete(entry.id); }
+    return next;
+  });
+  const confirmBulk = (action: "delete" | "disable", cleanup = false) => {
+    if (busy) return;
+    const ids = cleanup ? invalidIDs : [...selected].filter((id) => entryIDs.has(id));
+    if (ids.length === 0) return;
+    setConfirmation({
+      request: { action, ids, only_unhealthy: cleanup, allow_active: !cleanup && ids.includes(activeId), expected_active_id: activeId },
+      title: cleanup ? `确认清理 ${ids.length} 条失效代理？` : `确认${action === "delete" ? "删除" : "禁用"} ${ids.length} 条代理？`,
+      threshold: healthThreshold,
+    });
+  };
+  const submitBulk = async () => {
+    if (!confirmation || busy || submitting.current) return;
+    const snapshot = confirmation;
+    submitting.current = true;
+    setConfirmation(null);
+    try {
+      if (await onBulk(snapshot.request)) {
+        const processed = new Set(snapshot.request.ids);
+        setSelected((previous) => new Set([...previous].filter((id) => !processed.has(id))));
+      }
+    } finally { submitting.current = false; }
+  };
   React.useEffect(() => {
     setRequestedPage(page);
   }, [page]);
@@ -107,9 +151,10 @@ export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTest
           <p className="text-sm font-medium">代理池 <span className="text-muted-foreground font-normal">{entries.length}</span></p>
           <p className="text-muted-foreground mt-1 text-xs">当前：{active?.name || (activeId ? "已选择代理" : "直连")}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button type="button" variant="outline" size="sm" onClick={onRefresh} disabled={busy}>刷新状态</Button>
           <Button type="button" variant="outline" size="sm" onClick={onTestAll} disabled={busy}>测试全部</Button>
+          <Button type="button" variant="outline" size="sm" onClick={() => confirmBulk("delete", true)} disabled={busy || invalidIDs.length === 0}>清理失效（{invalidIDs.length}）</Button>
         </div>
       </div>
       <ProxyPoolImport draft={draft} busy={busy} onImport={onImport} />
@@ -122,6 +167,18 @@ export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTest
           setRequestedPage(1);
         }}
       />
+      <div className="flex flex-wrap items-center gap-2 rounded-md border p-2 text-xs" data-testid="proxy-pool-bulk-toolbar">
+        <label className="flex items-center gap-2">
+          <Checkbox aria-label="全选本页代理" checked={pageSelected === 0 ? false : pageSelected === items.length ? true : "indeterminate"} disabled={busy || items.length === 0} onCheckedChange={(checked) => togglePage(checked === true)} />
+          本页
+        </label>
+        <Button type="button" variant="ghost" size="sm" disabled={busy || filtered.length === 0 || query !== deferredQuery} onClick={() => setSelected(new Set(filtered.map((entry) => entry.id)))}>全选匹配（{filtered.length}）</Button>
+        <span aria-live="polite">已选 {selectedCount} 条（跨页保留）</span>
+        <Button type="button" variant="ghost" size="sm" disabled={busy || selectedCount === 0} onClick={() => setSelected(new Set())}>清空选择</Button>
+        <Button type="button" variant="outline" size="sm" disabled={busy || selectedCount === 0} onClick={() => confirmBulk("disable")}>禁用选中</Button>
+        <Button type="button" variant="destructive" size="sm" disabled={busy || selectedCount === 0} onClick={() => confirmBulk("delete")}>删除选中</Button>
+      </div>
+      <p className="text-muted-foreground text-xs">清理失效按已保存的连续失败阈值（{healthThreshold} 次）判断，跳过当前使用项和未检测项，不会发起新检测。可先测试全部，稍后刷新状态再清理。</p>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <span>共 {entries.length} 条，匹配 {filtered.length} 条，每页 {PROXY_POOL_PAGE_SIZE} 条</span>
         <div className="flex items-center gap-2">
@@ -136,7 +193,8 @@ export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTest
         ) : items.map((entry) => (
           <div key={entry.id} data-testid="proxy-pool-row" data-proxy-id={entry.id} className="grid gap-3 rounded-md border p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
             <div className="flex min-w-0 items-start gap-3">
-              <Switch checked={entry.enabled} onCheckedChange={() => onToggle(entry)} aria-label="启用代理" />
+              <Checkbox aria-label={`选择代理 ${entry.id}`} checked={selected.has(entry.id)} disabled={busy} onCheckedChange={(checked) => setSelected((previous) => { const next = new Set(previous); if (checked === true) next.add(entry.id); else next.delete(entry.id); return next; })} />
+              <Switch checked={entry.enabled} disabled={busy} onCheckedChange={() => onToggle(entry)} aria-label="启用代理" />
               <div className="grid min-w-0 flex-1 gap-x-5 gap-y-2 text-xs sm:grid-cols-2">
                 <div className="min-w-0">
                   <p className="text-muted-foreground">代理地址</p>
@@ -161,13 +219,29 @@ export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTest
               </div>
             </div>
             <div className="flex justify-end gap-1">
-              <Button type="button" variant="ghost" size="sm" disabled={!entry.enabled || entry.id === activeId} onClick={() => onActivate(entry.id)}>使用</Button>
-              <Button type="button" variant="ghost" size="sm" onClick={() => onTest(entry.id)}>测试</Button>
-              <Button type="button" variant="ghost" size="sm" onClick={() => onDelete(entry.id)}>删除</Button>
+              <Button type="button" variant="ghost" size="sm" disabled={busy || !entry.enabled || entry.id === activeId} onClick={() => onActivate(entry.id)}>使用</Button>
+              <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => onTest(entry.id)}>测试</Button>
+              <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => onDelete(entry.id)}>删除</Button>
             </div>
           </div>
         ))}
       </div>
+      <AlertDialog open={confirmation !== null} onOpenChange={(open) => { if (!open) setConfirmation(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{confirmation?.title}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {confirmation?.request.only_unhealthy ? `仅清理这批已连续失败达到 ${confirmation.threshold} 次的代理；恢复健康、失效次数不足或成为当前使用项的代理将跳过。` : `操作包含所选的全部页面，共 ${confirmation?.request.ids.length ?? 0} 条。`}
+              {confirmation?.request.allow_active ? "包含当前使用的代理，操作后会切换到剩余可用代理；没有可用成员时改为直连。" : "当前使用的代理保持不变。"}
+              {confirmation?.request.action === "delete" ? "删除后需要重新导入才能恢复。" : "禁用后仍保留记录，可逐条重新启用。"}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction disabled={busy} onClick={() => void submitBulk()}>确认{confirmation?.request.action === "delete" ? "删除" : "禁用"}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

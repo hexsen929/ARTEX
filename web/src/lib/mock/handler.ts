@@ -2492,6 +2492,26 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/settings/proxy-pool" && m === "GET") return { entries: D.settings.proxy_pool ?? [], active_id: D.settings.proxy_pool_active_id ?? "", active_proxy: D.settings.global_proxy ?? "", switch_log: [] };
   if (path === "/settings/proxy-pool/import" && m === "POST") return { ok: true, probe_queued: true, errors: [] };
   if (path === "/settings/proxy-pool/test-all" && m === "POST") return { ok: true, probe_queued: true };
+  if (path === "/settings/proxy-pool/bulk" && m === "POST") {
+    const ids = new Set(Array.isArray(b.ids) ? b.ids : []);
+    const previous = D.settings.proxy_pool_active_id ?? "";
+    if (!b.only_unhealthy && ids.has(previous) && !(b.allow_active && b.expected_active_id === previous)) throw new Error("当前使用代理已变更，请刷新后重试");
+    let changed = 0;
+    D.settings.proxy_pool = (D.settings.proxy_pool ?? []).filter((entry) => {
+      if (!ids.has(entry.id)) return true;
+      if (b.only_unhealthy && (entry.id === previous || !["disabled", "unhealthy-cooling"].includes(entry.health) || !entry.last_error || !entry.last_checked_at || entry.last_checked_at.startsWith("0001-") || entry.consecutive_failures < (D.settings.proxy_health_fail_threshold ?? 3))) return true;
+      if (b.action === "delete") { changed++; return false; }
+      if (entry.enabled) { changed++; entry.enabled = false; entry.health = "disabled"; }
+      return true;
+    });
+    const pool = D.settings.proxy_pool;
+    if (!pool.some((entry) => entry.id === previous && entry.enabled)) {
+      const next = pool.find((entry) => entry.enabled && entry.health !== "unhealthy-cooling") ?? pool.find((entry) => entry.enabled);
+      D.settings.proxy_pool_active_id = next?.id ?? "";
+      D.settings.global_proxy = next?.url ?? "";
+    }
+    return { ok: true, changed, skipped: ids.size - changed, active_id: D.settings.proxy_pool_active_id ?? "", active_changed: (D.settings.proxy_pool_active_id ?? "") !== previous };
+  }
   if (path.startsWith("/settings/proxy-pool/") && m === "PUT") return { entry: { ...(D.settings.proxy_pool ?? []).find((x) => x.id === path.split("/").at(-1)), ...b } };
   if (path.startsWith("/settings/proxy-pool/") && m === "DELETE") return { ok: true };
   if (path.startsWith("/settings/proxy-pool/") && m === "POST") return { ok: true, active_id: path.split("/").at(-1), active_proxy: "" };

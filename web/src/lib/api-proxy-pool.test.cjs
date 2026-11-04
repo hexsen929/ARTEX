@@ -90,3 +90,14 @@ test("navbar egress settings uses the lightweight endpoint", async () => {
   assert.equal(await client(payload, calls).egressSettings(), payload);
   assert.equal(calls[0].url, "/api/settings/egress");
 });
+
+test("bulk proxy mutation sends one bounded request and preserves the exact selected IDs and confirmation", async () => {
+  const calls = [];
+  const payload = { action: "delete", ids: ["proxy-a", "proxy-z"], only_unhealthy: true, expected_active_id: "proxy-current" };
+  const response = { ok: true, changed: 1, skipped: 1, active_id: "proxy-current", active_changed: false };
+  assert.equal(await client(response, calls).bulkProxyPool(payload), response);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/api/settings/proxy-pool/bulk");
+  assert.equal(calls[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].init.body), payload);
+});

@@ -172,7 +172,7 @@ func TestProxyPoolRoundUsesBoundedWorkersAndPublishesAfterCompletion(t *testing.
 }
 
 func TestProxyPoolCanceledOrSupersededRoundDoesNotPublish(t *testing.T) {
-	for _, mode := range []string{"cancel", "edit"} {
+	for _, mode := range []string{"cancel", "edit", "bulk-delete", "bulk-disable"} {
 		t.Run(mode, func(t *testing.T) {
 			entries := proxyScaleEntries(20)
 			m := &Manager{globalProxy: entries[0].RawURL, proxyPool: &proxyPoolState{active: entries[0].ID, entries: entries}}
@@ -201,6 +201,11 @@ func TestProxyPoolCanceledOrSupersededRoundDoesNotPublish(t *testing.T) {
 			}
 			if mode == "cancel" {
 				cancel()
+			} else if strings.HasPrefix(mode, "bulk-") {
+				w, _ := callProxyBulk(t, s, proxyPoolBulkRequest{Action: strings.TrimPrefix(mode, "bulk-"), IDs: []string{"scale-1", "scale-2"}})
+				if w.Code != http.StatusOK {
+					t.Fatalf("bulk status=%d", w.Code)
+				}
 			} else {
 				r := httptest.NewRequest(http.MethodPut, "/api/settings/proxy-pool/scale-0", strings.NewReader(`{"url":"http://new-fixture.invalid:8080"}`))
 				r.SetPathValue("id", "scale-0")
