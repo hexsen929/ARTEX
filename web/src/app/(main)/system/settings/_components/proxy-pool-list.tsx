@@ -51,7 +51,10 @@ function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy"
       <summary className="text-muted-foreground cursor-pointer select-none">批量导入代理</summary>
       <Textarea
         aria-label="批量代理文本"
-        className="mt-3 font-mono"
+        className="mt-3 h-32 max-h-32 font-mono"
+        // Content-based sizing can freeze layout on thousands of pasted lines,
+        // even with a maximum height. Keep this bulk editor fixed and scrollable.
+        style={{ fieldSizing: "fixed" }}
         rows={3}
         placeholder="每行一个代理：URL|名称|备注"
         value={text}

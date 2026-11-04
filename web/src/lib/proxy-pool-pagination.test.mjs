@@ -78,4 +78,5 @@ test("settings do not mount a hidden whole pool or keep an import textarea in th
   assert.match(list, /useDeferredValue\(query\)/);
   assert.match(list, /data-testid="proxy-pool-row" data-proxy-id=\{entry\.id\}/);
   assert.match(list, /onClick=\{onRefresh\} disabled=\{busy\}>刷新状态/);
+  assert.match(list, /style=\{\{ fieldSizing: "fixed" \}\}/);
 });

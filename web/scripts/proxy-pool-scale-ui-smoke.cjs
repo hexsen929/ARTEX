@@ -263,10 +263,18 @@ async function main() {
     await list().locator("summary").filter({ hasText: "批量导入代理" }).click();
     const importText = () => page.getByRole("textbox", { name: "批量代理文本", exact: true });
     const draft = Array.from({ length: 5000 }, (_, i) => `http://import${i}.fixture.invalid:8080`).join("\n");
+    console.log("STAGE before large import paste");
     await importText().fill(draft);
+    console.log("STAGE after large import paste");
+    const textareaBox = await importText().boundingBox();
+    assert.ok(textareaBox && textareaBox.height <= 140, "Large import draft expanded the textarea beyond its fixed height");
+    console.log("STAGE before switching away from proxy category");
     await page.getByRole("button", { name: /^系统与账号/ }).click();
+    console.log("STAGE after switching away from proxy category");
     assert.equal(await rows().count(), 0, "Switching away retained hidden proxy rows");
+    console.log("STAGE before remounting proxy category");
     await page.getByRole("button", { name: /^流量与安全/ }).click();
+    console.log("STAGE after remounting proxy category");
     await list().locator("summary").filter({ hasText: "批量导入代理" }).click();
     assert.equal(await importText().inputValue(), draft, "Unmounting the category discarded the unsaved import draft");
     await list().getByRole("button", { name: "导入", exact: true }).click();
@@ -318,7 +326,9 @@ async function main() {
     assert.deepEqual([...external], [], "External request attempted");
     console.log("PASS bounded proxy DOM throughout; no real task, proxy probe or external request ran");
   } catch (error) {
-    console.error(JSON.stringify({ route: page.url(), requests: requests.slice(-15).map(({ endpoint, method, query }) => ({ endpoint, method, query })), unexpected: [...unexpected], body: (await page.locator("body").innerText()).slice(0, 5000) }, null, 2));
+    console.error("Original proxy UI error:", error.message);
+    const body = await page.locator("body").innerText({ timeout: 1000 }).catch((diagnosticError) => `[body unavailable: ${diagnosticError.message}]`);
+    console.error(JSON.stringify({ route: page.url(), requests: requests.slice(-15).map(({ endpoint, method, query }) => ({ endpoint, method, query })), unexpected: [...unexpected], body: body.slice(0, 5000) }, null, 2));
     throw error;
   } finally { await context.close(); }
 }
