@@ -34,6 +34,7 @@ export function EgressIpProvider({ children }: { children: React.ReactNode }) {
   const preferencePending = React.useRef(false);
   const settingsVersion = React.useRef(0);
   const probeVersion = React.useRef(0);
+  const probesInFlight = React.useRef(0);
 
   const clearProbe = React.useCallback(() => {
     probeVersion.current += 1;
@@ -44,6 +45,7 @@ export function EgressIpProvider({ children }: { children: React.ReactNode }) {
 
   const probeForProxy = React.useCallback(async (globalProxy: string) => {
     const version = ++probeVersion.current;
+    probesInFlight.current += 1;
     setError(null);
     setIsLoading(true);
     try {
@@ -57,6 +59,7 @@ export function EgressIpProvider({ children }: { children: React.ReactNode }) {
       }
       throw cause;
     } finally {
+      probesInFlight.current -= 1;
       if (mounted.current && version === probeVersion.current) setIsLoading(false);
     }
   }, []);
@@ -67,7 +70,7 @@ export function EgressIpProvider({ children }: { children: React.ReactNode }) {
     setIsSavingPreference(false);
     const version = ++settingsVersion.current;
     api
-      .settings()
+      .egressSettings()
       .then((settings) => {
         if (!mounted.current || version !== settingsVersion.current) return;
         const snapshot = egressSettingsSnapshot(settings);
@@ -87,11 +90,33 @@ export function EgressIpProvider({ children }: { children: React.ReactNode }) {
 
   React.useEffect(() => {
     if (!enabled) return;
-    const timer = window.setInterval(() => {
-      void api.settings().then((settings) => probeForProxy(settings.global_proxy ?? "")).catch(() => undefined);
+    let active = true;
+    let busy = false;
+    const timer = window.setInterval(async () => {
+      // Never queue full-pool settings reads or overlapping probes on a slow
+      // connection. Manual refreshes and preference saves invalidate this read.
+      if (!active || busy || probesInFlight.current > 0 || preferencePending.current || document.visibilityState === "hidden") return;
+      busy = true;
+      const version = settingsVersion.current;
+      const request = probeVersion.current;
+      try {
+        const settings = await api.egressSettings();
+        if (!active || !mounted.current || version !== settingsVersion.current || request !== probeVersion.current || preferencePending.current) return;
+        const snapshot = egressSettingsSnapshot(settings);
+        setEnabledState(snapshot.enabled);
+        if (!snapshot.enabled) {
+          clearProbe();
+          return;
+        }
+        await probeForProxy(snapshot.globalProxy);
+      } catch {
+        // Preserve the last known preference when its refresh fails.
+      } finally {
+        busy = false;
+      }
     }, 10000);
-    return () => window.clearInterval(timer);
-  }, [enabled, probeForProxy]);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [enabled, clearProbe, probeForProxy]);
 
   const setEnabled = React.useCallback(
     async (nextEnabled: boolean) => {
@@ -127,7 +152,7 @@ export function EgressIpProvider({ children }: { children: React.ReactNode }) {
     const request = ++probeVersion.current;
     setIsLoading(true);
     try {
-      const settings = await api.settings();
+      const settings = await api.egressSettings();
       if (!mounted.current || version !== settingsVersion.current || request !== probeVersion.current) {
         throw new Error("出口探测已取消");
       }

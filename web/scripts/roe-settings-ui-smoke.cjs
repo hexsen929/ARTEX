@@ -77,6 +77,7 @@ async function api(request, response, url) {
       return json(response, 200, { [key]: settings[key] });
     }
   }
+  if (endpoint === "/api/settings/egress") return json(response, 200, { show_egress_ip: settings.show_egress_ip, global_proxy: settings.global_proxy });
   if (endpoint === "/api/settings" && method === "GET") {
     return controlKeys.some((key) => !validControl(key, settings[key]))
       ? json(response, 500, { error: "fixture stored controls are invalid" })

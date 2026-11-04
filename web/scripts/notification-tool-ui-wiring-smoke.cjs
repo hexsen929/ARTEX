@@ -45,6 +45,7 @@ async function serveAPI(request, response, url) {
   if (endpoint === "/api/tasks") return json(response, 200, { tasks: [], active: "" });
   if (endpoint === "/api/agents") return json(response, 200, { agents: [] });
   if (endpoint === "/api/skills/missing") return json(response, 200, { missing: [] });
+  if (endpoint === "/api/settings/egress") return json(response, 200, { show_egress_ip: false, global_proxy: "" });
   if (endpoint === "/api/settings" && method === "GET") return json(response, 200, { traffic_capture: false, web_search_enabled: false, show_egress_ip: false, global_proxy: "" });
   if (endpoint === "/api/settings" && method === "PUT") {
     if ("notify_enabled" in body) globalSettings.enabled = body.notify_enabled;

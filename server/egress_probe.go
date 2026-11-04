@@ -183,6 +183,7 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 	}
 
 	tr, caErr := buildProbeTransport(proxyURL, caPEMPath)
+	defer tr.CloseIdleConnections()
 
 	client := &http.Client{
 		Transport: tr,

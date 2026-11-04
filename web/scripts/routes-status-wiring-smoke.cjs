@@ -28,6 +28,7 @@ async function serveAPI(request, response, url) {
   if (endpoint === "/api/update/check") return json(response, 200, { has_update: false, current: "fixture" });
   if (endpoint === "/api/intercept/pending") return json(response, 200, { pending: [] });
   if (endpoint === "/api/skills/missing") return json(response, 200, { missing: [] });
+  if (endpoint === "/api/settings/egress") return json(response, 200, { show_egress_ip: false, global_proxy: "" });
   if (endpoint === "/api/settings" && method === "GET") {
     if (state.settingsFail) return error(response, "UI_FIXTURE_SETTINGS_UNAVAILABLE");
     return json(response, 200, { llm_record: false, show_egress_ip: false, global_proxy: "", traffic_capture: false });

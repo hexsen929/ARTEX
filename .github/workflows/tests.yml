@@ -242,6 +242,12 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
         run: node scripts/roe-settings-ui-smoke.cjs
         working-directory: web
+      - name: Large proxy pool settings browser regressions
+        env:
+          ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
+        run: node scripts/proxy-pool-scale-ui-smoke.cjs
+        working-directory: web
       - name: Notification and tool editor browser regressions
         env:
           ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright

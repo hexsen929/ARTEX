@@ -73,6 +73,7 @@ async function serveAPI(request, response, url) {
   if (endpoint === "/api/auth/status") return json(response, 200, { initialized: true });
   if (endpoint === "/api/update/check") return json(response, 200, { has_update: false, current: "fixture" });
   if (endpoint === "/api/intercept/pending") return json(response, 200, { pending: [] });
+  if (endpoint === "/api/settings/egress") return json(response, 200, { show_egress_ip: false, global_proxy: "" });
   if (endpoint === "/api/settings") return json(response, 200, { show_egress_ip: false, traffic_capture: false });
   if (endpoint === "/api/tasks") return json(response, 200, { tasks: [{ id: "101", name: taskName, description: taskName, status: "done" }], active: "" });
   if (endpoint === "/api/agents") return json(response, 200, { agents: [] });
