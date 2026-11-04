@@ -481,7 +481,7 @@ async function main() {
     const remainingCount = settings.proxy_pool.length;
     await list().getByRole("button", { name: "删除选中", exact: true }).click();
     await dialog().getByRole("heading", { name: `确认删除 ${remainingCount} 条代理？`, exact: true }).waitFor();
-    assert.match(await dialog().innerText(), /没有可用成员时改为直连/);
+    assert.match(await dialog().innerText(), /没有已启用成员时改为直连/);
     await dialog().getByRole("button", { name: "确认删除", exact: true }).click();
     await list().getByText("暂无代理池条目。", { exact: true }).waitFor();
     assert.equal(settings.proxy_pool.length, 0); assert.equal(settings.global_proxy, ""); assert.equal(settings.proxy_pool_active_id, "");

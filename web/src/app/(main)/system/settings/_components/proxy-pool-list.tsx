@@ -232,7 +232,7 @@ export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTest
             <AlertDialogTitle>{confirmation?.title}</AlertDialogTitle>
             <AlertDialogDescription>
               {confirmation?.request.only_unhealthy ? `仅清理这批已连续失败达到 ${confirmation.threshold} 次的代理；恢复健康、失效次数不足或成为当前使用项的代理将跳过。` : `操作包含所选的全部页面，共 ${confirmation?.request.ids.length ?? 0} 条。`}
-              {confirmation?.request.allow_active ? "包含当前使用的代理，操作后会切换到剩余可用代理；没有可用成员时改为直连。" : "当前使用的代理保持不变。"}
+              {confirmation?.request.allow_active ? "包含当前使用的代理，操作后会切换到剩余已启用代理；若仅剩失效成员则暂停相关任务，没有已启用成员时改为直连。" : "当前使用的代理保持不变。"}
               {confirmation?.request.action === "delete" ? "删除后需要重新导入才能恢复。" : "禁用后仍保留记录，可逐条重新启用。"}
             </AlertDialogDescription>
           </AlertDialogHeader>

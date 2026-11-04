@@ -125,6 +125,35 @@ func TestProxyPoolBulkActiveConsentAndFallback(t *testing.T) {
 	}
 }
 
+func TestProxyPoolBulkCleanupUsesSavedThresholdAndRejectsInvalidSetting(t *testing.T) {
+	m := proxyTestManager(t)
+	entries := proxyScaleEntries(2)
+	entries[1].Health, entries[1].ConsecutiveFailures, entries[1].LastCheckedAt, entries[1].LastError = "unhealthy-cooling", 3, time.Now(), "fixture failure"
+	m.proxyPool, m.globalProxy = &proxyPoolState{entries: entries, active: entries[0].ID}, entries[0].RawURL
+	s := &Server{m: m}
+	request := proxyPoolBulkRequest{Action: "delete", IDs: []string{entries[1].ID}, OnlyUnhealthy: true}
+	for _, tc := range []struct {
+		threshold string
+		status    int
+		changed   float64
+	}{
+		{"5", http.StatusOK, 0},
+		{"invalid", http.StatusConflict, 0},
+		{"3", http.StatusOK, 1},
+	} {
+		if _, err := m.pg.Exec(`INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`, settingProxyHealthThreshold, tc.threshold); err != nil {
+			t.Fatal(err)
+		}
+		w, response := callProxyBulk(t, s, request)
+		if w.Code != tc.status || (w.Code == http.StatusOK && response["changed"] != tc.changed) {
+			t.Fatalf("threshold=%q status=%d response=%s", tc.threshold, w.Code, w.Body.String())
+		}
+		if tc.changed == 0 && !reflect.DeepEqual(entries, m.proxyPoolEntries()) {
+			t.Fatal("unknown or higher configured threshold deleted a member")
+		}
+	}
+}
+
 func TestProxyPoolBulkRejectsMalformedRequests(t *testing.T) {
 	for _, body := range []string{`{}`, `{"action":"delete","ids":[]}`, `{"action":"enable","ids":["a"]}`, `{"action":"disable","ids":["a"],"only_unhealthy":true}`, `{"action":"delete","ids":[""]}`, `{"action":"delete","ids":["a"],"unknown":true}`, `{"action":"delete","ids":["a"]} {}`} {
 		s := &Server{m: &Manager{proxyPool: &proxyPoolState{entries: proxyScaleEntries(2)}}}
