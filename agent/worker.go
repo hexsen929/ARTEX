@@ -647,9 +647,16 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// session exists the worker continues from where it left off instead of
 	// restarting from scratch.
 	alreadyRecorded := false
+	continuation, requiresHistory := workerContinuationContext(intent)
+	if requiresHistory && w.tx == nil {
+		return harness.ReasonHookStopped, tsx.Writes(), ErrWorkerHistoryUnavailable
+	}
 	if w.tx != nil {
 		if err := resumeWorkerSession(s, opts.SessionID); err != nil {
 			return harness.ReasonHookStopped, tsx.Writes(), err
+		}
+		if requiresHistory && len(s.Messages()) == 0 {
+			return harness.ReasonHookStopped, tsx.Writes(), ErrWorkerHistoryUnavailable
 		}
 		alreadyRecorded = requestID != "" && hasWorkerChatMessage(s.Messages(), requestID)
 		if len(s.Messages()) > 0 && message == "" {
@@ -670,6 +677,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 				"\n\n请优先执行这条人工输入。"
 		}
 	}
+	input += continuation
 
 	// Budgets + settlement are owned by the SDK (MaxTurns/MaxDuration + Settlement):
 	// on hit it runs a wrap-up turn and finishes with ReasonMaxTurns/ReasonTimeout.

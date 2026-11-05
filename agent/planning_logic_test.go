@@ -97,7 +97,7 @@ func TestExecutionPlanningSchemaMigrationPreservesCustomizations(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { _, _ = d.Exec(`UPDATE tools SET schema=$1 WHERE key='add_intent'`, string(old.Schema)) })
-	legacy := `{"type":"object","properties":{"summary":{"type":"string","description":"CUSTOM_DESCRIPTION"},"intents":{"type":"array","items":{"type":"object"}}}}`
+	legacy := `{"type":"object","properties":{"summary":{"type":"string","description":"CUSTOM_DESCRIPTION"},"intents":{"type":"array","items":{"type":"object","required":["summary"]}}}}`
 	if _, err := d.Exec(`UPDATE tools SET schema=$1 WHERE key='add_intent'`, legacy); err != nil {
 		t.Fatal(err)
 	}
@@ -115,10 +115,13 @@ func TestExecutionPlanningSchemaMigrationPreservesCustomizations(t *testing.T) {
 		t.Fatal("custom description reset")
 	}
 	items := props["intents"].(map[string]any)["items"].(map[string]any)["properties"].(map[string]any)
-	for _, key := range []string{"acceptance", "prerequisites", "stop_condition", "chain_tags"} {
+	for _, key := range []string{"acceptance", "prerequisites", "stop_condition", "chain_tags", "check_identity", "continue_intent_id", "continuation_note"} {
 		if props[key] == nil || items[key] == nil {
 			t.Fatal("missing model-facing field", key)
 		}
+	}
+	if _, remains := props["intents"].(map[string]any)["items"].(map[string]any)["required"]; remains {
+		t.Fatal("legacy required summary prevents ID-based continuation")
 	}
 	if saved.Enabled != old.Enabled || !slices.Equal(saved.Agents, old.Agents) {
 		t.Fatal("schema migration reset role policy")

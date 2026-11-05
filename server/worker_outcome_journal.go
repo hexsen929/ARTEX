@@ -15,13 +15,14 @@ import (
 )
 
 type workerOutcomeRecord struct {
-	IntentID int64  `json:"intent_id"`
-	TaskID   string `json:"task_id"`
-	Token    string `json:"run_token"`
-	State    string `json:"state"`
-	Code     string `json:"code"`
-	Message  string `json:"message"`
-	Worker   string `json:"worker"`
+	Incomplete bool   `json:"checkpoint_incomplete,omitempty"`
+	IntentID   int64  `json:"intent_id"`
+	TaskID     string `json:"task_id"`
+	Token      string `json:"run_token"`
+	State      string `json:"state"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Worker     string `json:"worker"`
 }
 
 func (e *Engine) OutcomeRecoveryBlocked(taskID string) bool {
@@ -63,7 +64,7 @@ func (e *Engine) journalWorkerOutcome(id int64, out *pendingWorkerOutcome) error
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	raw, err := json.Marshal(workerOutcomeRecord{id, out.taskID, out.token, out.state, out.code, out.message, out.worker})
+	raw, err := json.Marshal(workerOutcomeRecord{IntentID: id, TaskID: out.taskID, Token: out.token, State: out.state, Code: out.code, Message: out.message, Worker: out.worker, Incomplete: out.incomplete})
 	if err != nil {
 		return err
 	}
@@ -118,7 +119,7 @@ func (e *Engine) restoreWorkerOutcomeJournal(t *Task) error {
 			return errors.New("invalid worker outcome journal; runtime not restored")
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err = t.Store.SetIntentRunOutcome(ctx, saved.IntentID, saved.Token, saved.State, saved.Code, saved.Message)
+		err = t.Store.SetIntentRunOutcome(ctx, saved.IntentID, saved.Token, saved.State, saved.Code, saved.Message, saved.Incomplete)
 		cancel()
 		if err == nil || errors.Is(err, db.ErrIntentStateConflict) {
 			_ = os.Remove(path)
@@ -127,7 +128,7 @@ func (e *Engine) restoreWorkerOutcomeJournal(t *Task) error {
 			}
 			continue
 		}
-		e.outcomes.Store(saved.IntentID, &pendingWorkerOutcome{taskID: t.ID, token: saved.Token, state: saved.State, code: saved.Code, message: saved.Message, worker: saved.Worker, journal: path})
+		e.outcomes.Store(saved.IntentID, &pendingWorkerOutcome{taskID: t.ID, token: saved.Token, state: saved.State, code: saved.Code, message: saved.Message, worker: saved.Worker, journal: path, incomplete: saved.Incomplete})
 		return err
 	}
 	return nil
@@ -148,7 +149,7 @@ func (e *Engine) prepareWorkerOutcomesForArchive(t *Task) error {
 		out.mu.Lock()
 		defer out.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := t.Store.SetIntentRunOutcome(ctx, key.(int64), out.token, out.state, out.code, out.message)
+		err := t.Store.SetIntentRunOutcome(ctx, key.(int64), out.token, out.state, out.code, out.message, out.incomplete)
 		cancel()
 		if err != nil && !errors.Is(err, db.ErrIntentStateConflict) {
 			failed = err

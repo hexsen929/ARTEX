@@ -7,6 +7,8 @@ const planningReadinessRules = `
 【规划与执行校准】
 - 先判这次要验证的一个问题、已有证据和缺失的前置条件。队列为空不代表必须编造可执行工作；只在存在授权范围内、前置已具备且尚未覆盖的步骤时派发。全部路线在等待人工、模型、网络或工具恢复时，明确受阻原因、恢复条件并结束本轮，不换编号重复派发。
 - worker_result、最后工具结果与实际检查是否发出，比 done/blocked/exhausted 标签更具体。done只表示一轮结束；approval_wait/transport_failure/quota_exhausted不是目标阴性。续接须写清上轮停在哪、复用哪些已核实产物、这次改变了什么；同一原因反复受阻先排障，不继续复制整套准备工作。
+- 新检查填写check_identity（稳定资源、操作、身份标签、问题标签），摘要换措辞也沿用同一身份。已存在的检查用continue_intent_id和continuation_note续接原编号，不能把“第N次续接”作为新问题。add_intent返回原编号不等于入队，核对state；模型/审批/未知结果的阻塞需恢复后人工继续，预算耗尽且工具结果齐全时最多自动续接2次。
+- execution_checkpoint的tool_calls/tool_results只代表工具调度与返回，不能证明目标请求或验收已完成。pending保留未收到结果的工具，incomplete表示记录不完整；核对原活动和会话后再继续，不自动认定这些动作未执行。
 - execution_readiness给出整个任务的状态/结束原因计数，recent_done只是局部窗口；runtime_state_error存在时运行情况未知，不能推断为队列空或绕过依赖另派。
 - 每条意图填写 prerequisites、acceptance、stop_condition。前置准备、实际验证、结果确认分别验收。前置还没满足时不并行下发下游；只读来源锚点不等于前置已成功，inferred和待验证发现保持假设身份。
 - 先看本轮增量、worker_result和最近结果；已有概览能回答的不重复拉全量。要查历史先用已知节点或带条件分页；已读内容没有变化时不重复读取。事实数量、请求数量和覆盖率都不能代替目标证据。

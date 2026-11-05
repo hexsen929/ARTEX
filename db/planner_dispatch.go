@@ -58,6 +58,23 @@ func (s *ExplorationStore) AddPlannerIntent(payload map[string]any, priority int
 		copyPayload[k] = v
 	}
 	copyPayload["dispatch_key"] = key
+	checkKey := ""
+	if value, ok := payload["check_identity"]; ok {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return 0, err
+		}
+		var identity CheckIdentity
+		if err := json.Unmarshal(encoded, &identity); err != nil {
+			return 0, err
+		}
+		normalized, computed, err := identity.Normalize(ids)
+		if err != nil {
+			return 0, err
+		}
+		copyPayload["check_identity"], copyPayload["check_key"] = normalized, computed
+		checkKey = computed
+	}
 	raw, _ := json.Marshal(copyPayload)
 	anchorJSON, _ := json.Marshal(ids)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -68,12 +85,13 @@ func (s *ExplorationStore) AddPlannerIntent(payload map[string]any, priority int
 	}
 	defer tx.Rollback()
 	var exp int64
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM explorations WHERE id=$1 FOR UPDATE`, s.expID).Scan(&exp); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM explorations WHERE id=$1 FOR NO KEY UPDATE`, s.expID).Scan(&exp); err != nil {
 		return 0, err
 	}
 	var existing int64
-	err = tx.QueryRowContext(ctx, `SELECT id FROM exploration_nodes WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running')
-AND (payload->>'dispatch_key'=$2 OR (payload->>'summary'=$3 AND coalesce(payload->'asset_ids','[]'::jsonb)=$4::jsonb)) ORDER BY id LIMIT 1`, s.expID, key, summary, string(anchorJSON)).Scan(&existing)
+	err = tx.QueryRowContext(ctx, `SELECT id FROM exploration_nodes WHERE exploration_id=$1 AND kind='intent'
+AND (($5<>'' AND payload->>'check_key'=$5) OR (state IN ('open','running') AND $5='' AND (payload->>'dispatch_key'=$2 OR (payload->>'summary'=$3 AND coalesce(payload->'asset_ids','[]'::jsonb)=$4::jsonb))))
+ORDER BY id LIMIT 1`, s.expID, key, summary, string(anchorJSON), checkKey).Scan(&existing)
 	if err == nil {
 		return existing, tx.Commit()
 	}

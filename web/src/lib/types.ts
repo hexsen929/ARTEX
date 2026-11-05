@@ -443,6 +443,17 @@ export type HintState = "active" | "consumed";
 export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves" | "covers";
 
 export interface TaskNode {
+  execution_attempt?: number;
+  execution_checkpoint?: {
+    tool_calls: number;
+    tool_results: number;
+    pending: Record<string, string>;
+    last_tool?: string;
+    last_activity_id?: number;
+    last_result_id?: number;
+    incomplete?: boolean;
+    settled: boolean;
+  };
   verification_status?: FindingVerification;
   blocked_reason?: string;
   worker_result?: { code: string; message: string; at: string };

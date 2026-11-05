@@ -26,13 +26,15 @@ func (s *ExplorationStore) SetIntentOutcome(id int64, state, code, message strin
 	return s.SetIntentRunOutcome(ctx, id, token, state, code, message)
 }
 
-func (s *ExplorationStore) SetIntentRunOutcome(ctx context.Context, id int64, token, state, code, message string) error {
+func (s *ExplorationStore) SetIntentRunOutcome(ctx context.Context, id int64, token, state, code, message string, missingActivity ...bool) error {
+	incomplete := len(missingActivity) > 0 && missingActivity[0]
 	raw, _ := json.Marshal(map[string]any{"code": code, "message": message, "at": time.Now().UTC().Format(time.RFC3339)})
 	res, err := s.db.ExecContext(ctx, `UPDATE exploration_nodes SET state=$1,
  blocked_reason=CASE WHEN $1='blocked' THEN $2 ELSE NULL END,
- payload=jsonb_set(payload,'{worker_result}',$3::jsonb),completed_at=now(),content_version=content_version+1
+ payload=jsonb_set(payload,'{worker_result}',$3::jsonb) || CASE WHEN payload#>>'{execution_checkpoint,run_token}'=$6 THEN jsonb_build_object('execution_checkpoint',(payload->'execution_checkpoint')||jsonb_build_object('settled',true,'incomplete',coalesce((payload#>>'{execution_checkpoint,incomplete}')::boolean,false) OR $7::boolean)) ELSE '{}'::jsonb END
+ || CASE WHEN $7::boolean THEN '{"execution_history_required":true}'::jsonb ELSE '{}'::jsonb END,completed_at=now(),content_version=content_version+1
  WHERE id=$4 AND exploration_id=$5 AND kind='intent' AND state='running'
- AND ($6='__legacy_unchecked__' OR coalesce(payload->>'worker_run_token','')=$6)`, state, code, string(raw), id, s.expID, token)
+ AND ($6='__legacy_unchecked__' OR coalesce(payload->>'worker_run_token','')=$6)`, state, code, string(raw), id, s.expID, token, incomplete)
 	if err != nil {
 		return err
 	}
@@ -50,9 +52,10 @@ func (s *ExplorationStore) SetIntentRunOutcome(ctx context.Context, id int64, to
 // a later rerun of the same intent, even if the worker slot name is reused.
 func (s *ExplorationStore) BindIntentRun(ctx context.Context, id int64) (string, error) {
 	token := rand.Text()
+	cp, _ := json.Marshal(ExecutionCheckpoint{RunToken: token, StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Pending: map[string]string{}})
 	var saved string
-	err := s.db.QueryRowContext(ctx, `UPDATE exploration_nodes SET payload=jsonb_set(payload,'{worker_run_token}',to_jsonb($1::text))
-WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='running' RETURNING payload->>'worker_run_token'`, token, id, s.expID).Scan(&saved)
+	err := s.db.QueryRowContext(ctx, `UPDATE exploration_nodes SET payload=payload||jsonb_build_object('worker_run_token',$1::text,'previous_checkpoint',payload->'execution_checkpoint','execution_checkpoint',$4::jsonb,'execution_attempt',coalesce((payload->>'execution_attempt')::integer,0)+1)
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='running' RETURNING payload->>'worker_run_token'`, token, id, s.expID, string(cp)).Scan(&saved)
 	if err == sql.ErrNoRows {
 		return "", ErrIntentStateConflict
 	}

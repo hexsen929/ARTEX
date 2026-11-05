@@ -11,6 +11,7 @@ import (
 )
 
 type pendingWorkerOutcome struct {
+	incomplete                                  bool
 	mu                                          sync.Mutex
 	taskID, token, state, code, message, worker string
 	next                                        time.Time
@@ -59,7 +60,7 @@ func (e *Engine) reconcileWorkerOutcomesAt(parent context.Context, t *Task, now 
 		}
 		out.next = time.Now().Add(5 * time.Second)
 		id := key.(int64)
-		err := t.Store.SetIntentRunOutcome(ctx, id, out.token, out.state, out.code, out.message)
+		err := t.Store.SetIntentRunOutcome(ctx, id, out.token, out.state, out.code, out.message, out.incomplete)
 		if err == nil || errors.Is(err, db.ErrIntentStateConflict) {
 			if out.journal != "" {
 				_ = os.Remove(out.journal)
