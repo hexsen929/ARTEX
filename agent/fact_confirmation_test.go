@@ -78,6 +78,20 @@ func TestExecutionFactConfirmationKeepsEvidenceAndScope(t *testing.T) {
 	if err := ts.ts.ConfirmFact(t.Context(), id, "late", db.FactSnapshotVersion(rejected), db.FactConfirmation{Evidence: "late", Scope: "different", Note: "late"}); err == nil {
 		t.Fatal("excluded fact was confirmed")
 	}
+	// Existing confirmed facts stay intact and can receive a real follow-up
+	// confirmation; a legacy status must not prevent adding the missing evidence.
+	legacyID, err := ts.ts.AddNode(db.KindFact, map[string]any{"summary": "legacy observation", "confidence": "confirmed"}, 5, "confirmed", "fixture", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := ts.ts.GetNode(legacyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input["fact_id"], input["fact_version"] = legacyID, db.FactSnapshotVersion(legacy)
+	if call(input) || factPayload(t, ts, legacyID)["verification_evidence"] != input["verification_evidence"] {
+		t.Fatal("legacy confirmation discarded new evidence")
+	}
 }
 
 func TestExecutionFactConfirmationSchemaPreservesPolicy(t *testing.T) {

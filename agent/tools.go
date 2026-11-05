@@ -1695,8 +1695,8 @@ func (t *ToolSet) confirmFact() actool.CoreTool {
 			}
 			var p map[string]any
 			_ = json.Unmarshal(node.Payload, &p)
-			if prev, _ := p["confidence"].(string); prev == FactConfidenceConfirmed {
-				return actool.Text(fmt.Sprintf("fact %d 已是 confirmed，无需重复确认", id)), nil
+			if prev, _ := p["confidence"].(string); prev == FactConfidenceConfirmed && a.FactVersion == "" && a.Evidence == "" && a.Scope == "" && a.Note == "" {
+				return actool.Text(fmt.Sprintf("fact %d 已是 confirmed，本次未增加复核证据；补充复核须读取 node_detail 后提交版本、证据、范围与依据", id)), nil
 			}
 			if err := t.ts.ConfirmFact(ctx, id, t.worker, a.FactVersion, a.FactConfirmation); err != nil {
 				return actool.Errorf(err.Error()), nil
