@@ -36,13 +36,8 @@ type frontierCapTool struct {
 }
 
 func (f *frontierCapTool) Call(ctx context.Context, in json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
-	if f.ts != nil {
-		if open, err := f.ts.CountOpenIntents(); err == nil && FrontierFull(open) {
-			return actool.Errorf(fmt.Sprintf(
-				"frontier 已满(%d open)，等待现有工作，或用 cancel_intent 作废过期/重复的open；不要为腾位终止正常运行的Worker",
-				MaxOpenIntents)), nil
-		}
-	}
+	// The database applies the cap after resolving stable identities. A full
+	// queue must still allow reading/reusing existing work without adding a row.
 	return f.CoreTool.Call(ctx, in, tc)
 }
 

@@ -207,19 +207,21 @@ func trafficDTOs(ex []traffic.ExchangeMeta) []TrafficExchangeDTO {
 // ---- TaskNode (frontend "TaskNode") — frontier, intents, exploration graph nodes ----
 
 type TaskNodeDTO struct {
-	VerificationStatus string           `json:"verification_status,omitempty"`
-	WorkerResult       *db.WorkerResult `json:"worker_result,omitempty"`
-	ID                 string           `json:"id"`
-	Type               string           `json:"type"` // db Node.Kind
-	Payload            string           `json:"payload,omitempty"`
-	Priority           int              `json:"priority"`
-	State              string           `json:"state"`
-	Origin             string           `json:"origin"`
-	TS                 string           `json:"ts"`
-	SourceTaskID       string           `json:"source_task_id,omitempty"`
-	Inherited          bool             `json:"inherited,omitempty"`
-	BlockedReason      string           `json:"blocked_reason,omitempty"`
-	DeleteReason       string           `json:"delete_reason,omitempty"` // 意图假删除(state='deleted')时的删除原因
+	ExecutionAttempt    int                     `json:"execution_attempt,omitempty"`
+	ExecutionCheckpoint *db.ExecutionCheckpoint `json:"execution_checkpoint,omitempty"`
+	VerificationStatus  string                  `json:"verification_status,omitempty"`
+	WorkerResult        *db.WorkerResult        `json:"worker_result,omitempty"`
+	ID                  string                  `json:"id"`
+	Type                string                  `json:"type"` // db Node.Kind
+	Payload             string                  `json:"payload,omitempty"`
+	Priority            int                     `json:"priority"`
+	State               string                  `json:"state"`
+	Origin              string                  `json:"origin"`
+	TS                  string                  `json:"ts"`
+	SourceTaskID        string                  `json:"source_task_id,omitempty"`
+	Inherited           bool                    `json:"inherited,omitempty"`
+	BlockedReason       string                  `json:"blocked_reason,omitempty"`
+	DeleteReason        string                  `json:"delete_reason,omitempty"` // 意图假删除(state='deleted')时的删除原因
 }
 
 func taskNodeDTO(n *db.Node) TaskNodeDTO {
@@ -235,10 +237,13 @@ func taskNodeDTO(n *db.Node) TaskNodeDTO {
 		TS:            rfc3339(n.CreatedAt),
 	}
 	var outcome struct {
-		WorkerResult *db.WorkerResult `json:"worker_result"`
+		WorkerResult        *db.WorkerResult        `json:"worker_result"`
+		ExecutionAttempt    int                     `json:"execution_attempt"`
+		ExecutionCheckpoint *db.ExecutionCheckpoint `json:"execution_checkpoint"`
 	}
 	_ = json.Unmarshal(n.Payload, &outcome)
 	d.WorkerResult = outcome.WorkerResult
+	d.ExecutionAttempt, d.ExecutionCheckpoint = outcome.ExecutionAttempt, outcome.ExecutionCheckpoint
 	if n.Kind == db.KindFinding {
 		var p struct {
 			Status string `json:"verification_status"`

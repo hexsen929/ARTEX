@@ -24,7 +24,7 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 		var p map[string]any
 		_ = json.Unmarshal(n.Payload, &p)
 		m := map[string]any{"id": n.ID, "summary": p["summary"], "state": n.State}
-		for _, key := range []string{"worker_result", "acceptance", "prerequisites", "stop_condition", "chain_tags"} {
+		for _, key := range []string{"worker_result", "acceptance", "prerequisites", "stop_condition", "chain_tags", "check_identity", "execution_attempt", "execution_checkpoint", "continuation_note", "automatic_continuations"} {
 			if value, ok := p[key]; ok {
 				m[key] = value
 			}
@@ -1085,14 +1085,17 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 
 // intentItem 是 add_intent 批量/单条的一条探索方向。
 type intentItem struct {
-	Acceptance    string            `json:"acceptance"`
-	StopCondition string            `json:"stop_condition"`
-	Prerequisites string            `json:"prerequisites"`
-	Summary       string            `json:"summary"`
-	AssetIDs      []json.RawMessage `json:"asset_ids"`
-	ParentIDs     []json.RawMessage `json:"parent_ids"`
-	Priority      int               `json:"priority"`
-	ChainTags     []string          `json:"chain_tags"`
+	CheckIdentity    *db.CheckIdentity `json:"check_identity"`
+	ContinueIntentID json.RawMessage   `json:"continue_intent_id"`
+	ContinuationNote string            `json:"continuation_note"`
+	Acceptance       string            `json:"acceptance"`
+	StopCondition    string            `json:"stop_condition"`
+	Prerequisites    string            `json:"prerequisites"`
+	Summary          string            `json:"summary"`
+	AssetIDs         []json.RawMessage `json:"asset_ids"`
+	ParentIDs        []json.RawMessage `json:"parent_ids"`
+	Priority         int               `json:"priority"`
+	ChainTags        []string          `json:"chain_tags"`
 }
 
 // addOneIntent 创建一条意图节点并连上游血缘，返回 id。
@@ -1100,6 +1103,16 @@ type intentItem struct {
 // 节点（不能挂在别的意图/目标/提示上）。顶层全新方向留空 parent_ids，兜底连 origin fact。
 // 这样"每个意图都连到 fact 节点、且是发现驱动而非凭空规划"从创建路径上被强制。
 func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
+	if len(it.ContinueIntentID) > 0 && string(it.ContinueIntentID) != "null" {
+		id := pid(it.ContinueIntentID)
+		if id <= 0 {
+			return 0, fmt.Errorf("continue_intent_id 必须是正整数")
+		}
+		if it.CheckIdentity != nil || len(it.AssetIDs) != 0 || len(it.ParentIDs) != 0 {
+			return 0, fmt.Errorf("续接只填 continue_intent_id 和 continuation_note；原目标、身份与来源保持不变")
+		}
+		return t.ts.ContinuePlannerIntent(id, it.ContinuationNote, MaxOpenIntents)
+	}
 	if strings.TrimSpace(it.Summary) == "" {
 		return 0, fmt.Errorf("summary 不能为空")
 	}
@@ -1140,6 +1153,9 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 		}
 	}
 	payload := map[string]any{"summary": it.Summary}
+	if it.CheckIdentity != nil {
+		payload["check_identity"] = it.CheckIdentity
+	}
 	for key, value := range map[string]string{"acceptance": it.Acceptance, "stop_condition": it.StopCondition, "prerequisites": it.Prerequisites} {
 		if value = strings.TrimSpace(value); value != "" {
 			payload[key] = value
@@ -1151,7 +1167,7 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if len(tags) > 0 {
 		payload["chain_tags"] = tags
 	}
-	if t.worker == "planner" {
+	if t.worker == "planner" || it.CheckIdentity != nil {
 		if len(parents) == 0 {
 			if origin, err := t.ts.OriginFactID(); err != nil {
 				return 0, err
@@ -1183,29 +1199,39 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 
 func (t *ToolSet) addIntent() actool.CoreTool {
 	properties := map[string]any{
-		"summary":        str("一个明确的测试问题：对象、判断依据与本次要解决的未知；不把整条依赖链塞进一句话"),
-		"acceptance":     str("可观察的完成证据；把准备完成、核心检查已执行、验证成立分别说明"),
-		"stop_condition": str("停止条件与尚未完成时的交接；审批、模型或环境故障不能写成测试阴性"),
-		"prerequisites":  str("本次真正需要且已具备的前置条件，写明来源节点与可复用产物；未具备则先安排前置步骤"),
-		"asset_ids":      map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本次检查的授权目标资产ID，不能用无关资产扩大范围"},
-		"parent_ids":     map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "已有fact/finding来源节点；锚点表示依据来源，不表示已证实，须核对confidence和verification_status；顶层探索留空"},
-		"priority":       intp("优先级0-10，默认5"),
-		"chain_tags":     map[string]any{"type": "array", "maxItems": 2, "items": map[string]any{"type": "string", "enum": []string{"web", "ad", "app", "priv", "pwn", "recon", "rev", "pivot", "meta"}}, "description": "主要检查类别，可选1-2个；用于选择已授权的参考资料"},
+		"check_identity": obj(map[string]any{
+			"resource":     str("稳定资源标识，例如已有资产及功能标识；同一问题沿用原值"),
+			"operation":    str("稳定操作标识，保留大小写及实际操作差异"),
+			"identity_ref": str("本任务测试身份标签，如 anonymous/account-A；禁止填写密码或令牌"),
+			"question":     str("稳定的检查问题标签；改变摘要措辞时沿用，不用次数/日期造新标签"),
+		}, "resource", "operation", "identity_ref", "question"),
+		"continue_intent_id": idp("续接已有检查时填写原意图ID，保留同一会话和证据；与 check_identity/asset_ids/parent_ids 互斥"),
+		"continuation_note":  str("续接必填：复用哪些产物、最后结果、下一步；仅已知结果的预算耗尽可自动续接，最多2次，故障/审批/未知结果需人工恢复"),
+		"summary":            str("一个明确的测试问题：对象、判断依据与本次要解决的未知；不把整条依赖链塞进一句话"),
+		"acceptance":         str("可观察的完成证据；把准备完成、核心检查已执行、验证成立分别说明"),
+		"stop_condition":     str("停止条件与尚未完成时的交接；审批、模型或环境故障不能写成测试阴性"),
+		"prerequisites":      str("本次真正需要且已具备的前置条件，写明来源节点与可复用产物；未具备则先安排前置步骤"),
+		"asset_ids":          map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本次检查的授权目标资产ID，不能用无关资产扩大范围"},
+		"parent_ids":         map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "已有fact/finding来源节点；锚点表示依据来源，不表示已证实，须核对confidence和verification_status；顶层探索留空"},
+		"priority":           intp("优先级0-10，默认5"),
+		"chain_tags":         map[string]any{"type": "array", "maxItems": 2, "items": map[string]any{"type": "string", "enum": []string{"web", "ad", "app", "priv", "pwn", "recon", "rev", "pivot", "meta"}}, "description": "主要检查类别，可选1-2个；用于选择已授权的参考资料"},
 	}
 	itemProperties := map[string]any{}
 	for key, value := range properties {
 		itemProperties[key] = value
 	}
-	properties["intents"] = map[string]any{"type": "array", "minItems": 1, "maxItems": 4, "description": "同一轮最多4个独立方向；强依赖步骤只提交前置已具备的那一步", "items": obj(itemProperties, "summary")}
+	properties["intents"] = map[string]any{"type": "array", "minItems": 1, "maxItems": 4, "description": "同一轮最多4项；新检查给summary及check_identity，续接只给continue_intent_id及continuation_note", "items": obj(itemProperties)}
 	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
-		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
+		"新检查须用稳定check_identity；相同身份返回原编号及当前状态，不自动重跑已结束工作。续接填写continue_intent_id和continuation_note，不能另起编号。批量返回ids与items，单条返回intent_id/state；blocked表示保持受阻，不表示已入队。",
 		obj(properties),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Intents    []intentItem `json:"intents"`
 				intentItem              // 单条模式：顶层 summary/asset_ids/parent_ids/priority
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("add_intent 参数必须是有效JSON对象"), nil
+			}
 			batch := len(a.Intents) > 0
 			items := a.Intents
 			if !batch {
@@ -1213,6 +1239,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			}
 
 			ids := make([]int64, len(items))
+			states := make([]map[string]any, len(items))
 			errs := map[string]string{}
 			createdAny := false
 			for i, it := range items {
@@ -1222,7 +1249,16 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 					continue
 				}
 				ids[i] = id
-				createdAny = true
+				node, readErr := t.ts.GetNode(id)
+				if readErr != nil || node == nil {
+					errs[strconv.Itoa(i)] = "意图已保存但状态读取失败，请按编号核对"
+					continue
+				}
+				states[i] = compactIntents([]*db.Node{node}, nil, nil)[0]
+				states[i]["intent_id"] = id
+				if node.State == "open" || node.State == "running" {
+					createdAny = true
+				}
 			}
 
 			// 人经主 agent 直投意图 → 若任务已 done（无 open 目标的 goalless 分支），把它
@@ -1237,9 +1273,9 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 				if e, bad := errs["0"]; bad {
 					return actool.Errorf(e), nil
 				}
-				return actool.Text(fmt.Sprintf("intent created: %d", ids[0])), nil
+				return jsonResult(states[0])
 			}
-			out := map[string]any{"ids": ids}
+			out := map[string]any{"ids": ids, "items": states}
 			if len(errs) > 0 {
 				out["errors"] = errs
 			}

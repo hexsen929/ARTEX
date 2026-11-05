@@ -33,5 +33,12 @@ WHERE system=true AND key='add_intent' AND jsonb_typeof(schema#>'{properties,int
 AND ($1::jsonb#>'{properties,intents,items,properties}') IS NOT NULL`, string(defaults)); err != nil {
 		return err
 	}
+	// The old built-in batch contract required summary for every item. A
+	// continuation uses an existing ID and note; preserve non-default constraints.
+	if _, err := tx.Exec(`UPDATE tools SET schema=schema#-'{properties,intents,items,required}'
+WHERE system=true AND key='add_intent' AND schema#>'{properties,intents,items,required}'='["summary"]'::jsonb
+AND ($1::jsonb#>'{properties,intents,items,properties,continue_intent_id}') IS NOT NULL`, string(defaults)); err != nil {
+		return err
+	}
 	return tx.Commit()
 }

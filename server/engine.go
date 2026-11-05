@@ -1189,9 +1189,19 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 // cannot observe quiescence between the LLM return and the final DB writes.
 func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *agent.Worker, intent *db.Node, requestID, message string) bool {
 	hasChatMessage := message != ""
+	var runToken string
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)
 	emit := func(r db.Activity) {
+		if runToken != "" && (r.Kind == "tool_use" || r.Kind == "tool_result") {
+			var metadata map[string]any
+			_ = json.Unmarshal(r.Metadata, &metadata)
+			if metadata == nil {
+				metadata = map[string]any{}
+			}
+			metadata["worker_run_token"] = runToken
+			r.Metadata, _ = json.Marshal(metadata)
+		}
 		if r.Kind == "tool_result" && r.IsError && e.proxyFailure != nil && isGlobalProxyDialFailure(errors.New(r.Detail+" "+r.Summary)) {
 			e.proxyFailure(t.ID, errors.New(r.Detail+" "+r.Summary))
 		}
@@ -1211,7 +1221,8 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	workCtx, workCancel := context.WithCancelCause(ectx)
 	e.registerWork(intent.ID, workCancel)
 	bindCtx, bindCancel := context.WithTimeout(workCtx, 5*time.Second)
-	runToken, bindErr := t.Store.BindIntentRun(bindCtx, intent.ID)
+	var bindErr error
+	runToken, bindErr = t.Store.BindIntentRun(bindCtx, intent.ID)
 	bindCancel()
 	if bindErr != nil {
 		_, complete := e.detachWork(intent.ID)

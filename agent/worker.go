@@ -647,9 +647,16 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// session exists the worker continues from where it left off instead of
 	// restarting from scratch.
 	alreadyRecorded := false
+	continuation, requiresHistory := workerContinuationContext(intent)
+	if requiresHistory && w.tx == nil {
+		return harness.ReasonHookStopped, tsx.Writes(), ErrWorkerHistoryUnavailable
+	}
 	if w.tx != nil {
 		if err := resumeWorkerSession(s, opts.SessionID); err != nil {
 			return harness.ReasonHookStopped, tsx.Writes(), err
+		}
+		if requiresHistory && len(s.Messages()) == 0 {
+			return harness.ReasonHookStopped, tsx.Writes(), ErrWorkerHistoryUnavailable
 		}
 		alreadyRecorded = requestID != "" && hasWorkerChatMessage(s.Messages(), requestID)
 		if len(s.Messages()) > 0 && message == "" {
@@ -659,6 +666,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 			seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
 		}
 	}
+	input += continuation
 	if message != "" {
 		if alreadyRecorded {
 			input = "继续执行上一次人工对话输入的新意图。不要重复已经完成的动作。"
