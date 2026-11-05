@@ -4010,6 +4010,7 @@ func (s *Server) settingsPayload() map[string]any {
 		"deepseek_search_key_set":              s.m.deepSeekSearchKey() != "",
 		"web_search_proxy":                     maskSecrets(proxy),             // 独立出口代理(http/https/socks5)，空=直连
 		"global_proxy":                         maskSecrets(s.m.GlobalProxy()), // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"global_proxy_enabled":                 s.m.GlobalProxy() != "",
 		"proxy_pool":                           proxyEntries,
 		"proxy_pool_active_id":                 proxyActiveID,
 		"proxy_pool_switch_log":                proxySwitchLog,
@@ -4115,6 +4116,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		DeepSeekSearchKey      *string       `json:"deepseek_search_api_key"`
 		WebSearchProxy         *string       `json:"web_search_proxy"` // 独立出口代理(http/https/socks5)；null=不改，""=清空
 		GlobalProxy            *string       `json:"global_proxy"`     // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
+		GlobalProxyEnabled     *bool         `json:"global_proxy_enabled"`
 		ProxyRotateTimed       *bool         `json:"proxy_rotate_timed_enabled"`
 		ProxyRotateInterval    *int          `json:"proxy_rotate_interval_seconds"`
 		ProxyRotateFailure     *bool         `json:"proxy_rotate_on_failure"`
@@ -4149,6 +4151,10 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
+		return
+	}
+	if req.GlobalProxy != nil && req.GlobalProxyEnabled != nil {
+		writeErr(w, http.StatusBadRequest, "代理地址与全局代理开关请分别保存")
 		return
 	}
 	roeUpdate, err := parseRoEEnforcementUpdate(req.RoEEnforcement)
@@ -4448,9 +4454,17 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, err.Error())
 			return
 		}
-		if globalProxyValue == "" && (s.m.proxyPool == nil || len(s.m.proxyPoolEntries()) == 0) {
+		if globalProxyValue == "" {
 			s.proxyReconnectSuccessWithGuards(proxyGuards, nil)
 		}
+	}
+	if req.GlobalProxyEnabled != nil {
+		guards := s.snapshotProxyReconnectGuards(false)
+		if err := s.m.SetGlobalProxyEnabled(*req.GlobalProxyEnabled); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.proxyReconnectSuccessWithGuards(guards, nil)
 	}
 	if req.ProxyReconnectMax != nil || req.ProxyReconnectInterval != nil {
 		if err := s.setProxyReconnectSettings(req.ProxyReconnectMax, req.ProxyReconnectInterval); err != nil {

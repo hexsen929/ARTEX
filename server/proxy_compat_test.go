@@ -337,6 +337,12 @@ func TestProxyCompatRoutePersistenceIsAtomicOnPostgresRejection(t *testing.T) {
 	if err = m.activateProxyID("b", "manual"); err == nil {
 		t.Fatal("rejected atomic route write was reported successful")
 	}
+	if err = m.SetGlobalProxyEnabled(false); err == nil {
+		t.Fatal("rejected global proxy disable was reported successful")
+	}
+	if m.proxyPool.disabled {
+		t.Fatal("rejected disable changed global proxy intent")
+	}
 	if m.GlobalProxy() != "http://127.0.0.1:18081" || m.proxyPoolActiveID() != "a" {
 		t.Fatal("rejected atomic route write changed runtime")
 	}

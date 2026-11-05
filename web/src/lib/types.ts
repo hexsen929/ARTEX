@@ -1040,6 +1040,7 @@ export interface Settings {
   // 全局出口代理(http/https/socks5，可带 user:pass)，所有目标流量走它。开启流量捕获时作为
   // MITM 上游；关闭捕获时直接注入 agent 的 bash/WebFetch。空=直连。
   global_proxy?: string;
+  global_proxy_enabled?: boolean;
   callback_addr?: string; // 有效回连地址；空值保持未配置，新建连接每次读取。
   callback_addr_source?: "env" | "settings" | "config" | "unset";
   callback_addr_locked?: boolean; // 显式环境变量覆盖时，后台保留只读。

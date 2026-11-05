@@ -1396,9 +1396,22 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 	}
 	if m.proxyPool != nil {
 		m.proxyPool.mu.Lock()
+		if raw == "" {
+			wasDisabled := m.proxyPool.disabled
+			m.proxyPool.disabled = true
+			if err := m.applyActiveProxyLocked("", "manual-disabled"); err != nil {
+				m.proxyPool.disabled = wasDisabled
+				m.proxyPool.mu.Unlock()
+				return err
+			}
+			m.proxyPool.generation++
+			m.proxyPool.mu.Unlock()
+			return nil
+		}
 		managed := len(m.proxyPool.entries) > 0
 		if !managed && raw != "" {
 			rollback := m.proxyPoolRollbackLocked()
+			m.proxyPool.disabled = false
 			m.proxyPool.entries = []proxyPoolEntry{{ProxyPoolEntry: ProxyPoolEntry{ID: "proxy-legacy", URL: maskSecrets(raw), Enabled: true, Health: "healthy"}, RawURL: raw}}
 			m.proxyPool.active = "proxy-legacy"
 			if err := m.applyActiveProxyLocked("proxy-legacy", "manual"); err != nil {
@@ -1411,8 +1424,8 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 		}
 		m.proxyPool.mu.Unlock()
 		if managed {
-			// The legacy field is a read-only echo once a pool exists. Pool API
-			// operations are the sole authority for health, enablement and switching.
+			// Non-empty legacy writes remain a read-only echo. Clearing explicitly
+			// disables routing while retaining the pool and rotation preferences.
 			return nil
 		}
 	}
@@ -1435,6 +1448,34 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 	}
 	// Keep the browser MCP's egress in sync with the new global proxy too.
 	m.syncBrowserMCPProxy()
+	return nil
+}
+
+// SetGlobalProxyEnabled changes routing independently of pool membership.
+// Enabling selects an available member; explicit node activation can also enable it.
+func (m *Manager) SetGlobalProxyEnabled(enabled bool) error {
+	if !enabled {
+		return m.SetGlobalProxy("")
+	}
+	if m.proxyPool == nil {
+		return errors.New("请先配置代理地址或导入代理池")
+	}
+	m.proxyPool.mu.Lock()
+	defer m.proxyPool.mu.Unlock()
+	if !m.proxyPool.disabled && m.proxyPool.active != "" {
+		return nil
+	}
+	id := m.selectHealthyLocked("")
+	if id == "" {
+		return errors.New("代理池暂无可用成员，请先启用或检测代理节点")
+	}
+	disabled := m.proxyPool.disabled
+	m.proxyPool.disabled = false
+	if err := m.applyActiveProxyLocked(id, "manual-enabled"); err != nil {
+		m.proxyPool.disabled = disabled
+		return err
+	}
+	m.proxyPool.generation++
 	return nil
 }
 
