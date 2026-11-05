@@ -263,22 +263,14 @@ func intentSummary(ts *db.ExplorationStore, id int64) string {
 // workerOutput returns the finished worker's conclusion for an intent — the last
 // 'result' (else 'text') activity's full detail, truncated. Same source get_worker_output uses.
 func workerOutput(ts *db.ExplorationStore, id int64) string {
-	acts, _, err := ts.ActivityList(&id, 0, 1000)
+	pick, err := ts.LatestIntentOutput(id)
 	if err != nil {
 		return "(取输出失败)"
-	}
-	var pick *db.Activity
-	for i := range acts {
-		if acts[i].Kind == "result" {
-			pick = &acts[i]
-		} else if acts[i].Kind == "text" && pick == nil {
-			pick = &acts[i]
-		}
 	}
 	if pick == nil {
 		return "(该 work 尚无输出记录)"
 	}
-	out, _ := ts.ActivityDetail(pick.ID)
+	out := pick.Detail
 	if out == "" {
 		out = pick.Summary
 	}

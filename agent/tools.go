@@ -2029,23 +2029,9 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 			if intentNode == nil || intentNode.Kind != db.KindIntent {
 				return actool.Errorf("intent_id 不属于本任务或其直接关联任务"), nil
 			}
-			acts, _, err := t.ts.ActivityListWithSources(id, 0, 1000)
+			pick, err := t.ts.LatestIntentOutput(id)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
-			}
-			var chosen, fallback *db.Activity
-			for i := range acts {
-				switch acts[i].Kind {
-				case "result":
-					chosen = &acts[i]
-					fallback = &acts[i]
-				case "text":
-					fallback = &acts[i]
-				}
-			}
-			pick := chosen
-			if pick == nil {
-				pick = fallback
 			}
 			if pick == nil {
 				if intentNode.Inherited {
@@ -2055,13 +2041,18 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 				}
 				return actool.Text("（该 work 尚无任何输出）"), nil
 			}
-			detail, _ := t.ts.ActivityDetailWithSources(pick.ID)
+			detail := pick.Detail
 			if detail == "" {
 				detail = pick.Summary
 			}
 			result := map[string]any{
 				"intent_id": id, "final_text": detail,
 				"summary": pick.Summary, "is_error": pick.IsError,
+				"intent_state": intentNode.State, "output_at": pick.CreatedAt,
+			}
+			var payload map[string]any
+			if json.Unmarshal(intentNode.Payload, &payload) == nil {
+				result["worker_result"] = payload["worker_result"]
 			}
 			if intentNode.Inherited {
 				inheritedMap(result, intentNode.SourceTaskID)
