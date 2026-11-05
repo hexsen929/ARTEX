@@ -80,6 +80,9 @@ func (e *Engine) reconcileWorkerOutcomesAt(parent context.Context, t *Task, now 
 		return
 	}
 	for _, run := range runs {
+		if ctx.Err() != nil || e.IsDeleting(t.ID) {
+			return
+		}
 		if now.Sub(run.UpdatedAt) < 2*time.Minute {
 			continue
 		}
@@ -88,11 +91,12 @@ func (e *Engine) reconcileWorkerOutcomesAt(parent context.Context, t *Task, now 
 		}
 		e.workMu.Lock()
 		live := e.work[run.ID] != nil
+		var persistErr error
 		if !live && ctx.Err() == nil && !e.IsDeleting(t.ID) {
-			err = t.Store.SetIntentRunOutcome(ctx, run.ID, run.Token, "blocked", "execution_state_lost", "未找到运行中的 Worker；执行记录已保留，请核对最后结果后手动继续，系统未重新执行")
+			persistErr = t.Store.SetIntentRunOutcome(ctx, run.ID, run.Token, "blocked", "execution_state_lost", "未找到运行中的 Worker；执行记录已保留，请核对最后结果后手动继续，系统未重新执行")
 		}
 		e.workMu.Unlock()
-		if !live && err == nil {
+		if !live && persistErr == nil && ctx.Err() == nil {
 			id := run.ID
 			e.emitActivity(t, db.Activity{NodeID: &id, Worker: "system", Kind: "status", Summary: "已纠正失联 Worker 的运行状态；操作结果须核对后继续", Detail: "termination_code=execution_state_lost"})
 		}

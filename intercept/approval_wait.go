@@ -25,12 +25,14 @@ type ApprovalWait struct {
 	timer             *time.Timer
 	expired           bool
 	blockedByDeadline bool
+	deadline          time.Time
 }
 
 func WithApprovalWait(ctx context.Context, emit func(db.Activity), budgets ...time.Duration) (context.Context, *ApprovalWait) {
 	waitCtx, cancel := context.WithCancel(ctx)
 	w := &ApprovalWait{ctx: waitCtx, cancel: cancel, pending: map[int64]time.Time{}, emit: emit}
 	if len(budgets) > 0 && budgets[0] > 0 {
+		w.deadline = time.Now().Add(budgets[0])
 		w.timer = time.AfterFunc(budgets[0], func() {
 			w.mu.Lock()
 			w.expired = true
@@ -59,6 +61,14 @@ func (w *ApprovalWait) Close() {
 }
 
 func (w *ApprovalWait) Expired() bool { w.mu.Lock(); defer w.mu.Unlock(); return w.blockedByDeadline }
+
+func approvalDecisionLive(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	w, _ := ctx.Value(approvalWaitKey{}).(*ApprovalWait)
+	return w == nil || (w.ctx.Err() == nil && (w.deadline.IsZero() || time.Now().Before(w.deadline)))
+}
 
 func beginApprovalWait(ctx context.Context, id int64, tool string) (context.Context, func(bool)) {
 	w, _ := ctx.Value(approvalWaitKey{}).(*ApprovalWait)
