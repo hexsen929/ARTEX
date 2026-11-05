@@ -101,3 +101,15 @@ test("bulk proxy mutation sends one bounded request and preserves the exact sele
   assert.equal(calls[0].init.method, "POST");
   assert.deepEqual(JSON.parse(calls[0].init.body), payload);
 });
+
+test("single proxy diagnostics binds the stable member ID and forwards cancellation", async () => {
+  const calls = [];
+  const controller = new AbortController();
+  const response = { id: "proxy/a", health_updated: false };
+  assert.equal(await client(response, calls).diagnoseProxyPoolEntry("proxy/a", controller.signal), response);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/api/settings/proxy-pool/proxy%2Fa/diagnose");
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(calls[0].init.signal, controller.signal);
+  assert.equal(calls[0].init.body, "{}");
+});

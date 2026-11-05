@@ -45,6 +45,7 @@ type ProxyPoolEntry struct {
 	EgressIP            string    `json:"egress_ip,omitempty"`
 	LatencyMS           int64     `json:"latency_ms,omitempty"`
 	LastError           string    `json:"last_error,omitempty"`
+	LastErrorCode       string    `json:"last_error_code,omitempty"`
 	LastCheckedAt       time.Time `json:"last_checked_at,omitempty"`
 	ConsecutiveFailures int       `json:"consecutive_failures"`
 	Health              string    `json:"health"`
@@ -452,9 +453,11 @@ func (m *Manager) markProxyProbeLocked(id string, res egressProbeResult) {
 		e.LastCheckedAt, e.LatencyMS, e.EgressIP = time.Now(), res.LatencyMS, res.ExitIP
 		if res.OK {
 			e.ConsecutiveFailures, e.LastError, e.Health = 0, "", "healthy"
+			e.LastErrorCode = ""
 		} else {
 			e.ConsecutiveFailures++
 			e.LastError = maskSecrets(res.Error)
+			e.LastErrorCode = res.ErrorCode
 			threshold := defaultProxyHealthThreshold
 			if m.pg != nil {
 				threshold = proxyIntSetting(m.pg, settingProxyHealthThreshold, defaultProxyHealthThreshold)
@@ -501,10 +504,12 @@ func (m *Manager) applyProxyProbeBatchLocked(results []proxyBatchProbe, threshol
 		e.LastCheckedAt, e.LatencyMS, e.EgressIP = now, res.LatencyMS, res.ExitIP
 		if res.OK {
 			e.ConsecutiveFailures, e.LastError, e.Health = 0, "", "healthy"
+			e.LastErrorCode = ""
 			confirmed = confirmed || e.ID == m.proxyPool.active
 		} else {
 			e.ConsecutiveFailures++
 			e.LastError = maskSecrets(res.Error)
+			e.LastErrorCode = res.ErrorCode
 			if e.ConsecutiveFailures >= threshold {
 				e.Health = "unhealthy-cooling"
 			}
@@ -1218,6 +1223,7 @@ func (s *Server) updateProxyPool(w http.ResponseWriter, r *http.Request) {
 				// A validated edit replaces the endpoint and starts a fresh health round,
 				// including when the old endpoint was cooling down.
 				e.Health, e.ConsecutiveFailures, e.LastError = "healthy", 0, ""
+				e.LastErrorCode = ""
 			}
 		}
 		if req.Name != nil {

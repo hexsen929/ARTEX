@@ -1184,6 +1184,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/settings/proxy-pool/{id}", s.updateProxyPool)
 	mux.HandleFunc("DELETE /api/settings/proxy-pool/{id}", s.deleteProxyPool)
 	mux.HandleFunc("POST /api/settings/proxy-pool/{id}/test", s.testProxyPoolEntry)
+	mux.HandleFunc("POST /api/settings/proxy-pool/{id}/diagnose", s.diagnoseProxyPoolEntry)
 	mux.HandleFunc("POST /api/settings/proxy-pool/test-all", s.testAllProxyPool)
 	mux.HandleFunc("POST /api/settings/proxy-pool/{id}/activate", s.activateProxyPool)
 	mux.HandleFunc("POST /api/tasks/{id}/proxy/test", s.testTaskProxy)

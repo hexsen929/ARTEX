@@ -2492,6 +2492,11 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/settings/proxy-pool" && m === "GET") return { entries: D.settings.proxy_pool ?? [], active_id: D.settings.proxy_pool_active_id ?? "", active_proxy: D.settings.global_proxy ?? "", switch_log: [] };
   if (path === "/settings/proxy-pool/import" && m === "POST") return { ok: true, probe_queued: true, errors: [] };
   if (path === "/settings/proxy-pool/test-all" && m === "POST") return { ok: true, probe_queued: true };
+  if (path.endsWith("/diagnose") && path.startsWith("/settings/proxy-pool/") && m === "POST") return {
+    id: decodeURIComponent(path.split("/").at(-2) ?? ""), checked_at: new Date().toISOString(), health_updated: false, scope: "示例诊断，不访问网络",
+    https: { ok: false, error: "TLS 证书链不受信任", error_code: "certificate_untrusted", latency_ms: 12, probes: [] },
+    http: { ok: true, exit_ip: "192.0.2.5", latency_ms: 10, probes: [] },
+  };
   if (path === "/settings/proxy-pool/bulk" && m === "POST") {
     const ids = new Set(Array.isArray(b.ids) ? b.ids : []);
     const previous = D.settings.proxy_pool_active_id ?? "";

@@ -1105,6 +1105,10 @@ export const api = {
       `/settings/proxy-pool/${encodeURIComponent(id)}/test`,
       {},
     ),
+  diagnoseProxyPoolEntry: (id: string, signal?: AbortSignal) =>
+    http<import("./types").ProxyPoolDiagnosis>(`/settings/proxy-pool/${encodeURIComponent(id)}/diagnose`, {
+      method: "POST", body: JSON.stringify({}), signal,
+    }),
   testAllProxyPool: () =>
     post<{ ok: boolean; probe_queued: boolean }>(
       `/settings/proxy-pool/test-all?summary=1`,
