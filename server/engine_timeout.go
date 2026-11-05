@@ -130,7 +130,7 @@ func (e *Engine) clockCtx(base context.Context, t *Task, final bool) context.Con
 // Called from Run() and from the restart reload path, so non-active timeout tasks
 // still get settled after their deadline even without live planner/worker loops.
 func (e *Engine) startDeadlineCoordinator(ctx context.Context, t *Task) {
-	if t == nil || t.TimeoutSeconds <= 0 {
+	if t == nil || t.TimeoutSeconds <= 0 || e.OutcomeRecoveryBlocked(t.ID) {
 		return
 	}
 	e.deleteMu.RLock()

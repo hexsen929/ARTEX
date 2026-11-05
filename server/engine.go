@@ -99,14 +99,15 @@ type Engine struct {
 
 	bc *Broadcaster // live activity pub/sub (SSE)
 
-	started  sync.Map // taskID -> bool, so Run is idempotent per task
-	lastAct  sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
-	llmCalls sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
-	paused   sync.Map // taskID -> bool, user-paused (planner + workers idle but loops alive)
-	deleting sync.Map // taskID -> bool, delete barrier (no new task-owned writes)
-	dropCnt  sync.Map // taskID -> *int64, running count of dropped (unpersistable) activity records
-	outcomes sync.Map // intentID -> *pendingWorkerOutcome; retry persistence, never execution
-	recovery sync.Map // taskID -> *workerRecoverySchedule
+	started         sync.Map // taskID -> bool, so Run is idempotent per task
+	lastAct         sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
+	llmCalls        sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
+	paused          sync.Map // taskID -> bool, user-paused (planner + workers idle but loops alive)
+	deleting        sync.Map // taskID -> bool, delete barrier (no new task-owned writes)
+	dropCnt         sync.Map // taskID -> *int64, running count of dropped (unpersistable) activity records
+	outcomes        sync.Map // intentID -> *pendingWorkerOutcome; retry persistence, never execution
+	recovery        sync.Map // taskID -> *workerRecoverySchedule
+	recoveryBlocked sync.Map // taskID -> unresolved startup outcome journal; separate from user pause
 
 	// deleteMu makes installing the delete barrier atomic with registering a new
 	// task operation. Once BeginDelete returns, every admitted writer is reflected
@@ -301,6 +302,7 @@ func (e *Engine) StopTask(taskID string) {
 	e.paused.Delete(taskID)
 	e.dropCnt.Delete(taskID)
 	e.recovery.Delete(taskID)
+	e.recoveryBlocked.Delete(taskID)
 	e.plannerRound.Delete(taskID)
 	e.p0Reported.Delete(taskID)
 	e.settling.Delete(taskID)
@@ -359,7 +361,7 @@ func (e *Engine) Resume(t *Task) {
 	}
 	e.deleteMu.RLock()
 	defer e.deleteMu.RUnlock()
-	if e.IsDeleting(t.ID) {
+	if e.IsDeleting(t.ID) || e.OutcomeRecoveryBlocked(t.ID) {
 		return
 	}
 	e.paused.Delete(t.ID)
@@ -388,6 +390,9 @@ func (e *Engine) execContextFor(parent context.Context, taskID string) context.C
 
 // IsPaused reports whether a task is user-paused.
 func (e *Engine) IsPaused(taskID string) bool {
+	if e.OutcomeRecoveryBlocked(taskID) {
+		return true
+	}
 	v, ok := e.paused.Load(taskID)
 	return ok && v.(bool)
 }
@@ -857,6 +862,9 @@ func (e *Engine) Ready() bool {
 // An explicit task profile chain can be runnable even when no global default
 // provider is configured, so task status must not rely on Ready alone.
 func (e *Engine) ReadyFor(t *Task) bool {
+	if t == nil || e.OutcomeRecoveryBlocked(t.ID) {
+		return false
+	}
 	// A standalone injected resolver has no Manager settings to consult. In
 	// the server, check configuration before constructing any fallback agents.
 	if e.m != nil {
@@ -872,7 +880,7 @@ func (e *Engine) ReadyFor(t *Task) bool {
 // but no-op until an LLM is configured (so a task created while idle picks up
 // automatically once LLM is set from the UI).
 func (e *Engine) Run(ctx context.Context, t *Task) {
-	if t == nil {
+	if t == nil || e.OutcomeRecoveryBlocked(t.ID) {
 		return
 	}
 	slots, err := e.m.WorkerSlotsForTaskChecked(t)
@@ -1414,6 +1422,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 // task pause/delete/shutdown still stops it). Returns an error if the run could not
 // be started; the intent is left untouched in that case.
 func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message, agentMessage string) error {
+	if t == nil || e.OutcomeRecoveryBlocked(t.ID) {
+		return errors.New("Worker 结果恢复尚未完成，请先恢复任务")
+	}
 	if !e.beginTaskOperation(t.ID) {
 		return fmt.Errorf("task is being deleted")
 	}

@@ -158,6 +158,14 @@ func (s *Server) admitTaskWhenScheduledWithGenerationChecked(t *Task, mode strin
 		return false, fmt.Errorf("task is being deleted")
 	}
 	defer s.engine.decInflight(t.ID)
+	if s.engine.OutcomeRecoveryBlocked(t.ID) {
+		if scheduled || preserveSchedule {
+			return false, fmt.Errorf("Worker 结果恢复尚未完成，请手动恢复任务")
+		}
+		if err := s.engine.recoverWorkerOutcomesBeforeStart(t); err != nil {
+			return false, fmt.Errorf("Worker 结果恢复失败，任务保持停止")
+		}
+	}
 	lifecycle := t.lifecycleSnapshot()
 	if scheduled {
 		var managed bool

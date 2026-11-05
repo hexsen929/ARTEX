@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -436,7 +437,8 @@ func (s *ExplorationStore) SetIntentState(id int64, state string) error {
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
 	_, err := s.db.Exec(`UPDATE exploration_nodes
 SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $4 THEN now() ELSE NULL END
-WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, terminal)
+,payload=CASE WHEN $1='running' AND state<>'running' THEN jsonb_set(payload,'{worker_run_token}',to_jsonb($5::text)) ELSE payload END
+WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, terminal, rand.Text())
 	return err
 }
 
@@ -447,7 +449,8 @@ func (s *ExplorationStore) CompareAndSetIntentState(id int64, expected, state st
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
 	res, err := s.db.Exec(`UPDATE exploration_nodes
 SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $5 THEN now() ELSE NULL END
-WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, state, id, s.expID, expected, terminal)
+,payload=CASE WHEN $1='running' AND state<>'running' THEN jsonb_set(payload,'{worker_run_token}',to_jsonb($6::text)) ELSE payload END
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, state, id, s.expID, expected, terminal, rand.Text())
 	if err != nil {
 		return false, err
 	}
@@ -1254,8 +1257,9 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exist
 
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
-WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id, s.expID)
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1,
+payload=jsonb_set(payload,'{worker_run_token}',to_jsonb($4::text))
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id, s.expID, rand.Text())
 	if err != nil {
 		return false, err
 	}

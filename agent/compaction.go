@@ -277,24 +277,32 @@ func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *c
 		log.Printf("[compaction] compress exp=%d deferred; previous summaries retained", ts.ID())
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// Re-read fresh state and drop any member that revived while we compressed.
 	fresh, _, err := loadColdGraph(ts)
 	if err != nil {
 		return err
 	}
 	freshHot := fresh.hotSet()
-	members := make([]int64, 0, len(b.Members))
+	members := append([]int64(nil), b.Members...)
+	sources := make(map[int64]*db.Node, len(b.Members)+len(b.Anchors))
 	for _, mID := range b.Members {
-		if !freshHot[mID] {
-			members = append(members, mID)
+		if freshHot[mID] {
+			return db.ErrDigestSnapshotChanged
 		}
+		sources[mID] = nodeByID[mID]
+	}
+	for _, id := range b.Anchors {
+		sources[id] = nodeByID[id]
 	}
 	if len(members) < c.params.K {
 		return fmt.Errorf("compaction members changed; retry next round")
 	}
 	final := block{Members: members, Anchors: b.Anchors}
 	payload := digestPayload(body, final, nodeByID, generation, blockSignature(final, cvers))
-	if _, err := ts.AddDigest(payload, members); err != nil {
+	if _, err := ts.AddDigestFromSnapshot(ctx, payload, members, sources); err != nil {
 		return err
 	}
 	return nil

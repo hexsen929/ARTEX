@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 )
 
@@ -21,6 +22,26 @@ type workerOutcomeRecord struct {
 	Code     string `json:"code"`
 	Message  string `json:"message"`
 	Worker   string `json:"worker"`
+}
+
+func (e *Engine) OutcomeRecoveryBlocked(taskID string) bool {
+	_, blocked := e.recoveryBlocked.Load(taskID)
+	return blocked
+}
+
+// Startup and explicit resume share the same guard. A failed journal replay
+// cannot be bypassed by the second startup loop, scheduler, or Engine.Resume.
+func (e *Engine) recoverWorkerOutcomesBeforeStart(t *Task) error {
+	if err := e.restoreWorkerOutcomeJournal(t); err != nil {
+		e.recoveryBlocked.Store(t.ID, true)
+		e.Pause(t.ID, agent.AbortPausedOnReload)
+		if e.m != nil && !t.lifecycleSnapshot().Paused {
+			_ = e.m.ApplyTaskPauseOriginReason(t.ID, "outcome_recovery", false)
+		}
+		return err
+	}
+	e.recoveryBlocked.Delete(t.ID)
+	return nil
 }
 
 func (e *Engine) outcomeJournalDir(taskID string) string {
@@ -101,6 +122,9 @@ func (e *Engine) restoreWorkerOutcomeJournal(t *Task) error {
 		cancel()
 		if err == nil || errors.Is(err, db.ErrIntentStateConflict) {
 			_ = os.Remove(path)
+			if value, ok := e.outcomes.Load(saved.IntentID); ok && value.(*pendingWorkerOutcome).token == saved.Token {
+				e.outcomes.CompareAndDelete(saved.IntentID, value)
+			}
 			continue
 		}
 		e.outcomes.Store(saved.IntentID, &pendingWorkerOutcome{taskID: t.ID, token: saved.Token, state: saved.State, code: saved.Code, message: saved.Message, worker: saved.Worker, journal: path})
