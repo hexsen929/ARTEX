@@ -64,8 +64,9 @@ type ProxySwitchLog struct {
 }
 
 type proxyPoolPersist struct {
-	Entries []proxyPoolEntry `json:"entries"`
-	Active  string           `json:"active"`
+	Entries  []proxyPoolEntry `json:"entries"`
+	Active   string           `json:"active"`
+	Disabled bool             `json:"disabled,omitempty"`
 }
 
 type ProxyImportError struct {
@@ -97,6 +98,7 @@ type proxyPoolState struct {
 	mu         sync.Mutex
 	entries    []proxyPoolEntry
 	active     string
+	disabled   bool
 	logs       []ProxySwitchLog
 	lastTimed  time.Time
 	lastHealth time.Time
@@ -154,6 +156,10 @@ func decodeProxyPoolStartup(values map[string]string) (proxyPoolPersist, string,
 			}
 		}
 		e.URL = maskSecrets(e.RawURL)
+	}
+	if pool.Disabled {
+		pool.Active = ""
+		return pool, "", true, nil
 	}
 	// Prefer the previously active usable member, even while cooling. If it was
 	// explicitly disabled/cleared, choose another enabled endpoint, not that URL.
@@ -223,7 +229,7 @@ func (m *Manager) initProxyPool() error {
 		}
 	}
 	// Publish only a successfully loaded and committed snapshot.
-	m.proxyPool = &proxyPoolState{entries: pool.Entries, active: pool.Active}
+	m.proxyPool = &proxyPoolState{entries: pool.Entries, active: pool.Active, disabled: pool.Disabled}
 	m.mu.Lock()
 	m.globalProxy = global
 	m.mu.Unlock()
@@ -247,7 +253,7 @@ func (m *Manager) persistProxyRouteSnapshot(pool proxyPoolPersist, global string
 }
 
 func (m *Manager) persistProxyPoolLocked() error {
-	return m.persistProxyRouteSnapshot(proxyPoolPersist{Entries: m.proxyPool.entries, Active: m.proxyPool.active}, m.GlobalProxy())
+	return m.persistProxyRouteSnapshot(proxyPoolPersist{Entries: m.proxyPool.entries, Active: m.proxyPool.active, Disabled: m.proxyPool.disabled}, m.GlobalProxy())
 }
 
 // A mutating API prepares its candidate under the pool lock, but must restore
@@ -255,9 +261,11 @@ func (m *Manager) persistProxyPoolLocked() error {
 func (m *Manager) proxyPoolRollbackLocked() func() {
 	entries := append([]proxyPoolEntry(nil), m.proxyPool.entries...)
 	active := m.proxyPool.active
+	disabled := m.proxyPool.disabled
 	configured := m.proxyPoolConfigured.Load()
 	return func() {
 		m.proxyPool.entries, m.proxyPool.active = entries, active
+		m.proxyPool.disabled = disabled
 		m.proxyPoolConfigured.Store(configured)
 	}
 }
@@ -317,6 +325,9 @@ func (m *Manager) setProxyPoolEntries(entries []proxyPoolEntry, active string, e
 		}
 	}()
 	m.proxyPool.entries = append([]proxyPoolEntry(nil), entries...)
+	if m.proxyPool.disabled {
+		return m.applyActiveProxyLocked("", "manual-disabled")
+	}
 	if active != "" {
 		return m.applyActiveProxyLockedWithHealth(active, "manual", true)
 	}
@@ -338,6 +349,9 @@ func (m *Manager) applyActiveProxyLocked(id, reason string) error {
 }
 
 func (m *Manager) applyActiveProxyLockedWithHealth(id, reason string, allowUnhealthy bool) error {
+	if m.proxyPool.disabled && id != "" {
+		return errors.New("全局代理已关闭，请先开启或手动使用代理池节点")
+	}
 	var next string
 	for _, e := range m.proxyPool.entries {
 		if e.ID == id && e.Enabled && e.RawURL != "" && (allowUnhealthy || e.Health != "unhealthy-cooling") {
@@ -355,7 +369,7 @@ func (m *Manager) applyActiveProxyLockedWithHealth(id, reason string, allowUnhea
 			return errors.New("代理地址无效，原路线保持不变")
 		}
 	}
-	if err := m.persistProxyRouteSnapshot(proxyPoolPersist{Entries: m.proxyPool.entries, Active: id}, next); err != nil {
+	if err := m.persistProxyRouteSnapshot(proxyPoolPersist{Entries: m.proxyPool.entries, Active: id, Disabled: m.proxyPool.disabled}, next); err != nil {
 		return err
 	}
 	from := m.GlobalProxy()
@@ -428,6 +442,9 @@ func (m *Manager) rotateProxy(reason string) bool {
 	}
 	m.proxyPool.mu.Lock()
 	defer m.proxyPool.mu.Unlock()
+	if m.proxyPool.disabled {
+		return false
+	}
 	id := m.selectHealthyLocked(m.proxyPool.active)
 	if id == "" || id == m.proxyPool.active {
 		return false
@@ -517,7 +534,7 @@ func (m *Manager) applyProxyProbeBatchLocked(results []proxyBatchProbe, threshol
 		changed = true
 	}
 	if changed {
-		if err := m.persistProxyRouteSnapshot(proxyPoolPersist{Entries: candidate, Active: m.proxyPool.active}, m.GlobalProxy()); err != nil {
+		if err := m.persistProxyRouteSnapshot(proxyPoolPersist{Entries: candidate, Active: m.proxyPool.active, Disabled: m.proxyPool.disabled}, m.GlobalProxy()); err != nil {
 			return false, err
 		}
 		m.proxyPool.entries = candidate
@@ -801,7 +818,7 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 		s.m.proxyPool.mu.Unlock()
 		if due && !s.proxyShuttingDown() {
 			s.m.proxyPool.mu.Lock()
-			if !s.proxyShuttingDown() {
+			if !s.proxyShuttingDown() && !s.m.proxyPool.disabled {
 				id := s.m.selectHealthyLocked(s.m.proxyPool.active)
 				if id != "" && id != s.m.proxyPool.active {
 					outcome.switched = s.m.applyActiveProxyLocked(id, "timed") == nil
@@ -835,6 +852,10 @@ func (s *Server) reconcileProxyPoolAfterProbe(activeConfirmed bool, expectedGene
 	}
 	s.m.proxyPool.mu.Lock()
 	generation := s.m.proxyPool.generation
+	if s.m.proxyPool.disabled {
+		s.m.proxyPool.mu.Unlock()
+		return false
+	}
 	if len(expectedGeneration) > 0 && generation != expectedGeneration[0] {
 		s.m.proxyPool.mu.Unlock()
 		return false
@@ -897,10 +918,13 @@ func (m *Manager) activateProxyID(id, reason string) error {
 	m.proxyPool.mu.Lock()
 	defer m.proxyPool.mu.Unlock()
 	before := m.proxyPool.active
+	disabled := m.proxyPool.disabled
+	m.proxyPool.disabled = false
 	if err := m.applyActiveProxyLocked(id, reason); err != nil {
+		m.proxyPool.disabled = disabled
 		return err
 	}
-	if before != m.proxyPool.active {
+	if before != m.proxyPool.active || disabled {
 		m.proxyPool.generation++
 	}
 	return nil

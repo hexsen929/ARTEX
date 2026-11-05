@@ -67,7 +67,7 @@ export default function SystemSettingsPage() {
   const [proxyInput, setProxyInput] = React.useState("");
   const [savingProxy, setSavingProxy] = React.useState(false);
   const [globalProxyInput, setGlobalProxyInput] = React.useState("");
-  const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
+  const [globalProxyEnabled, setGlobalProxyEnabled] = React.useState(false);
   const [proxyPoolBusy, setProxyPoolBusy] = React.useState(false);
   const [proxyPool, setProxyPool] = React.useState<ProxyPoolEntry[]>([]);
   const [proxyPoolActiveId, setProxyPoolActiveId] = React.useState("");
@@ -153,6 +153,7 @@ export default function SystemSettingsPage() {
     setDeepSeekKeySet(s.deepseek_search_key_set);
     if (typeof s.web_search_proxy === "string") setProxyInput(s.web_search_proxy);
     if (typeof s.global_proxy === "string") setGlobalProxyInput(s.global_proxy);
+    setGlobalProxyEnabled(s.global_proxy_enabled ?? Boolean(s.global_proxy?.trim()));
     setProxyPool(s.proxy_pool!);
     setProxyPoolActiveId(s.proxy_pool_active_id!);
     setProxyPoolTimed(s.proxy_rotate_timed_enabled!);
@@ -496,22 +497,14 @@ export default function SystemSettingsPage() {
   };
 
   const saveGlobalProxy = () => {
-    if (proxyPool.length > 0) {
-      toast.info("代理池非空时，全局代理输入框仅用于回显，请在代理池中编辑或切换");
+    if (proxyPool.length > 0 && globalProxyInput.trim()) {
+      toast.info("请在代理池中编辑或切换节点；关闭全局代理可使用开关或清空地址后保存");
       return;
     }
-    setSavingGlobalProxy(true);
-    api
-      .setSettings({ global_proxy: globalProxyInput.trim() })
-      .then((s) => {
-        apply(s);
-        // 保存后链路变了，旧结果（尤其"尚未保存"）立刻失效。
-        clearEgressReport();
-        if (showEgressIp) void probeEgress().catch(() => undefined);
-        toast.success(globalProxyInput.trim() ? "已保存全局代理" : "已清除全局代理（改为直连）");
-      })
-      .catch((e) => toast.error("保存失败：" + (e as Error).message))
-      .finally(() => setSavingGlobalProxy(false));
+    void runProxyPoolOperation(
+      () => api.setSettings({ global_proxy: globalProxyInput.trim() }),
+      globalProxyInput.trim() ? "已保存全局代理" : "已清除全局代理（改为直连）",
+    );
   };
 
   // Refresh the full persisted snapshot after a pool mutation. Keeping only
@@ -963,6 +956,20 @@ export default function SystemSettingsPage() {
               </CardHeader>
               <CardContent>
                 <fieldset disabled={!loaded || proxyPoolBusy} className="flex min-w-0 flex-col gap-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <Label htmlFor="global-proxy-enabled">启用全局代理</Label>
+                    <p className="text-muted-foreground text-xs">关闭后目标流量直连，保留代理池及轮换设置；点击节点“使用”可重新开启。</p>
+                  </div>
+                  <Switch
+                    id="global-proxy-enabled"
+                    checked={globalProxyEnabled}
+                    disabled={!loaded || (!globalProxyEnabled && !proxyPool.some((entry) => entry.enabled && entry.url && entry.health !== "unhealthy-cooling"))}
+                    onCheckedChange={(enabled) => {
+                      void runProxyPoolOperation(() => api.setSettings({ global_proxy_enabled: enabled }), enabled ? "已开启全局代理" : "已关闭全局代理（改为直连）");
+                    }}
+                  />
+                </div>
                 <section className="space-y-2">
                   <Label htmlFor="global-proxy" className="text-sm font-normal text-muted-foreground">
                     代理地址
@@ -974,14 +981,14 @@ export default function SystemSettingsPage() {
                       autoComplete="off"
                       placeholder="socks5://user:pass@host:1080 或 http://host:port（留空=直连）"
                       value={globalProxyInput}
-                      disabled={!loaded || savingGlobalProxy}
+                      disabled={!loaded}
                       onChange={(e) => {
                         setGlobalProxyInput(e.target.value);
                         // 旧结果对应的是上一次的地址，留着会让人以为新值已经测过。
                         clearEgressReport();
                       }}
                     />
-                    <Button type="button" onClick={saveGlobalProxy} disabled={!loaded || savingGlobalProxy}>
+                    <Button type="button" onClick={saveGlobalProxy} disabled={!loaded}>
                       保存
                     </Button>
                     {/* 测表单里当前的值，不要求先保存。 */}
@@ -990,7 +997,7 @@ export default function SystemSettingsPage() {
                     </Button>
                   </div>
                   <p className="text-muted-foreground text-xs">
-                    {globalProxyInput.trim() ? "已配置 · 使用全局出口的目标流量经此代理出网" : "未配置 · 目标流量直连出网"}
+                    {globalProxyEnabled ? "已开启 · 使用全局出口的目标流量经此代理出网" : "已关闭 · 目标流量直连出网"}
                   </p>
                   <details className="text-xs">
                     <summary className="text-muted-foreground cursor-pointer select-none">代理工作方式</summary>

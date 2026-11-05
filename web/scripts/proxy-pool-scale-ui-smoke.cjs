@@ -51,7 +51,7 @@ const settings = {
   constraints_inject_planner: true, constraints_inject_worker: true, noa_compaction: false,
   notify_enabled: true, notify_public_base_url: "", notify_digest_interval_min: 30,
 };
-const state = { holdEgress: false, liveEgressReads: 0, peakEgressReads: 0, failBulk: false, recoverOnCleanup: "", rotateOnBulk: "", importMode: "invalid", holdDiagnosis: false };
+const state = { holdEgress: false, liveEgressReads: 0, peakEgressReads: 0, failBulk: false, failToggle: false, recoverOnCleanup: "", rotateOnBulk: "", importMode: "invalid", holdDiagnosis: false };
 const requests = [], unexpected = new Set(), external = new Set(), errors = [], heldEgress = [], heldDiagnoses = [];
 
 function json(response, code, value) {
@@ -96,6 +96,15 @@ async function serveAPI(request, response, url) {
   }
   if (endpoint === "/api/settings" && method === "GET") return json(response, 200, settings);
   if (endpoint === "/api/settings" && method === "PUT") {
+    if (Object.hasOwn(body, "global_proxy_enabled") || Object.hasOwn(body, "global_proxy")) {
+      assert.equal(Object.keys(body).length, 1, "Global proxy operation changed unrelated settings");
+      if (state.failToggle) { state.failToggle = false; return json(response, 500, { error: "FIXTURE_TOGGLE_STORAGE_FAILURE" }); }
+      if (Object.hasOwn(body, "global_proxy")) assert.equal(body.global_proxy, "", "Fixture only accepts explicit clearing");
+      const next = body.global_proxy_enabled ? settings.proxy_pool.find((entry) => entry.enabled && entry.url && entry.health !== "unhealthy-cooling") : undefined;
+      if (body.global_proxy_enabled && !next) return json(response, 400, { error: "代理池暂无可用成员" });
+      settings.global_proxy = next?.url ?? ""; settings.proxy_pool_active_id = next?.id ?? "";
+      return json(response, 200, settings);
+    }
     assert.deepEqual(Object.keys(body), ["show_egress_ip"], "Proxy UI changed an unrelated setting");
     settings.show_egress_ip = body.show_egress_ip;
     return json(response, 200, settings);
@@ -326,6 +335,38 @@ async function main() {
     assert.equal(settings.global_proxy, proxyEntry(17).url);
     assert.equal(callCount(`/api/settings/proxy-pool/${proxyID(17)}/activate`, "POST"), 1);
     console.log("PASS filtered row actions use stable proxy IDs and refresh the persisted route");
+
+    const globalToggle = () => page.getByRole("switch", { name: "启用全局代理", exact: true });
+    const poolBeforeToggle = JSON.stringify(settings.proxy_pool);
+    const writesBeforeToggle = requests.filter((r) => r.method === "PUT" && r.endpoint === "/api/settings").length;
+    await globalToggle().click();
+    await eventually(async () => await globalToggle().getAttribute("aria-checked") === "false" && await globalToggle().isEnabled(), "Global proxy did not disable with a populated pool");
+    assert.equal(settings.global_proxy, ""); assert.equal(settings.proxy_pool_active_id, "");
+    assert.equal(JSON.stringify(settings.proxy_pool), poolBeforeToggle, "Disabling altered pool members or health");
+    assert.equal(requests.filter((r) => r.method === "PUT" && r.endpoint === "/api/settings").length, writesBeforeToggle + 1);
+    await page.reload({ waitUntil: "networkidle" });
+    await page.getByRole("button", { name: /^流量与安全/ }).click();
+    await eventually(async () => await globalToggle().getAttribute("aria-checked") === "false" && await globalToggle().isEnabled(), "Disabled proxy was restored by a page reload");
+    await globalToggle().click();
+    await eventually(async () => await globalToggle().getAttribute("aria-checked") === "true" && await globalToggle().isEnabled(), "Global proxy did not re-enable an available pool member");
+    assert.ok(settings.global_proxy);
+    state.failToggle = true;
+    const routeBeforeRejection = settings.global_proxy;
+    await globalToggle().click();
+    await page.locator("[data-sonner-toast]").filter({ hasText: "FIXTURE_TOGGLE_STORAGE_FAILURE" }).first().waitFor();
+    await eventually(async () => await globalToggle().isEnabled(), "Rejected toggle remained busy");
+    assert.equal(await globalToggle().getAttribute("aria-checked"), "true");
+    assert.equal(settings.global_proxy, routeBeforeRejection);
+    await page.locator("#global-proxy").fill("");
+    await page.locator("#global-proxy").locator("..").getByRole("button", { name: "保存", exact: true }).click();
+    await eventually(async () => await globalToggle().getAttribute("aria-checked") === "false" && await globalToggle().isEnabled(), "Clearing the address failed to disable a managed pool");
+    assert.equal(JSON.stringify(settings.proxy_pool), poolBeforeToggle);
+    await search().fill(proxyID(17));
+    await selectedRow.getByRole("button", { name: "使用", exact: true }).click();
+    await selectedRow.getByText("当前使用", { exact: true }).waitFor();
+    assert.equal(await globalToggle().getAttribute("aria-checked"), "true");
+    assert.equal(settings.global_proxy, proxyEntry(17).url);
+    console.log("PASS global proxy independently disables, survives reload, re-enables and retains the route on save failure with 10,000 members");
 
     // The reported screenshot had one failed check still labeled untested.
     const diagnosedEntry = settings.proxy_pool.find((entry) => entry.id === proxyID(17));

@@ -2452,6 +2452,15 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (Object.hasOwn(b, "finding_verify_mode") && b.finding_verify_mode !== "auto" && b.finding_verify_mode !== "off") {
       throw new Error("finding_verify_mode 必须是 auto 或 off");
     }
+    if (Object.hasOwn(b, "global_proxy_enabled")) {
+      if (typeof b.global_proxy_enabled !== "boolean" || Object.hasOwn(b, "global_proxy")) throw new Error("全局代理开关无效");
+      const entry = b.global_proxy_enabled ? (D.settings.proxy_pool ?? []).find((item) => item.enabled && item.url && item.health !== "unhealthy-cooling") : undefined;
+      if (b.global_proxy_enabled && !entry) throw new Error("代理池暂无可用成员");
+      b.global_proxy = entry?.url ?? "";
+      b.proxy_pool_active_id = entry?.id ?? "";
+    }
+    if (b.global_proxy === "") b.proxy_pool_active_id = "";
+    if (Object.hasOwn(b, "global_proxy")) b.global_proxy_enabled = Boolean(b.global_proxy);
     const next = { ...D.settings, ...b };
     for (const key of ["roe_enforcement", "llm_records_retention_days", "finding_verify_mode"] as const) {
       if (!mockRuntimeControlValid(key, next[key])) throw new Error(`${key} is invalid`);
