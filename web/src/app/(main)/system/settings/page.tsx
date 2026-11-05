@@ -35,6 +35,7 @@ import { FindingVerifyModeCard, LLMRecordsRetentionCard } from "./_components/po
 import { assertSettingsSnapshot } from "./_components/settings-response";
 import { ProxyPoolList } from "./_components/proxy-pool-list";
 import { summarizeProxyImportErrors } from "@/lib/proxy-pool-pagination";
+import { assessProxyImportReply } from "@/lib/proxy-import-result";
 
 export default function SystemSettingsPage() {
   const [credentialAgent, setCredentialAgent] = React.useState(false);
@@ -537,20 +538,20 @@ export default function SystemSettingsPage() {
     const response: { value?: Awaited<ReturnType<typeof api.importProxyPool>> } = {};
     const confirmed = await runProxyPoolOperation(async () => {
       response.value = await api.importProxyPool({ text });
-      const result = response.value;
-      if (result.ok !== true || result.probe_queued !== true || !Array.isArray(result.errors) || result.errors.some((error) =>
-        !error || !Number.isSafeInteger(error.line) || typeof error.error !== "string"
-      )) throw new Error("服务未确认代理导入和后台探测排队，请刷新状态后核对，避免重复导入");
+      assessProxyImportReply(response.value);
     });
     const result = response.value;
     if (!confirmed || !result) return false;
     // Clear the shared draft before resolving the child callback. This remains
     // authoritative even if the category was unmounted during the request.
-    if (proxyPoolDraft.current === text) proxyPoolDraft.current = "";
-    if (result.errors.length) toast.error(summarizeProxyImportErrors(result.errors));
-    else toast.success("代理池已导入");
-    toast.info("代理探测已排队，稍后点击“刷新状态”查看结果");
-    return true;
+    const { invalidErrors, clearDraft, summary, added, probeQueued } = assessProxyImportReply(result);
+    if (clearDraft && proxyPoolDraft.current === text) proxyPoolDraft.current = "";
+    if (summary) {
+      if (added! > 0) toast.success(summary); else toast.info(summary);
+    } else if (!result.errors.length) toast.success("代理池已导入");
+    if (invalidErrors.length) toast.error(summarizeProxyImportErrors(invalidErrors));
+    if (probeQueued) toast.info("代理探测已排队，稍后点击“刷新状态”查看结果");
+    return clearDraft;
   };
   const saveProxyPoolStrategy = () => {
     const interval = Number(proxyPoolInterval);

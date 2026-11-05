@@ -71,44 +71,7 @@ type ProxyImportError struct {
 	Line  int    `json:"line"`
 	Input string `json:"input"`
 	Error string `json:"error"`
-}
-
-// ParseProxyBatch accepts one proxy URL per line. Optional name and remark may
-// follow as URL|name|remark. Duplicates are reported once and skipped.
-func ParseProxyBatch(raw string) ([]ProxyPoolEntry, []ProxyImportError) {
-	var out []ProxyPoolEntry
-	var errs []ProxyImportError
-	seen := map[string]bool{}
-	for n, line := range strings.Split(raw, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.SplitN(line, "|", 3)
-		rawURL := strings.TrimSpace(parts[0])
-		u, err := traffic.ValidateProxyURL(rawURL)
-		if err != nil {
-			errs = append(errs, ProxyImportError{Line: n + 1, Input: maskSecrets(line), Error: maskSecrets(err.Error())})
-			continue
-		}
-		key := proxyURLKey(u)
-		if seen[key] {
-			errs = append(errs, ProxyImportError{Line: n + 1, Input: maskSecrets(line), Error: "重复代理，已跳过"})
-			continue
-		}
-		seen[key] = true
-		name, remark := "", ""
-		if len(parts) > 1 {
-			name = strings.TrimSpace(parts[1])
-		}
-		if len(parts) > 2 {
-			remark = strings.TrimSpace(parts[2])
-		}
-		// New entries have not failed yet.  Keep them available until a probe
-		// establishes a consecutive-failure streak.
-		out = append(out, ProxyPoolEntry{ID: fmt.Sprintf("proxy-%d-%d", time.Now().UnixNano(), n+1), URL: rawURL, Name: name, Remark: remark, Enabled: true, Health: "unknown"})
-	}
-	return out, errs
+	Kind  string `json:"kind,omitempty"`
 }
 
 func proxyURLKey(u *url.URL) string {
@@ -1050,19 +1013,61 @@ func (s *Server) importProxyPool(w http.ResponseWriter, r *http.Request) {
 	for _, e := range entries {
 		seen[proxyURLKeyRaw(e.RawURL)] = true
 	}
+	imported := 0
 	for _, p := range parsed {
-		key := proxyURLKeyRaw(p.URL)
+		u, _ := traffic.ValidateProxyURL(p.URL)
+		key := proxyURLKey(u)
 		if seen[key] {
 			line := 0
 			if i := strings.LastIndex(p.ID, "-"); i >= 0 {
 				_, _ = fmt.Sscanf(p.ID[i+1:], "%d", &line)
 			}
-			errs = append(errs, ProxyImportError{Line: line, Input: maskSecrets(p.URL), Error: "重复代理，已跳过"})
+			errs = append(errs, ProxyImportError{Line: line, Input: proxyImportDisplayURL(u), Error: "重复代理，已跳过", Kind: "duplicate"})
 			continue
 		}
-		u, _ := traffic.ValidateProxyURL(p.URL)
 		entries = append(entries, proxyPoolEntry{ProxyPoolEntry: p, RawURL: u.String()})
+		imported++
 		seen[proxyURLKey(u)] = true
+	}
+	duplicates, invalid := 0, 0
+	for _, item := range errs {
+		if item.Kind == "duplicate" {
+			duplicates++
+		} else {
+			invalid++
+		}
+	}
+	respond := func(probeQueued bool) {
+		result := map[string]any{"ok": true, "imported": imported, "skipped_duplicates": duplicates, "invalid": invalid, "errors": errs, "probe_queued": probeQueued}
+		if r.URL.Query().Get("summary") == "1" {
+			activeOut, count := "", 0
+			if s.m.proxyPool != nil {
+				s.m.proxyPool.mu.Lock()
+				activeOut, count = s.m.proxyPool.active, len(s.m.proxyPool.entries)
+				s.m.proxyPool.mu.Unlock()
+			}
+			result["active_id"], result["count"] = activeOut, count
+		} else {
+			entriesOut, activeOut, logs := s.m.ProxyPoolSnapshot()
+			result["entries"], result["active_id"], result["switch_log"] = entriesOut, activeOut, logs
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
+	policyUpdate := req.Interval != nil || req.TimedEnabled != nil || req.OnFailure != nil || req.Strategy != nil || req.Threshold != nil || req.Cooldown != nil || req.HealthInterval != nil
+	if imported == 0 && !policyUpdate {
+		if s.m.proxyPool != nil {
+			s.m.proxyPool.mu.Lock()
+			changed := s.m.proxyPool.generation != generation
+			s.m.proxyPool.mu.Unlock()
+			if changed {
+				writeErr(w, http.StatusConflict, errProxyPoolChanged.Error())
+				return
+			}
+		}
+		// Invalid-only and duplicate-only pastes do not rewrite the route,
+		// invalidate health rounds, or probe thousands of existing members.
+		respond(false)
+		return
 	}
 	if active != "" {
 		foundActive := false
@@ -1084,7 +1089,7 @@ func (s *Server) importProxyPool(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	if req.Interval != nil || req.TimedEnabled != nil || req.OnFailure != nil || req.Strategy != nil || req.Threshold != nil || req.Cooldown != nil || req.HealthInterval != nil {
+	if policyUpdate {
 		timed, interval, onFailure, strategy := s.m.proxyRotateConfig()
 		threshold, cooldown, healthInterval := s.m.proxyHealthConfig()
 		if req.TimedEnabled != nil {
@@ -1120,15 +1125,7 @@ func (s *Server) importProxyPool(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "配置已保存但后台探测未排队", "saved": true, "probe_queued": false})
 		return
 	}
-	if r.URL.Query().Get("summary") == "1" {
-		s.m.proxyPool.mu.Lock()
-		activeOut, count := s.m.proxyPool.active, len(s.m.proxyPool.entries)
-		s.m.proxyPool.mu.Unlock()
-		writeJSON(w, 200, map[string]any{"ok": true, "active_id": activeOut, "count": count, "errors": errs, "probe_queued": probeQueued})
-		return
-	}
-	entriesOut, activeOut, logs := s.m.ProxyPoolSnapshot()
-	writeJSON(w, 200, map[string]any{"ok": true, "entries": entriesOut, "active_id": activeOut, "switch_log": logs, "errors": errs, "probe_queued": probeQueued})
+	respond(probeQueued)
 }
 
 func (m *Manager) proxyPoolActiveID() string {

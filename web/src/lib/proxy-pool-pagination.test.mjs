@@ -73,7 +73,7 @@ test("search covers names, masked addresses, remarks, egress and state without u
 test("bulk import errors have a bounded summary and never include input strings", () => {
   const errors = Array.from({ length: 10_000 }, (_, i) => ({ line: i + 1, input: "PRIVATE_PROXY_INPUT", error: `invalid format ${"x".repeat(300)}` }));
   const summary = summarizeProxyImportErrors(errors);
-  assert.match(summary, /共 10000 行/);
+  assert.match(summary, /共 10000 条格式错误/);
   assert.match(summary, /仅显示前 5 条/);
   assert.equal((summary.match(/第\d+行/g) || []).length, 5);
   assert.ok(summary.length < 900);
@@ -87,11 +87,8 @@ test("settings do not mount a hidden whole pool or keep an import textarea in th
   assert.ok(!page.includes("proxyPoolText"));
   assert.match(page, /isSettingVisible\("traffic", "全局代理 代理池[^\n]+\? <Card/);
   assert.match(page, /const proxyPoolDraft = React\.useRef\(""\)/);
-  assert.match(page, /summarizeProxyImportErrors\(result\.errors\)/);
   assert.match(page, /proxyPoolOperationPending\.current = true/);
-  assert.match(page, /if \(proxyPoolDraft\.current === text\) proxyPoolDraft\.current = ""/);
   assert.match(page, /toast\.success\("全部代理探测已排队/);
-  assert.match(page, /result\.ok !== true \|\| result\.probe_queued !== true \|\| !Array\.isArray\(result\.errors\)/);
   assert.doesNotMatch(page, /已完成全部代理探测/);
   assert.match(list, /items\.map\(\(entry\)/);
   assert.match(list, /useDeferredValue\(query\)/);

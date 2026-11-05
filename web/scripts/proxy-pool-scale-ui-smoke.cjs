@@ -51,7 +51,7 @@ const settings = {
   constraints_inject_planner: true, constraints_inject_worker: true, noa_compaction: false,
   notify_enabled: true, notify_public_base_url: "", notify_digest_interval_min: 30,
 };
-const state = { holdEgress: false, liveEgressReads: 0, peakEgressReads: 0, failBulk: false, recoverOnCleanup: "", rotateOnBulk: "" };
+const state = { holdEgress: false, liveEgressReads: 0, peakEgressReads: 0, failBulk: false, recoverOnCleanup: "", rotateOnBulk: "", importMode: "invalid" };
 const requests = [], unexpected = new Set(), external = new Set(), errors = [], heldEgress = [];
 
 function json(response, code, value) {
@@ -107,12 +107,27 @@ async function serveAPI(request, response, url) {
   if (endpoint === "/api/settings/proxy-pool" && method === "GET") return json(response, 200, proxySnapshot());
   if (endpoint === "/api/settings/proxy-pool/import" && method === "POST") {
     assert.equal(typeof body.text, "string");
+    if (state.importMode !== "invalid") {
+      let added = 0, duplicates = 0, invalid = 0, issues = [];
+      if (state.importMode === "valid") {
+        assert.equal(body.text, "192.0.2.20:8080 #hk\nsocks5198.51.100.20:4145 #us\n198.51.100.21:4145 #us");
+        for (const [i, address] of ["http://192.0.2.20:8080", "socks5://198.51.100.20:4145", "socks5://198.51.100.21:4145"].entries()) settings.proxy_pool.push({ id: `format-import-${i}`, url: address, enabled: true, health: "unknown", consecutive_failures: 0 });
+        added = 3; settings.proxy_pool_active_id = "format-import-0"; settings.global_proxy = settings.proxy_pool[0].url;
+      } else if (state.importMode === "duplicate") {
+        duplicates = 3; issues = Array.from({ length: 3 }, (_, i) => ({ line: i + 1, kind: "duplicate", error: "重复代理，已跳过" }));
+      } else {
+        added = duplicates = invalid = 1;
+        settings.proxy_pool.push({ id: "format-import-3", url: "http://203.0.113.20:8080", enabled: true, health: "unknown", consecutive_failures: 0 });
+        issues = [{ line: 1, kind: "duplicate", error: "重复代理，已跳过" }, { line: 3, kind: "invalid", error: "地址格式无效" }];
+      }
+      return json(response, 200, { ok: true, imported: added, skipped_duplicates: duplicates, invalid, errors: issues, probe_queued: added > 0, count: settings.proxy_pool.length });
+    }
     const importErrors = Array.from({ length: 5000 }, (_, i) => ({
-      line: i + 1, input: "http://import.fixture.invalid:8080", error: `FIXTURE_IMPORT_ERROR_${i + 1}_${"X".repeat(260)}`,
+      line: i + 1, kind: "invalid", input: "http://import.fixture.invalid:8080", error: `FIXTURE_IMPORT_ERROR_${i + 1}_${"X".repeat(260)}`,
     }));
     return json(response, 200, {
-      ...(url.searchParams.get("summary") === "1" ? { ok: true, imported: 0, count: settings.proxy_pool.length } : proxySnapshot()),
-      errors: importErrors, probe_queued: true,
+      ...(url.searchParams.get("summary") === "1" ? { ok: true, imported: 0, skipped_duplicates: 0, invalid: 5000, count: settings.proxy_pool.length } : proxySnapshot()),
+      errors: importErrors, probe_queued: false,
     });
   }
   if (endpoint === "/api/settings/proxy-pool/test-all" && method === "POST") {
@@ -341,7 +356,7 @@ async function main() {
     await list().getByRole("button", { name: "批量导入代理", exact: true }).click();
     assert.equal(await importText().inputValue(), draft, "Unmounting the category discarded the unsaved import draft");
     await list().getByRole("button", { name: "导入", exact: true }).click();
-    const errorToast = page.locator("[data-sonner-toast]").filter({ hasText: "共 5000 行导入失败" }).first();
+    const errorToast = page.locator("[data-sonner-toast]").filter({ hasText: "共 5000 条格式错误" }).first();
     await errorToast.waitFor();
     const errorText = await errorToast.innerText();
     assert.ok(errorText.length < 1100, "Import errors created an unbounded toast");
@@ -351,6 +366,7 @@ async function main() {
     assert.equal(callCount("/api/settings/proxy-pool/import", "POST"), 1, "Import was replayed automatically");
     assert.equal(requests.find((r) => r.endpoint === "/api/settings/proxy-pool/import").query, "?summary=1", "Import retrieved a redundant full proxy pool");
     assert.equal(settings.proxy_pool.length, initialCount - 1);
+    assert.equal(await importText().inputValue(), draft, "An invalid import discarded the source text");
     console.log("PASS large drafts survive category unmount and 5,000 errors produce a bounded sample notification");
 
     await eventually(async () => await list().getByRole("button", { name: "测试全部", exact: true }).isEnabled(), "Import kept all proxy operations disabled");
@@ -503,6 +519,31 @@ async function main() {
     assert.equal(settings.proxy_pool.length, 0); assert.equal(settings.global_proxy, ""); assert.equal(settings.proxy_pool_active_id, "");
     assert.equal(requests.filter((r) => r.endpoint === bulkPath).at(-1).body.ids.length, remainingCount);
     console.log("PASS thousands of selected proxies clear with one confirmed request and no hidden remaining exit");
+
+    state.importMode = "valid";
+    const formatDraft = "192.0.2.20:8080 #hk\nsocks5198.51.100.20:4145 #us\n198.51.100.21:4145 #us";
+    await importText().fill(formatDraft);
+    await list().getByRole("button", { name: "导入", exact: true }).click();
+    await page.locator("[data-sonner-toast]").filter({ hasText: "新增 3 条，重复跳过 0 条，格式错误 0 条" }).first().waitFor();
+    await eventually(async () => await importText().inputValue() === "", "Confirmed successful import retained the old draft");
+    assert.equal(settings.proxy_pool.length, 3);
+    state.importMode = "duplicate";
+    await importText().fill(formatDraft);
+    await list().getByRole("button", { name: "导入", exact: true }).click();
+    await page.locator("[data-sonner-toast]").filter({ hasText: "新增 0 条，重复跳过 3 条，格式错误 0 条" }).first().waitFor();
+    await eventually(async () => await list().getByRole("button", { name: "导入", exact: true }).isEnabled(), "Duplicate import stayed busy");
+    assert.equal(await importText().inputValue(), formatDraft, "Duplicate-only input was discarded");
+    assert.equal(settings.proxy_pool.length, 3);
+    state.importMode = "mixed";
+    const mixedDraft = "192.0.2.20:8080\n203.0.113.20:8080\nbad-input";
+    await importText().fill(mixedDraft);
+    await list().getByRole("button", { name: "导入", exact: true }).click();
+    await page.locator("[data-sonner-toast]").filter({ hasText: "新增 1 条，重复跳过 1 条，格式错误 1 条" }).first().waitFor();
+    await page.locator("[data-sonner-toast]").filter({ hasText: "共 1 条格式错误" }).first().waitFor();
+    assert.equal(await importText().inputValue(), mixedDraft, "Partial import discarded the invalid input");
+    assert.equal(settings.proxy_pool.length, 4);
+    assert.equal(callCount("/api/settings/proxy-pool/import", "POST"), 4, "Import was replayed automatically");
+    console.log("PASS import counts distinguish added/duplicate/invalid outcomes and preserve unsuccessful drafts");
 
     assert.ok(await page.evaluate(() => window.fixturePeakProxyRows) <= 50, "A transition temporarily mounted more than one page of proxies");
     assert.equal(requests.filter((r) => r.endpoint.startsWith("/api/tasks/") && r.method !== "GET").length, 0);
