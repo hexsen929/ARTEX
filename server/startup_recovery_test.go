@@ -7,6 +7,11 @@ import (
 )
 
 func TestExecutionStartupRecoveryFailureBlocksAllStartPaths(t *testing.T) {
+	t.Run("pause_saved", func(t *testing.T) { testStartupRecoveryFailure(t, false) })
+	t.Run("pause_write_failed", func(t *testing.T) { testStartupRecoveryFailure(t, true) })
+}
+
+func testStartupRecoveryFailure(t *testing.T, rejectPause bool) {
 	m := proxyTestManager(t)
 	task, err := m.CreateTask("startup recovery guard", "fixture", nil, 3600, 0)
 	if err != nil {
@@ -42,10 +47,26 @@ func TestExecutionStartupRecoveryFailureBlocksAllStartPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = m.pg.Exec(`DROP TRIGGER IF EXISTS ` + name + ` ON exploration_nodes`) })
+	if rejectPause {
+		pauseName := name + "_pause"
+		if _, err := m.pg.Exec(`CREATE FUNCTION ` + pauseName + `() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id=` + task.ID + ` AND NEW.paused THEN RAISE EXCEPTION 'pause fixture'; END IF; RETURN NEW; END $$`); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _, _ = m.pg.Exec(`DROP FUNCTION IF EXISTS ` + pauseName + `()`) })
+		if _, err := m.pg.Exec(`CREATE TRIGGER ` + pauseName + ` BEFORE UPDATE ON tasks FOR EACH ROW EXECUTE FUNCTION ` + pauseName + `()`); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _, _ = m.pg.Exec(`DROP TRIGGER IF EXISTS ` + pauseName + ` ON tasks`) })
+	}
+	// A fresh process has no cached task handle. LoadExisting intentionally
+	// skips handles already present in the manager, so discard only this fixture.
+	m.mu.Lock()
+	delete(m.tasks, task.ID)
+	m.mu.Unlock()
 	s.restoreTaskRuntimes()
 	restored, ok := m.Task(task.ID)
-	if !ok {
-		t.Fatal("task missing")
+	if !ok || restored == task {
+		t.Fatal("task was not reloaded from persistent state")
 	}
 	if !s.engine.OutcomeRecoveryBlocked(task.ID) || s.engine.Started(task.ID) || s.engine.ReadyFor(restored) {
 		t.Fatal("second startup loop bypassed failed recovery")
@@ -65,11 +86,25 @@ func TestExecutionStartupRecoveryFailureBlocksAllStartPaths(t *testing.T) {
 	if _, err := s.applyTaskControl(restored, "resume"); err == nil {
 		t.Fatal("API reported successful resume during failed recovery")
 	}
+	if _, err := s.admitTaskWhenScheduled(restored, "resume", true, true); err == nil {
+		t.Fatal("calendar admission bypassed failed recovery")
+	}
+	if _, err := s.admitTaskWhenScheduledWithReason(restored, "resume", true, false, "paused_by_proxy", true); err == nil {
+		t.Fatal("proxy recovery bypassed failed recovery")
+	}
 	if node, _ := restored.Store.GetNode(id); node.State != "running" {
 		t.Fatal("uncommitted result was reset for replay")
 	}
 	if _, err := m.pg.Exec(`DROP TRIGGER ` + name + ` ON exploration_nodes`); err != nil {
 		t.Fatal(err)
+	}
+	if rejectPause {
+		if restored.lifecycleSnapshot().Paused {
+			t.Fatal("fixture did not reject pause persistence")
+		}
+		if _, err := m.pg.Exec(`DROP TRIGGER ` + name + `_pause ON tasks`); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := s.applyTaskControl(restored, "resume"); err != nil {
 		t.Fatal("manual resume did not recover saved result", err)

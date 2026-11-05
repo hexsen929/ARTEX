@@ -280,7 +280,8 @@ func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *c
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// Re-read fresh state and drop any member that revived while we compressed.
+	// Reject the whole summary if a member revived while we compressed: removing
+	// its coverage alone would retain generated text that still describes it.
 	fresh, _, err := loadColdGraph(ts)
 	if err != nil {
 		return err
