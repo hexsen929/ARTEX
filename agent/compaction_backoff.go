@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -24,10 +25,27 @@ func boundedCompressionText(text string, limit int) string {
 
 func compressionNodeSummary(n *db.Node) string {
 	text := nodeSummary(n)
-	if len([]rune(text)) <= 768 {
-		return text
+	if len([]rune(text)) > 768 {
+		text = boundedCompressionText(text, 768) + fmt.Sprintf("（摘要截短，完整内容见 node_detail #%d）", n.ID)
 	}
-	return boundedCompressionText(text, 768) + fmt.Sprintf("（摘要截短，完整内容见 node_detail #%d）", n.ID)
+	if n != nil && n.Kind == db.KindFact {
+		var p struct {
+			Scope    string `json:"tested_scope"`
+			Evidence string `json:"verification_evidence"`
+		}
+		if json.Unmarshal(n.Payload, &p) == nil {
+			if p.Scope != "" {
+				text += " [tested_scope=" + boundedCompressionText(p.Scope, 400) + "]"
+				if len([]rune(p.Scope)) > 400 {
+					text += fmt.Sprintf("（范围截短，完整条件见 node_detail #%d）", n.ID)
+				}
+			} else {
+				text += " [tested_scope未记录，不可外推]"
+			}
+			text += fmt.Sprintf(" [has_verification_evidence=%t]", p.Evidence != "")
+		}
+	}
+	return text
 }
 
 func boundedCompactionBlocks(blocks []block) []block {

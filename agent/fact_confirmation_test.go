@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Autumn-27/artex/db"
@@ -64,6 +65,10 @@ func TestExecutionFactConfirmationKeepsEvidenceAndScope(t *testing.T) {
 	if compact["tested_scope"] != input["tested_scope"] || compact["has_verification_evidence"] != true || compact["confidence"] != FactConfidenceConfirmed {
 		t.Fatal("planning view lost scope or confidence", compact)
 	}
+	compressedInput := buildCompressionInput(&coldGraph{children: map[int64][]int64{}}, block{Members: []int64{id}}, map[int64]*db.Node{id: current})
+	if !strings.Contains(compressedInput, input["tested_scope"].(string)) || !strings.Contains(compressedInput, "has_verification_evidence=true") {
+		t.Fatal("compaction input lost tested conditions", compressedInput)
+	}
 	// A delayed confirmation cannot overwrite a changed snapshot at the DB boundary.
 	if err := ts.ts.ConfirmFact(t.Context(), id, "late", detail.FactVersion, db.FactConfirmation{Evidence: "late", Scope: "different", Note: "late"}); err == nil {
 		t.Fatal("database accepted stale confirmation")
@@ -87,6 +92,9 @@ func TestExecutionFactConfirmationKeepsEvidenceAndScope(t *testing.T) {
 	legacy, err := ts.ts.GetNode(legacyID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if text := compressionNodeSummary(legacy); !strings.Contains(text, "tested_scope未记录") || !strings.Contains(text, "has_verification_evidence=false") {
+		t.Fatal("legacy compaction implied verified scope", text)
 	}
 	input["fact_id"], input["fact_version"] = legacyID, db.FactSnapshotVersion(legacy)
 	if call(input) || factPayload(t, ts, legacyID)["verification_evidence"] != input["verification_evidence"] {
