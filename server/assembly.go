@@ -429,6 +429,11 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 				log.Printf("[tools] planning metadata migration failed")
 			}
 		}
+		if s.Key == "confirm_fact" {
+			if err := pg.MergeFactConfirmationToolSchema(schema); err != nil {
+				log.Printf("[tools] fact confirmation metadata migration failed")
+			}
+		}
 	}
 	// Seed the traffic host tools so they're bindable per-agent like built-ins.
 	// Default binding = worker (preserves prior behavior). Their runtime availability

@@ -154,7 +154,7 @@ func TestExecutionPlannerReadinessRepairsStoredLegacyBody(t *testing.T) {
 		return "", false
 	}
 	text := plannerSystem("fixture", "/data", "/data")
-	if !strings.HasPrefix(text, "CUSTOM_PREFIX") || strings.Contains(text, "产出 0 意图=任务停摆") || strings.Contains(text, "→ 直接重派同方向") {
+	if !strings.HasPrefix(text, "CUSTOM_PREFIX") || strings.Contains(text, "产出 0 意图=任务停摆") || strings.Contains(text, "→ 直接重派同方向") || strings.Contains(text, "**done（正常跑完）**：已覆盖") {
 		t.Fatal("legacy unconditional dispatch survived")
 	}
 	if !strings.Contains(text, "【规划与执行校准】") || !strings.Contains(workerSystem("", "", "/data", "/data"), "【执行与交接校准】") {

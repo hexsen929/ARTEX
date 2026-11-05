@@ -124,6 +124,7 @@ func jsonUTF16EscapeAt(b []byte, offset int) (uint16, bool) {
 
 // Node is a typed reasoning node (= old task_nodes). kind ∈ goal|intent|finding|hint.
 type Node struct {
+	FactVersion        string          `json:"fact_version,omitempty"`
 	VerificationStatus string          `json:"verification_status,omitempty"`
 	VerificationNote   string          `json:"verification_note,omitempty"`
 	EvidenceVersion    int64           `json:"evidence_version,omitempty"`
@@ -347,28 +348,6 @@ func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) e
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("目标不存在")
-	}
-	return nil
-}
-
-// ConfirmFact 把本 exploration 的一条 fact 节点 confidence 升级为 confirmed，并写入审计
-// 字段（confirmed_by/confirmed_at）。scoped 到 kind='fact'，不会误改 intent/goal；无此
-// 事实时报错。content_version 与 SetNodeState 同步 bump，让已折叠 digest 的缓存体失效。
-func (s *ExplorationStore) ConfirmFact(id int64, origin string) error {
-	if origin == "" {
-		origin = "system"
-	}
-	audit, _ := json.Marshal(map[string]any{
-		"confidence":   "confirmed",
-		"confirmed_by": origin,
-		"confirmed_at": time.Now().UTC().Format(time.RFC3339),
-	})
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload = payload || $1::jsonb, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3 AND kind='fact'`, string(audit), id, s.expID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("事实不存在")
 	}
 	return nil
 }

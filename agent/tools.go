@@ -904,6 +904,20 @@ func compactNode(n *db.Node) map[string]any {
 	var p map[string]any
 	_ = json.Unmarshal(n.Payload, &p)
 	m := map[string]any{"id": n.ID, "state": n.State, "summary": p["summary"]}
+	if n.Kind == db.KindFact {
+		m["fact_version"] = db.FactSnapshotVersion(n)
+		for _, key := range []string{"confidence", "tested_scope"} {
+			if value, ok := p[key]; ok {
+				m[key] = value
+			}
+		}
+		if scope, ok := m["tested_scope"].(string); ok && len([]rune(scope)) > 400 {
+			m["tested_scope"] = string([]rune(scope)[:400]) + "…"
+			m["tested_scope_truncated"] = true
+		}
+		verification, _ := p["verification_evidence"].(string)
+		m["has_verification_evidence"] = strings.TrimSpace(verification) != ""
+	}
 	if result, ok := p["worker_result"]; ok {
 		m["worker_result"] = result
 	}
@@ -1062,6 +1076,7 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 			if err := t.ts.PopulateFindingTrafficIDs([]*db.Node{n}); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
+			n.FactVersion = db.FactSnapshotVersion(n)
 			return jsonResult(n) // full payload incl. detail / evidence, plus explicit finding IDs
 		})
 }
@@ -1529,6 +1544,10 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, string
 	// confidence 永远落库（默认 observed）——红日3 复盘：阴性结论强制降级 inferred。
 	conf := normalizeFactConfidence(it.Confidence)
 	var note string
+	if conf == FactConfidenceConfirmed {
+		conf = FactConfidenceInferred
+		note = "事实已保存为 inferred；confirmed 需要读取 node_detail 后用 confirm_fact 保存复核证据、适用范围与判断依据。"
+	}
 	if conf == FactConfidenceObserved && isNegativeConclusion(it.Summary+"\n"+it.Detail) {
 		conf = FactConfidenceInferred
 		note = factDowngradeNote
@@ -1643,18 +1662,26 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 // （confirmed_by/confirmed_at 落进 payload），fact 必须属于本任务。
 func (t *ToolSet) confirmFact() actool.CoreTool {
 	return writeTool("confirm_fact",
-		"把一条 inferred 事实升级为 confirmed。【只有当你已用成熟工具/直接证据复核过该结论】才能调用——例如 record_fact 的阴性结论被系统自动降级后，你用 nmap/nc 等成熟工具复测坐实，再调本工具。输入 fact_id（graph_overview/list_facts 里本任务的 fact 节点 id）。",
+		"复核事实后保存确认依据。先读 node_detail，提交其 fact_version、实际复核证据、测过的范围与结论理由。工具名称、重复旧结论或只传事实编号不能代替复核。阴性结论只适用于 tested_scope，不代表其它身份、入口或条件已排除。",
 		obj(map[string]any{
-			"fact_id": idp("要升级为 confirmed 的事实节点 id（必须属于本任务）"),
-		}),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			"fact_id":               idp("要升级为 confirmed 的事实节点 id（必须属于本任务）"),
+			"fact_version":          str("node_detail 返回的 fact_version；事实变化后必须重新读取和核对"),
+			"verification_evidence": map[string]any{"type": "string", "maxLength": 12000, "description": "实际复核的请求/响应或命令输出摘要及证据位置，不得用工具名称或重复结论代替"},
+			"tested_scope":          map[string]any{"type": "string", "maxLength": 2000, "description": "实际测过的对象、身份/会话、输入与环境条件；明确哪些未测条件不在结论内"},
+			"verification_note":     map[string]any{"type": "string", "maxLength": 4000, "description": "复核证据为何支持该事实、对照和仍存在的限制；超时/模型失败/工具未执行不算反证"},
+		}, "fact_id", "fact_version", "verification_evidence", "tested_scope", "verification_note"),
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.ts == nil {
 				return actool.Errorf("confirm_fact 未启用: ExplorationStore 未初始化"), nil
 			}
 			var a struct {
-				FactID json.RawMessage `json:"fact_id"`
+				FactID      json.RawMessage `json:"fact_id"`
+				FactVersion string          `json:"fact_version"`
+				db.FactConfirmation
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("confirm_fact 参数必须是有效 JSON 对象"), nil
+			}
 			id := pid(a.FactID)
 			if id <= 0 {
 				return actool.Errorf("fact_id 必填"), nil
@@ -1663,12 +1690,15 @@ func (t *ToolSet) confirmFact() actool.CoreTool {
 			if err != nil || node == nil || node.Kind != db.KindFact {
 				return actool.Errorf("fact_id 必须是本任务的事实节点（关联任务节点只读）"), nil
 			}
+			if node.State != "confirmed" {
+				return actool.Errorf("该事实已被排除或不是可复核的观察，请重新读取 node_detail"), nil
+			}
 			var p map[string]any
 			_ = json.Unmarshal(node.Payload, &p)
 			if prev, _ := p["confidence"].(string); prev == FactConfidenceConfirmed {
 				return actool.Text(fmt.Sprintf("fact %d 已是 confirmed，无需重复确认", id)), nil
 			}
-			if err := t.ts.ConfirmFact(id, t.worker); err != nil {
+			if err := t.ts.ConfirmFact(ctx, id, t.worker, a.FactVersion, a.FactConfirmation); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
 			if t.notify != nil {
