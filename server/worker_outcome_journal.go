@@ -108,3 +108,33 @@ func (e *Engine) restoreWorkerOutcomeJournal(t *Task) error {
 	}
 	return nil
 }
+
+// Archive runs after all writers drained and before its database snapshot. Never
+// compact a task while its only final result is still in a local recovery file.
+func (e *Engine) prepareWorkerOutcomesForArchive(t *Task) error {
+	if err := e.restoreWorkerOutcomeJournal(t); err != nil {
+		return err
+	}
+	var failed error
+	e.outcomes.Range(func(key, value any) bool {
+		out := value.(*pendingWorkerOutcome)
+		if out.taskID != t.ID {
+			return true
+		}
+		out.mu.Lock()
+		defer out.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := t.Store.SetIntentRunOutcome(ctx, key.(int64), out.token, out.state, out.code, out.message)
+		cancel()
+		if err != nil && !errors.Is(err, db.ErrIntentStateConflict) {
+			failed = err
+			return false
+		}
+		if out.journal != "" {
+			_ = os.Remove(out.journal)
+		}
+		e.outcomes.CompareAndDelete(key, out)
+		return true
+	})
+	return failed
+}

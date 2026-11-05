@@ -54,6 +54,9 @@ func TestExecutionOutcomeRetryAndOrphanRecovery(t *testing.T) {
 	if err := restarted.restoreWorkerOutcomeJournal(task); err == nil {
 		t.Fatal("rejected restart recovery was accepted")
 	}
+	if err := e.prepareWorkerOutcomesForArchive(task); err == nil {
+		t.Fatal("archive accepted an uncommitted outcome")
+	}
 	if node, _ := task.Store.GetNode(id); node.State != "running" {
 		t.Fatal("failed save published terminal state")
 	}
@@ -70,6 +73,9 @@ func TestExecutionOutcomeRetryAndOrphanRecovery(t *testing.T) {
 	}
 	if node, _ := task.Store.GetNode(id); node.State != "done" {
 		t.Fatal("retry did not persist completion")
+	}
+	if err := e.prepareWorkerOutcomesForArchive(task); err != nil {
+		t.Fatal("committed outcomes blocked archive", err)
 	}
 	// The same durable outcome can be recovered by a fresh engine before any
 	// startup requeue, without invoking a provider or tool.

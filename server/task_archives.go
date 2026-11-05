@@ -147,6 +147,9 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 	if task == nil {
 		return pgdb.ErrTaskArchiveNotFound
 	}
+	if err := s.engine.prepareWorkerOutcomesForArchive(&Task{ID: taskID, Store: s.m.pg.Exploration(task.ExplorationID)}); err != nil {
+		return errors.New("Worker 执行结果尚未保存，请待恢复后重试归档；原结果与本机日志保留")
+	}
 	_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "stage_files", 10)
 	fileStage, err := stageTaskArchiveFiles(s.m.dir, job.ID, taskID, task.ExplorationID)
 	if err != nil {
