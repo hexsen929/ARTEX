@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -312,6 +313,9 @@ func (e *Engine) StopTask(taskID string) {
 		}
 		return true
 	})
+	if dir := e.outcomeJournalDir(taskID); dir != "" {
+		_ = os.RemoveAll(dir)
+	}
 	e.slotState.Range(func(key, _ any) bool {
 		keyText, ok := key.(string)
 		if ok && strings.HasPrefix(keyText, taskID+"/") {
@@ -1368,14 +1372,23 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		log.Printf("[worker %s] intent %d: %v", name, intent.ID, err)
 	}
 	state, outcomeCode, outcomeMessage := workerOutcome(reason, err)
+	outcome := &pendingWorkerOutcome{taskID: t.ID, token: runToken, state: state, code: outcomeCode, message: outcomeMessage, worker: name}
+	if err := e.journalWorkerOutcome(intent.ID, outcome); err != nil {
+		log.Printf("[worker %s] task %s intent #%d outcome journal unavailable", name, t.ID, intent.ID)
+	}
 	if stateErr := t.Store.SetIntentOutcome(intent.ID, state, outcomeCode, outcomeMessage, runToken); stateErr != nil {
 		controlErr = stateErr
 		if !errors.Is(stateErr, db.ErrIntentStateConflict) {
-			e.outcomes.Store(intent.ID, &pendingWorkerOutcome{taskID: t.ID, token: runToken, state: state, code: outcomeCode, message: outcomeMessage, worker: name})
+			e.outcomes.Store(intent.ID, outcome)
 			e.emitActivity(t, db.Activity{NodeID: &intent.ID, Worker: name, Kind: "status", Summary: "执行已结束，结果待落库；系统将重试保存，不会重新执行操作", Detail: "termination_code=outcome_pending"})
+		} else if outcome.journal != "" {
+			_ = os.Remove(outcome.journal)
 		}
 		log.Printf("[worker %s] task %s intent #%d outcome not committed", name, t.ID, intent.ID)
 		return true
+	}
+	if outcome.journal != "" {
+		_ = os.Remove(outcome.journal)
 	}
 	e.emitActivity(t, db.Activity{NodeID: &intent.ID, Worker: name, Kind: "status", Summary: outcomeMessage, Detail: "termination_code=" + outcomeCode})
 

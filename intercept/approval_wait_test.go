@@ -1,7 +1,6 @@
 package intercept
 
 import (
-	"context"
 	"sync"
 	"testing"
 	"time"

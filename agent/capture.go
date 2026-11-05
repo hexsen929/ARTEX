@@ -79,6 +79,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 
 	var finalText string
 	var rerr error
+	approvalExpired := false
 	for ev, err := range s.Prompt(ctx, input) {
 		if err != nil {
 			flush()
@@ -108,6 +109,10 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			}
 			flush()
 			out := blocksText(ev.ToolResult.Content)
+			if ctx.Err() == nil && strings.Contains(out, "tool execution interrupted") && approvalWait.Pending() {
+				approvalExpired = true
+				approvalWait.Close()
+			}
 			lastTool.done(ev.ToolResult.ToolUseID)
 			auditTrace.Complete(ev.ToolResult.ToolUseID, out, ev.ToolResult.IsError)
 			rec(db.Activity{Kind: "tool_result", Tool: toolNames[ev.ToolResult.ToolUseID], ToolUseID: ev.ToolResult.ToolUseID,
@@ -131,7 +136,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 		case harness.KindResult:
 			if ev.Terminal != nil {
 				ev.Terminal = normalizeCallTimeoutTerminal(ctx, ev.Terminal)
-				if ev.Terminal.Reason == harness.ReasonTimeout && ctx.Err() == nil && approvalWait.Pending() {
+				if ev.Terminal.Reason == harness.ReasonTimeout && ctx.Err() == nil && (approvalExpired || approvalWait.Pending()) {
 					// An unanswered approval is not a failed test or exhausted
 					// exploration. Cancel it so a late click cannot execute after return.
 					approvalWait.Close()

@@ -389,7 +389,9 @@ func (s *ExplorationStore) DeleteGoal(id int64) error {
 
 // SetIntentState updates an intent node's state.
 // ResetRunningIntents returns any intent left in 'running' back to 'open' so it
-// is re-claimed on startup and resumes the existing transcript.
+// is re-claimed. Called on startup: a 'running' intent with no live worker (a
+// backend restart or crashed worker goroutine left it stuck) would otherwise spin
+// forever in the UI. Workers resume from their transcript, so reopening is safe.
 func (s *ExplorationStore) ResetRunningIntents() (int64, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
 WHERE exploration_id=$1 AND kind='intent' AND state='running'`, s.expID)

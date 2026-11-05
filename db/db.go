@@ -333,6 +333,9 @@ ON CONFLICT (name) DO NOTHING`,
 	if err := d.repairHydraNamespaceRule(); err != nil {
 		return fmt.Errorf("repair hydra namespace rule: %w", err)
 	}
+	if err := d.refreshVerificationLimits(); err != nil {
+		return fmt.Errorf("refresh verification limits: %w", err)
+	}
 	return nil
 }
 

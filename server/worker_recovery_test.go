@@ -42,10 +42,17 @@ func TestExecutionOutcomeRetryAndOrphanRecovery(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = m.pg.Exec(`DROP TRIGGER IF EXISTS ` + name + ` ON exploration_nodes`) })
 	out := &pendingWorkerOutcome{taskID: task.ID, token: token, state: "done", code: "completed", message: "saved fixture", worker: "worker"}
+	if err := e.journalWorkerOutcome(id, out); err != nil {
+		t.Fatal(err)
+	}
 	e.outcomes.Store(id, out)
 	e.reconcileWorkerOutcomes(t.Context(), task)
 	if _, ok := e.outcomes.Load(id); !ok {
 		t.Fatal("rejected outcome was lost")
+	}
+	restarted := NewEngine(m)
+	if err := restarted.restoreWorkerOutcomeJournal(task); err == nil {
+		t.Fatal("rejected restart recovery was accepted")
 	}
 	if node, _ := task.Store.GetNode(id); node.State != "running" {
 		t.Fatal("failed save published terminal state")
@@ -63,6 +70,19 @@ func TestExecutionOutcomeRetryAndOrphanRecovery(t *testing.T) {
 	}
 	if node, _ := task.Store.GetNode(id); node.State != "done" {
 		t.Fatal("retry did not persist completion")
+	}
+	// The same durable outcome can be recovered by a fresh engine before any
+	// startup requeue, without invoking a provider or tool.
+	restoredID, restoredToken := create()
+	record := &pendingWorkerOutcome{taskID: task.ID, token: restoredToken, state: "done", code: "completed", message: "restart fixture", worker: "worker"}
+	if err := e.journalWorkerOutcome(restoredID, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewEngine(m).restoreWorkerOutcomeJournal(task); err != nil {
+		t.Fatal(err)
+	}
+	if node, _ := task.Store.GetNode(restoredID); node.State != "done" {
+		t.Fatal("restart did not restore pending outcome")
 	}
 	orphan, _ := create()
 	live, _ := create()

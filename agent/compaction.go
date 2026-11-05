@@ -348,6 +348,10 @@ func (c *Compactor) finish(expID int64) {
 	defer c.mu.Unlock()
 	c.running[expID] = false
 	c.lastRun[expID] = time.Now()
+	if !time.Now().Before(c.nextRun[expID]) {
+		delete(c.failures, expID)
+		delete(c.nextRun, expID)
+	}
 }
 
 // --- helpers: db ↔ coldgraph ---

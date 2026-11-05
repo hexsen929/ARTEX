@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"os"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ type pendingWorkerOutcome struct {
 	mu                                          sync.Mutex
 	taskID, token, state, code, message, worker string
 	next                                        time.Time
+	journal                                     string
 }
 
 // Reconcile persistence independently of model execution. Never reopen an
@@ -41,6 +43,9 @@ func (e *Engine) reconcileWorkerOutcomesAt(parent context.Context, t *Task, now 
 		id := key.(int64)
 		err := t.Store.SetIntentRunOutcome(ctx, id, out.token, out.state, out.code, out.message)
 		if err == nil || errors.Is(err, db.ErrIntentStateConflict) {
+			if out.journal != "" {
+				_ = os.Remove(out.journal)
+			}
 			e.outcomes.CompareAndDelete(key, out)
 			if err == nil {
 				e.emitActivity(t, db.Activity{NodeID: &id, Worker: out.worker, Kind: "status", Summary: out.message, Detail: "termination_code=" + out.code})

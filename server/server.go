@@ -404,6 +404,10 @@ func (s *Server) restoreTaskRuntimes() {
 	// reload tasks persisted on disk so the task list survives a restart, and
 	// restore persisted paused state (so a task paused before restart stays paused).
 	for _, t := range m.LoadExisting() {
+		if err := s.engine.restoreWorkerOutcomeJournal(t); err != nil {
+			log.Printf("[engine] task %s 待保存的 Worker 结果尚未恢复，任务保持停止，请重试恢复", t.ID)
+			continue
+		}
 		lifecycle := t.lifecycleSnapshot()
 		// clear stale 'running' intents from a prior crash/restart (no live worker
 		// owns them) so they re-claim instead of spinning forever in the UI.
