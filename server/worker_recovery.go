@@ -17,9 +17,27 @@ type pendingWorkerOutcome struct {
 	journal                                     string
 }
 
+type workerRecoverySchedule struct {
+	mu   sync.Mutex
+	next time.Time
+}
+
 // Reconcile persistence independently of model execution. Never reopen an
 // orphan automatically: a missing final result may follow a completed side effect.
 func (e *Engine) reconcileWorkerOutcomes(parent context.Context, t *Task) {
+	if t == nil {
+		return
+	}
+	v, _ := e.recovery.LoadOrStore(t.ID, &workerRecoverySchedule{})
+	schedule := v.(*workerRecoverySchedule)
+	if !schedule.mu.TryLock() {
+		return
+	}
+	defer schedule.mu.Unlock()
+	if time.Now().Before(schedule.next) {
+		return
+	}
+	schedule.next = time.Now().Add(5 * time.Second)
 	e.reconcileWorkerOutcomesAt(parent, t, time.Now())
 }
 

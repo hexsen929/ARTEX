@@ -17,16 +17,31 @@ type approvalWaitKey struct{}
 // ApprovalWait tracks a run's approval waits independently of tool execution.
 // Close cancels only outstanding approval waits, never approves or replays them.
 type ApprovalWait struct {
-	mu      sync.Mutex
-	ctx     context.Context
-	cancel  context.CancelFunc
-	pending map[int64]time.Time
-	emit    func(db.Activity)
+	mu                sync.Mutex
+	ctx               context.Context
+	cancel            context.CancelFunc
+	pending           map[int64]time.Time
+	emit              func(db.Activity)
+	timer             *time.Timer
+	expired           bool
+	blockedByDeadline bool
 }
 
-func WithApprovalWait(ctx context.Context, emit func(db.Activity)) (context.Context, *ApprovalWait) {
+func WithApprovalWait(ctx context.Context, emit func(db.Activity), budgets ...time.Duration) (context.Context, *ApprovalWait) {
 	waitCtx, cancel := context.WithCancel(ctx)
 	w := &ApprovalWait{ctx: waitCtx, cancel: cancel, pending: map[int64]time.Time{}, emit: emit}
+	if len(budgets) > 0 && budgets[0] > 0 {
+		w.timer = time.AfterFunc(budgets[0], func() {
+			w.mu.Lock()
+			w.expired = true
+			hasPending := len(w.pending) > 0
+			w.blockedByDeadline = hasPending
+			w.mu.Unlock()
+			if hasPending {
+				w.cancel()
+			}
+		})
+	}
 	return context.WithValue(ctx, approvalWaitKey{}, w), w
 }
 
@@ -36,7 +51,14 @@ func (w *ApprovalWait) Pending() bool {
 	return len(w.pending) != 0
 }
 
-func (w *ApprovalWait) Close() { w.cancel() }
+func (w *ApprovalWait) Close() {
+	if w.timer != nil {
+		w.timer.Stop()
+	}
+	w.cancel()
+}
+
+func (w *ApprovalWait) Expired() bool { w.mu.Lock(); defer w.mu.Unlock(); return w.blockedByDeadline }
 
 func beginApprovalWait(ctx context.Context, id int64, tool string) (context.Context, func(bool)) {
 	w, _ := ctx.Value(approvalWaitKey{}).(*ApprovalWait)
@@ -46,7 +68,14 @@ func beginApprovalWait(ctx context.Context, id int64, tool string) (context.Cont
 	started := time.Now()
 	w.mu.Lock()
 	w.pending[id] = started
+	expired := w.expired
+	if expired {
+		w.blockedByDeadline = true
+	}
 	w.mu.Unlock()
+	if expired {
+		w.cancel()
+	}
 	emit := func(kind, summary string, allowed bool) {
 		if w.emit == nil {
 			return

@@ -106,6 +106,7 @@ type Engine struct {
 	deleting sync.Map // taskID -> bool, delete barrier (no new task-owned writes)
 	dropCnt  sync.Map // taskID -> *int64, running count of dropped (unpersistable) activity records
 	outcomes sync.Map // intentID -> *pendingWorkerOutcome; retry persistence, never execution
+	recovery sync.Map // taskID -> *workerRecoverySchedule
 
 	// deleteMu makes installing the delete barrier atomic with registering a new
 	// task operation. Once BeginDelete returns, every admitted writer is reflected
@@ -299,6 +300,7 @@ func (e *Engine) StopTask(taskID string) {
 	e.llmCalls.Delete(taskID)
 	e.paused.Delete(taskID)
 	e.dropCnt.Delete(taskID)
+	e.recovery.Delete(taskID)
 	e.plannerRound.Delete(taskID)
 	e.p0Reported.Delete(taskID)
 	e.settling.Delete(taskID)

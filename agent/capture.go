@@ -28,14 +28,14 @@ import (
 func captureRun(ctx context.Context, opts agentcore.Options, input string, emit func(db.Activity)) (string, harness.TerminalReason, error) {
 	s := agentcore.NewSession(opts)
 	defer s.Close() // release the session's background-task manager (temp dir + processes)
-	return captureRunSession(ctx, s, input, emit)
+	return captureRunSession(ctx, s, input, emit, opts.MaxDuration)
 }
 
 // captureRunSession is captureRun over an existing session, so a caller can run
 // multiple prompts on the SAME conversation (e.g. a settlement round that reuses
 // the worker's accumulated context after the main run hit max_turns).
-func captureRunSession(ctx context.Context, s *agentcore.Session, input string, emit func(db.Activity)) (string, harness.TerminalReason, error) {
-	ctx, approvalWait := intercept.WithApprovalWait(ctx, emit)
+func captureRunSession(ctx context.Context, s *agentcore.Session, input string, emit func(db.Activity), budgets ...time.Duration) (string, harness.TerminalReason, error) {
+	ctx, approvalWait := intercept.WithApprovalWait(ctx, emit, budgets...)
 	defer approvalWait.Close()
 	ctx, auditTrace := intercept.WithTrace(ctx, input, approvalHistory(s.Messages()))
 	defer auditTrace.Finish()
@@ -136,7 +136,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 		case harness.KindResult:
 			if ev.Terminal != nil {
 				ev.Terminal = normalizeCallTimeoutTerminal(ctx, ev.Terminal)
-				if ev.Terminal.Reason == harness.ReasonTimeout && ctx.Err() == nil && (approvalExpired || approvalWait.Pending()) {
+				if ctx.Err() == nil && (approvalExpired || approvalWait.Expired() || (ev.Terminal.Reason == harness.ReasonTimeout && approvalWait.Pending())) {
 					// An unanswered approval is not a failed test or exhausted
 					// exploration. Cancel it so a late click cannot execute after return.
 					approvalWait.Close()

@@ -37,7 +37,7 @@ func TestExecutionApprovalBudgetIsNotReportedAsExplorationFailure(t *testing.T) 
 	if err := ic.SetEnabledTools([]string{"ApprovalBudgetProbe"}); err != nil {
 		t.Fatal(err)
 	}
-	rule, err := d.CreateInterceptRule("approval-budget-fixture", "tool_name", "contains", "ApprovalBudgetProbe", "ask", "fixture", 999, true, false, 60, "deny")
+	rule, err := d.CreateInterceptRule("approval-budget-fixture", "tool_name", "string", "ApprovalBudgetProbe", "ask", "fixture", 999, true, false, 60, "deny")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestExecutionCompactionFailurePreservesPreviousCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := s.AddNode("fact", map[string]any{"summary": "source fact"}, 0, "active", "test", nil)
+	b, err := s.AddNode("fact", map[string]any{"summary": "source fact"}, 0, "confirmed", "test", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

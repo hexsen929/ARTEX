@@ -46,7 +46,7 @@ func TestExecutionOutcomeRetryAndOrphanRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.outcomes.Store(id, out)
-	e.reconcileWorkerOutcomes(t.Context(), task)
+	e.reconcileWorkerOutcomesAt(t.Context(), task, time.Now())
 	if _, ok := e.outcomes.Load(id); !ok {
 		t.Fatal("rejected outcome was lost")
 	}
@@ -64,7 +64,7 @@ func TestExecutionOutcomeRetryAndOrphanRecovery(t *testing.T) {
 	out.mu.Lock()
 	out.next = time.Time{}
 	out.mu.Unlock()
-	e.reconcileWorkerOutcomes(t.Context(), task)
+	e.reconcileWorkerOutcomesAt(t.Context(), task, time.Now())
 	if _, ok := e.outcomes.Load(id); ok {
 		t.Fatal("committed outcome retained")
 	}
