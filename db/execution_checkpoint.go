@@ -98,7 +98,7 @@ func (s *ExplorationStore) appendCheckpointActivity(a Activity, token string) (i
 			cp.LastResultID = id
 		}
 		encoded, _ := json.Marshal(cp)
-		if _, err := tx.ExecContext(ctx, `UPDATE exploration_nodes SET payload=jsonb_set(payload,'{execution_checkpoint}',$1::jsonb) WHERE id=$2 AND exploration_id=$3`, string(encoded), a.NodeID, s.expID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE exploration_nodes SET payload=jsonb_set(payload,'{execution_checkpoint}',$1::jsonb)||'{"execution_history_required":true}'::jsonb WHERE id=$2 AND exploration_id=$3`, string(encoded), a.NodeID, s.expID); err != nil {
 			return 0, err
 		}
 	}

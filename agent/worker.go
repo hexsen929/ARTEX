@@ -666,7 +666,6 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 			seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
 		}
 	}
-	input += continuation
 	if message != "" {
 		if alreadyRecorded {
 			input = "继续执行上一次人工对话输入的新意图。不要重复已经完成的动作。"
@@ -678,6 +677,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 				"\n\n请优先执行这条人工输入。"
 		}
 	}
+	input += continuation
 
 	// Budgets + settlement are owned by the SDK (MaxTurns/MaxDuration + Settlement):
 	// on hit it runs a wrap-up turn and finishes with ReasonMaxTurns/ReasonTimeout.

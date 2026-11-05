@@ -1237,12 +1237,19 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			if !batch {
 				items = []intentItem{a.intentItem}
 			}
+			if len(items) > 4 {
+				return actool.Errorf("一次最多提交4项检查或续接"), nil
+			}
 
 			ids := make([]int64, len(items))
 			states := make([]map[string]any, len(items))
 			errs := map[string]string{}
 			createdAny := false
 			for i, it := range items {
+				if t.worker == "planner" && it.CheckIdentity == nil && pid(it.ContinueIntentID) <= 0 {
+					errs[strconv.Itoa(i)] = "新检查必须填写check_identity；已有检查请用continue_intent_id续接原编号"
+					continue
+				}
 				id, err := t.addOneIntent(it)
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
