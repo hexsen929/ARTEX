@@ -2519,15 +2519,25 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       return true;
     });
     const pool = D.settings.proxy_pool;
-    if (!pool.some((entry) => entry.id === previous && entry.enabled)) {
+    if (previous && !pool.some((entry) => entry.id === previous && entry.enabled)) {
       const next = pool.find((entry) => entry.enabled && entry.health !== "unhealthy-cooling") ?? pool.find((entry) => entry.enabled);
       D.settings.proxy_pool_active_id = next?.id ?? "";
       D.settings.global_proxy = next?.url ?? "";
+      D.settings.global_proxy_enabled = Boolean(next);
     }
     return { ok: true, changed, skipped: ids.size - changed, active_id: D.settings.proxy_pool_active_id ?? "", active_changed: (D.settings.proxy_pool_active_id ?? "") !== previous };
   }
   if (path.startsWith("/settings/proxy-pool/") && m === "PUT") return { entry: { ...(D.settings.proxy_pool ?? []).find((x) => x.id === path.split("/").at(-1)), ...b } };
   if (path.startsWith("/settings/proxy-pool/") && m === "DELETE") return { ok: true };
+  if (path.startsWith("/settings/proxy-pool/") && path.endsWith("/activate") && m === "POST") {
+    const id = decodeURIComponent(path.split("/").at(-2) ?? "");
+    const entry = (D.settings.proxy_pool ?? []).find((item) => item.id === id && item.enabled && item.url && item.health !== "unhealthy-cooling");
+    if (!entry) throw new Error("代理未启用或不健康");
+    D.settings.proxy_pool_active_id = entry.id;
+    D.settings.global_proxy = entry.url;
+    D.settings.global_proxy_enabled = true;
+    return { ok: true, active_id: entry.id, active_proxy: entry.url };
+  }
   if (path.startsWith("/settings/proxy-pool/") && m === "POST") return { ok: true, active_id: path.split("/").at(-1), active_proxy: "" };
   if (path === "/settings/python/detect") return { python_interpreter: "/usr/bin/python3" };
   if (path === "/chat")
