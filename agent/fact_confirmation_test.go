@@ -68,7 +68,7 @@ func TestExecutionFactConfirmationKeepsEvidenceAndScope(t *testing.T) {
 	if err := ts.ts.ConfirmFact(t.Context(), id, "late", detail.FactVersion, db.FactConfirmation{Evidence: "late", Scope: "different", Note: "late"}); err == nil {
 		t.Fatal("database accepted stale confirmation")
 	}
-	if err := ts.ts.SetNodeState(id, "rejected"); err != nil {
+	if err := ts.ts.SetNodeState(id, "dismissed"); err != nil {
 		t.Fatal(err)
 	}
 	rejected, err := ts.ts.GetNode(id)

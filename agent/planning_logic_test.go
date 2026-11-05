@@ -160,4 +160,7 @@ func TestExecutionPlannerReadinessRepairsStoredLegacyBody(t *testing.T) {
 	if !strings.Contains(text, "【规划与执行校准】") || !strings.Contains(workerSystem("", "", "/data", "/data"), "【执行与交接校准】") {
 		t.Fatal("current method was not assembled")
 	}
+	if !strings.Contains(text, "关口后功能保持未测") || !strings.Contains(workerSystem("", "", "/data", "/data"), "前端没有引用不证明后端不存在") {
+		t.Fatal("authentication and route visibility limits were lost")
+	}
 }
