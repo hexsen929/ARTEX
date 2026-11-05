@@ -216,6 +216,10 @@ func renderTriggers(ts *db.ExplorationStore, evs []TriggerEvent) string {
 			}
 			b.WriteString(fmt.Sprintf("\n- 意图 #%d 由用户删除，意图内容是：%s、删除原因是：%s。该意图已删除（不再执行）；请据此重新规划。", ev.IntentID, sm, ev.Detail))
 		default: // "done"
+			if node, err := ts.GetNode(ev.IntentID); err == nil && node != nil {
+				raw, _ := json.Marshal(compactIntents([]*db.Node{node}, nil, nil)[0])
+				b.WriteString(fmt.Sprintf("\n- 本意图的权威状态/结束原因：%s", WrapUntrustedData("worker-state", string(raw))))
+			}
 			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 结束，输出结论：%s", ev.IntentID, intentSummary(ts, ev.IntentID), WrapUntrustedData("worker-output", workerOutput(ts, ev.IntentID))))
 			if fids := factIDsYielded(ts, ev.IntentID); fids != "" {
 				b.WriteString(fmt.Sprintf("；本意图新产生的事实 id：%s ", fids))
@@ -354,9 +358,10 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 func plannerSystem(goal, dataDir, workDir string) string {
 	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
+	body = normalizePlannerReadiness(body)
 	body += executionQualityGuidance("planner")
 	body = withAgentWorkGuidance(body, "planner")
-	return body + artifactSpec(workDir) + untrustedDataRule + chainskel.PlannerMetaRules + plannerHoneypotRules
+	return body + artifactSpec(workDir) + untrustedDataRule + chainskel.PlannerMetaRules + plannerHoneypotRules + planningReadinessRules
 }
 
 // Plan runs one planning round. emit, if non-nil, receives the planner's execution

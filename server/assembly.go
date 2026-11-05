@@ -424,6 +424,11 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		if err := pg.SeedTool(s.Key, s.Desc, schema, agents); err != nil {
 			log.Printf("[tools] seed %s 失败: %v", s.Key, err)
 		}
+		if s.Key == "add_intent" {
+			if err := pg.MergePlanningToolSchema(schema); err != nil {
+				log.Printf("[tools] planning metadata migration failed")
+			}
+		}
 	}
 	// Seed the traffic host tools so they're bindable per-agent like built-ins.
 	// Default binding = worker (preserves prior behavior). Their runtime availability

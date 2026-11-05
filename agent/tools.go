@@ -24,6 +24,14 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 		var p map[string]any
 		_ = json.Unmarshal(n.Payload, &p)
 		m := map[string]any{"id": n.ID, "summary": p["summary"], "state": n.State}
+		for _, key := range []string{"worker_result", "acceptance", "prerequisites", "stop_condition", "chain_tags"} {
+			if value, ok := p[key]; ok {
+				m[key] = value
+			}
+		}
+		if n.BlockedReason != "" {
+			m["blocked_reason"] = n.BlockedReason
+		}
 		if n.Inherited {
 			m["source_task_id"] = n.SourceTaskID
 			m["inherited"] = true
@@ -416,11 +424,16 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	fr, _ := t.ts.Frontier(openIntentsCap) // priority DESC, id ASC —— 优先级最高的前 N 条；真实总数见 frontier_open
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
 	all, _ := t.ts.ListByKind(db.KindIntent, 300)
-	var running, recentDone []*db.Node
+	running, runningErr := t.ts.RunningIntents()
+	if runningErr != nil {
+		out["runtime_state_error"] = "运行状态暂不可确认；不能据此当作没有在跑工作"
+	}
+	if counts, err := t.ts.IntentExecutionCounts(); err == nil {
+		out["execution_readiness"] = counts
+	}
+	var recentDone []*db.Node
 	for _, n := range all {
 		switch n.State {
-		case "running":
-			running = append(running, n)
 		case "done", "blocked", "exhausted":
 			if hidden(n.ID) {
 				continue // in a cold_digest and still cold — shown via cold_digests (§6.2)
@@ -1123,6 +1136,16 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if len(tags) > 0 {
 		payload["chain_tags"] = tags
 	}
+	if t.worker == "planner" {
+		if len(parents) == 0 {
+			if origin, err := t.ts.OriginFactID(); err != nil {
+				return 0, err
+			} else if origin > 0 {
+				parents = []int64{origin}
+			}
+		}
+		return t.ts.AddPlannerIntent(payload, priority, anchors, parents, MaxOpenIntents)
+	}
 	id, err := t.ts.AddIntent(payload, priority, anchors, "planner")
 	if err != nil {
 		return 0, err
@@ -1144,17 +1167,24 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 }
 
 func (t *ToolSet) addIntent() actool.CoreTool {
+	properties := map[string]any{
+		"summary":        str("一个明确的测试问题：对象、判断依据与本次要解决的未知；不把整条依赖链塞进一句话"),
+		"acceptance":     str("可观察的完成证据；把准备完成、核心检查已执行、验证成立分别说明"),
+		"stop_condition": str("停止条件与尚未完成时的交接；审批、模型或环境故障不能写成测试阴性"),
+		"prerequisites":  str("本次真正需要且已具备的前置条件，写明来源节点与可复用产物；未具备则先安排前置步骤"),
+		"asset_ids":      map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本次检查的授权目标资产ID，不能用无关资产扩大范围"},
+		"parent_ids":     map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "已有fact/finding来源节点；锚点表示依据来源，不表示已证实，须核对confidence和verification_status；顶层探索留空"},
+		"priority":       intp("优先级0-10，默认5"),
+		"chain_tags":     map[string]any{"type": "array", "maxItems": 2, "items": map[string]any{"type": "string", "enum": []string{"web", "ad", "app", "priv", "pwn", "recon", "rev", "pivot", "meta"}}, "description": "主要检查类别，可选1-2个；用于选择已授权的参考资料"},
+	}
+	itemProperties := map[string]any{}
+	for key, value := range properties {
+		itemProperties[key] = value
+	}
+	properties["intents"] = map[string]any{"type": "array", "minItems": 1, "maxItems": 4, "description": "同一轮最多4个独立方向；强依赖步骤只提交前置已具备的那一步", "items": obj(itemProperties, "summary")}
 	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
-		obj(map[string]any{
-			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority/chain_tags）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
-			"acceptance": str("完成所需的可观察证据；未满足不宣称完成"), "stop_condition": str("停止条件，含受阻、范围边界和预算停止"), "prerequisites": str("执行前置条件或依赖"),
-			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
-			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
-			"priority":   intp("优先级 0-10，默认5"),
-			"chain_tags": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "攻击面链标签（可选，1-2 个，取值仅限 web/ad/app/priv/pwn/recon/rev/pivot/meta）：按该方向的主要攻击面打标，引擎据此给执行 worker 注入对应场景的反问决策骨架（场景→判据→转向）。拿不准按关键词选（sql/注入→web、域/kerberos→ad、提权→priv、隧道/代理/横向→pivot、逆向/脱壳→rev、堆/栈/ctf→pwn、侦察/指纹→recon、apk/frida/小程序→app）；实在拿不准留空，引擎按 summary 关键词自动匹配。"},
-		}),
+		obj(properties),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Intents    []intentItem `json:"intents"`
@@ -1217,7 +1247,7 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			"goal_id":     idp("目标节点 id"),
 			"evidence_id": idp("证明它的发现/事实节点 id"),
 			"reason":      str("为什么这个证据满足该目标"),
-		}, "goal_id", "evidence_id"),
+		}, "goal_id", "evidence_id", "reason"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				GoalID     json.RawMessage `json:"goal_id"`
@@ -1248,8 +1278,9 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 					return actool.Errorf(fmt.Sprintf("该发现的验证状态为 %s，暂不作为目标达成证据；记录保持保留，可补充证据后复核", status)), nil
 				}
 			}
-			_ = t.ts.Link(ev, db.RelProves, goal)
-			_ = t.ts.SetNodeState(goal, "met")
+			if err := t.ts.CommitGoalProof(goal, ev, a.Reason); err != nil {
+				return actool.Errorf("目标证据未提交：" + err.Error()), nil
+			}
 			// 每标记一个目标 met，就检查本任务是否【所有目标】都已 met；若是，自动判定
 			// 任务完成（置 GoalMet），无需再依赖模型显式调 goal_met。
 			if goals, err := t.ts.ListByKind(db.KindGoal, 1000); err == nil && len(goals) > 0 {

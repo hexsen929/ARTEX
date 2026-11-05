@@ -28,7 +28,7 @@ func TestExecutionApprovalBudgetIsNotReportedAsExplorationFailure(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { _ = d.Close() })
 	ic := intercept.New(d)
 	prior, err := ic.GetEnabledTools()
 	if err != nil {
@@ -125,7 +125,7 @@ func TestExecutionCompactionFailurePreservesPreviousCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { _ = d.Close() })
 	exp, err := d.CreateExploration("compaction failure fixture", "fixture")
 	if err != nil {
 		t.Fatal(err)

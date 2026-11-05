@@ -12,7 +12,7 @@ func TestExecutionHydraMigrationPreservesApprovalPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { _ = d.Close() })
 	const name = "[内置] 口令喷洒/爆破: hydra"
 	var id int64
 	var pattern, action string
@@ -65,7 +65,7 @@ func TestExecutionOutcomeGenerationCannotSettleNewRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { _ = d.Close() })
 	exp, err := d.CreateExploration("outcome generation", "fixture")
 	if err != nil {
 		t.Fatal(err)
