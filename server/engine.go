@@ -549,7 +549,8 @@ func (e *Engine) SteerWork(intentID int64, msg string) error {
 		return fmt.Errorf("纠偏消息不能为空")
 	}
 	e.workMu.Lock()
-	running := e.work[intentID] != nil
+	run := e.work[intentID]
+	running := run != nil && !run.finishing
 	e.workMu.Unlock()
 	if !running {
 		return fmt.Errorf("意图 %d 当前没有运行中的 work（可能已结束或未被领取）", intentID)
@@ -712,7 +713,7 @@ func (e *Engine) KillWorkAs(intentID int64, cause *agent.AbortCause) error {
 	e.workMu.Lock()
 	run := e.work[intentID]
 	e.workMu.Unlock()
-	if run == nil {
+	if run == nil || run.finishing {
 		return fmt.Errorf("意图 %d 当前没有运行中的 work（可能已结束或未被领取）", intentID)
 	}
 	run.cancel(cause)

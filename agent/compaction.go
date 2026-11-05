@@ -178,7 +178,7 @@ func (c *Compactor) minor(ctx context.Context, ts *db.ExplorationStore) {
 			uncompressed[id] = true
 		}
 	}
-	blocks := g.group(uncompressed, c.params)
+	blocks := boundedCompactionBlocks(g.group(uncompressed, c.params))
 	if len(blocks) == 0 {
 		return // this batch has no ≥2 connected/shared-parent block — nothing to fold (§7)
 	}
@@ -225,7 +225,7 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 	}
 	hot := g.hotSet()
 	elig := g.eligibleCold(g.structuralCold(hot), stamps, round, c.params)
-	blocks := g.group(elig, c.params)
+	blocks := boundedCompactionBlocks(g.group(elig, c.params))
 
 	bySig := map[string]*db.Node{}
 	for _, d := range active {
@@ -499,9 +499,9 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 		if n != nil {
 			state = n.State
 		}
-		line := fmt.Sprintf("- #%d [%s/%s] %s", m, kind, state, nodeSummary(n))
+		line := fmt.Sprintf("- #%d [%s/%s] %s", m, kind, state, compressionNodeSummary(n))
 		if conf := nodeConfidence(n); conf != "" {
-			line += fmt.Sprintf(" (confidence=%s)", conf)
+			line += fmt.Sprintf(" (confidence=%s)", boundedCompressionText(conf, 32))
 		}
 		sb.WriteString(line)
 		sb.WriteByte('\n')
@@ -523,13 +523,13 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 	}
 	if len(b.Anchors) > 0 {
 		sb.WriteString("\n【共同父 / 上下文锚（不是成员，只用于理解这些结果从哪个意图探出）】：\n")
-		for _, a := range b.Anchors {
+		for _, a := range b.Anchors[:min(8, len(b.Anchors))] {
 			n := nodeByID[a]
 			state := ""
 			if n != nil {
 				state = n.State
 			}
-			fmt.Fprintf(&sb, "- #%d [%s] %s\n", a, state, nodeSummary(n))
+			fmt.Fprintf(&sb, "- #%d [%s] %s\n", a, state, compressionNodeSummary(n))
 		}
 	}
 	return sb.String()

@@ -61,7 +61,7 @@ func (e *Engine) journalWorkerOutcome(id int64, out *pendingWorkerOutcome) error
 	if closeErr != nil {
 		return closeErr
 	}
-	target := filepath.Join(dir, fmt.Sprintf("%d.json", id))
+	target := filepath.Join(dir, fmt.Sprintf("%d-%s.json", id, out.token))
 	if err := os.Rename(f.Name(), target); err != nil {
 		return err
 	}
@@ -93,7 +93,7 @@ func (e *Engine) restoreWorkerOutcomeJournal(t *Task) error {
 			return err
 		}
 		var saved workerOutcomeRecord
-		if len(raw) > 16384 || json.Unmarshal(raw, &saved) != nil || saved.TaskID != t.ID || saved.IntentID <= 0 || saved.Token == "" || file.Name() != fmt.Sprintf("%d.json", saved.IntentID) || (saved.State != "done" && saved.State != "blocked" && saved.State != "exhausted") {
+		if len(raw) > 16384 || json.Unmarshal(raw, &saved) != nil || saved.TaskID != t.ID || saved.IntentID <= 0 || saved.Token == "" || file.Name() != fmt.Sprintf("%d-%s.json", saved.IntentID, saved.Token) || (saved.State != "done" && saved.State != "blocked" && saved.State != "exhausted") {
 			return errors.New("invalid worker outcome journal; runtime not restored")
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -94,6 +95,24 @@ func TestExecutionCompactionCanceledAndBoundedRounds(t *testing.T) {
 	c.deferCompaction(42, errors.New("anthropic: status 403 用户额度不足"))
 	if c.tryStart(42) || time.Until(c.nextRun[42]) < 29*time.Minute {
 		t.Fatal("quota failure retried without cooldown")
+	}
+	var members []int64
+	nodes := map[int64]*db.Node{}
+	for n := int64(1); n <= 101; n++ {
+		members = append(members, n)
+		raw, _ := json.Marshal(map[string]any{"summary": strings.Repeat("中", 5000)})
+		nodes[n] = &db.Node{ID: n, Kind: "fact", State: "confirmed", Payload: raw}
+	}
+	chunks := boundedCompactionBlocks([]block{{Members: members}})
+	count := 0
+	for _, chunk := range chunks {
+		count += len(chunk.Members)
+		if len(chunk.Members) < 2 || len(chunk.Members) > 24 || len(buildCompressionInput(&coldGraph{children: map[int64][]int64{}}, chunk, nodes)) > 128*1024 {
+			t.Fatal("oversized or singleton compression chunk")
+		}
+	}
+	if count != len(members) {
+		t.Fatal("chunking lost source members")
 	}
 }
 
