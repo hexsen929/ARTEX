@@ -43,9 +43,10 @@ func TestBuiltinLateralRulePatterns(t *testing.T) {
 		"nmap -p 445,3389 10.0.0.0/24",                // 常规扫描
 		"impacket-secretsdump administrator@10.0.0.5", // secretsdump 不在本批
 		"python3 exploit.py 10.0.0.5",                 // 普通脚本
+		`python3 -c 'print(data["hydra:member"])'`,
+		`{"content":"items = response.get('hydra:totalItems')"}`,
 	}
-	// 已知取舍:"cat medusa.jpg" 这类同名词文件会命中 hydra/medusa 的词边界匹配,
-	// ask(非 deny)下误伤代价是一次人工确认,可接受;不为消灭它把正则写复杂。
+	// Namespaced data must not be mistaken for executing the password tool.
 	var rules []*regexp.Regexp
 	for _, r := range builtinLateralRules {
 		re, err := regexp.Compile(r.pattern)

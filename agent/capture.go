@@ -35,6 +35,8 @@ func captureRun(ctx context.Context, opts agentcore.Options, input string, emit 
 // multiple prompts on the SAME conversation (e.g. a settlement round that reuses
 // the worker's accumulated context after the main run hit max_turns).
 func captureRunSession(ctx context.Context, s *agentcore.Session, input string, emit func(db.Activity)) (string, harness.TerminalReason, error) {
+	ctx, approvalWait := intercept.WithApprovalWait(ctx, emit)
+	defer approvalWait.Close()
 	ctx, auditTrace := intercept.WithTrace(ctx, input, approvalHistory(s.Messages()))
 	defer auditTrace.Finish()
 	var reason harness.TerminalReason
@@ -129,6 +131,14 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 		case harness.KindResult:
 			if ev.Terminal != nil {
 				ev.Terminal = normalizeCallTimeoutTerminal(ctx, ev.Terminal)
+				if ev.Terminal.Reason == harness.ReasonTimeout && ctx.Err() == nil && approvalWait.Pending() {
+					// An unanswered approval is not a failed test or exhausted
+					// exploration. Cancel it so a late click cannot execute after return.
+					approvalWait.Close()
+					ev.Terminal.Reason = harness.ReasonHookStopped
+					ev.Terminal.Err = intercept.ErrApprovalWait
+					ev.Terminal.Text = intercept.ErrApprovalWait.Error()
+				}
 				if ev.Terminal.Reason != harness.ReasonAbortedStreaming {
 					sidequestion.Finish(ctx, ev.Terminal.Messages)
 				}

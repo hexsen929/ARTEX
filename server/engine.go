@@ -104,6 +104,7 @@ type Engine struct {
 	paused   sync.Map // taskID -> bool, user-paused (planner + workers idle but loops alive)
 	deleting sync.Map // taskID -> bool, delete barrier (no new task-owned writes)
 	dropCnt  sync.Map // taskID -> *int64, running count of dropped (unpersistable) activity records
+	outcomes sync.Map // intentID -> *pendingWorkerOutcome; retry persistence, never execution
 
 	// deleteMu makes installing the delete barrier atomic with registering a new
 	// task operation. Once BeginDelete returns, every admitted writer is reflected
@@ -177,9 +178,10 @@ type taskRuntime struct {
 }
 
 type workExecution struct {
-	cancel context.CancelCauseFunc
-	done   chan error
-	action string // user action: pause | cancel
+	cancel    context.CancelCauseFunc
+	done      chan error
+	action    string // user action: pause | cancel
+	finishing bool
 }
 
 // nextPlannerRound returns the next planner round number for a task (1-based).
@@ -304,6 +306,12 @@ func (e *Engine) StopTask(taskID string) {
 	e.inflight.Delete(taskID)
 	e.coordStarted.Delete(taskID)
 	e.slotPlans.Delete(taskID)
+	e.outcomes.Range(func(key, value any) bool {
+		if value.(*pendingWorkerOutcome).taskID == taskID {
+			e.outcomes.Delete(key)
+		}
+		return true
+	})
 	e.slotState.Range(func(key, _ any) bool {
 		keyText, ok := key.(string)
 		if ok && strings.HasPrefix(keyText, taskID+"/") {
@@ -440,7 +448,7 @@ func (e *Engine) detachWork(intentID int64) (action string, complete func(error)
 	e.workMu.Lock()
 	run := e.work[intentID]
 	if run != nil {
-		delete(e.work, intentID)
+		run.finishing = true
 		action = run.action
 		run.cancel(agent.AbortWorkFinished) // release resources (no-op if already cancelled)
 	}
@@ -451,7 +459,14 @@ func (e *Engine) detachWork(intentID int64) (action string, complete func(error)
 	if run == nil {
 		return action, func(error) {}
 	}
-	return action, func(err error) { run.done <- err }
+	return action, func(err error) {
+		e.workMu.Lock()
+		if e.work[intentID] == run {
+			delete(e.work, intentID)
+		}
+		e.workMu.Unlock()
+		run.done <- err
+	}
 }
 
 // ControlWork requests a user-visible pause or cancellation and waits until the
@@ -470,7 +485,7 @@ func (e *Engine) ControlWork(ctx context.Context, intentID int64, action string)
 		e.workMu.Unlock()
 		return fmt.Errorf("%w: 意图 %d 当前没有运行中的 work（可能已结束或未被领取）", errWorkControlConflict, intentID)
 	}
-	if run.action != "" {
+	if run.action != "" || run.finishing {
 		e.workMu.Unlock()
 		return fmt.Errorf("%w: 意图 %d 正在执行 %s 操作", errWorkControlConflict, intentID, run.action)
 	}
@@ -998,6 +1013,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			return
 		}
 		defer e.decInflight(t.ID)
+		e.reconcileWorkerOutcomes(ctx, t)
 		if err := e.m.StartTaskRunSegment(t.ID); err != nil {
 			log.Printf("[runtime] task %s start segment failed: %v", t.ID, err)
 		}
@@ -1139,6 +1155,7 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, slot WorkerSlot) {
 // runIntent. Returns false when nothing was claimable. The pool worker loop is its
 // only caller.
 func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker *agent.Worker) bool {
+	e.reconcileWorkerOutcomes(ctx, t)
 	intent := e.claimNext(t, name)
 	if intent == nil {
 		return false
@@ -1178,6 +1195,15 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// per-work child context so the planner's kill_work can stop just this work.
 	workCtx, workCancel := context.WithCancelCause(ectx)
 	e.registerWork(intent.ID, workCancel)
+	bindCtx, bindCancel := context.WithTimeout(workCtx, 5*time.Second)
+	runToken, bindErr := t.Store.BindIntentRun(bindCtx, intent.ID)
+	bindCancel()
+	if bindErr != nil {
+		_, complete := e.detachWork(intent.ID)
+		complete(bindErr)
+		log.Printf("[worker %s] task %s intent #%d execution generation unavailable; no tools executed", name, t.ID, intent.ID)
+		return true
+	}
 	// wrap the guard hooks so steer_work can inject a mid-run course-correction
 	// for THIS intent (drained before the worker's next tool call).
 	iid := intent.ID
@@ -1342,8 +1368,14 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		log.Printf("[worker %s] intent %d: %v", name, intent.ID, err)
 	}
 	state, outcomeCode, outcomeMessage := workerOutcome(reason, err)
-	if stateErr := t.Store.SetIntentOutcome(intent.ID, state, outcomeCode, outcomeMessage); stateErr != nil {
-		log.Printf("[worker %s] task %s intent #%d outcome persistence failed: %v", name, t.ID, intent.ID, stateErr)
+	if stateErr := t.Store.SetIntentOutcome(intent.ID, state, outcomeCode, outcomeMessage, runToken); stateErr != nil {
+		controlErr = stateErr
+		if !errors.Is(stateErr, db.ErrIntentStateConflict) {
+			e.outcomes.Store(intent.ID, &pendingWorkerOutcome{taskID: t.ID, token: runToken, state: state, code: outcomeCode, message: outcomeMessage, worker: name})
+			e.emitActivity(t, db.Activity{NodeID: &intent.ID, Worker: name, Kind: "status", Summary: "执行已结束，结果待落库；系统将重试保存，不会重新执行操作", Detail: "termination_code=outcome_pending"})
+		}
+		log.Printf("[worker %s] task %s intent #%d outcome not committed", name, t.ID, intent.ID)
+		return true
 	}
 	e.emitActivity(t, db.Activity{NodeID: &intent.ID, Worker: name, Kind: "status", Summary: outcomeMessage, Detail: "termination_code=" + outcomeCode})
 

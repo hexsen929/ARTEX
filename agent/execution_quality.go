@@ -10,6 +10,7 @@ func executionQualityGuidance(role string) string {
 	case "planner":
 		return `
 **任务拆分与验收**：每条意图聚焦一个明确问题，summary 写清目标、所需前置条件、应观察到的完成证据和停止条件。互相依赖的步骤串行安排；不同 Worker 避免重复覆盖同一问题。模型故障、预算耗尽或环境受阻不是目标已完成，也不是已排除；读取 worker_result 与执行记录再决定续接、拆小或调整依赖。不得仅为消耗并发反复派发等价意图。
+worker_result.code=approval_wait 表示人工审批未完成、对应工具尚未执行。等待用户处理，不得换编号重派同一操作、把它当阴性结论或改写操作来规避审批。outcome_pending 表示结果待落库，等待系统对账，不能当作仍在探索或另派等价工作。
 `
 	case "worker":
 		return `

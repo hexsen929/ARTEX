@@ -710,7 +710,7 @@ func (i *Interceptor) Log(ctx context.Context, convID int64, dec Decision, toolN
 // pending record is still created (conversation_id = NULL) so the approvals
 // page shows it and the sidebar badge lights up. The worker thread blocks just
 // like in a chat session — the user must visit the approvals page to unblock it.
-func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision, toolName string, input []byte) bool {
+func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision, toolName string, input []byte) (allowed bool) {
 	if ctx.Err() != nil {
 		return false
 	}
@@ -732,6 +732,8 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 	}
 
 	i.bindResult(ctx, pendingID, audit)
+	ctx, finishWait := beginApprovalWait(ctx, pendingID, toolName)
+	defer func() { finishWait(allowed) }()
 	ch := i.pending.add(pendingID)
 	defer i.pending.remove(pendingID)
 	// Polling clients can decide after INSERT commits but before the channel is
@@ -765,7 +767,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 		// No timeout: wait indefinitely until user decides or worker stops.
 		select {
 		case allowed := <-ch:
-			return allowed
+			return allowed && ctx.Err() == nil
 		case <-ctx.Done():
 			_, _ = i.db.ResolveIntercept(pendingID, "denied", "deny", "工作已取消")
 			_ = i.db.CompleteIntercept(pendingID, audit.RunID, audit.ToolUseID, "not_executed", "执行前工作已取消", false)
@@ -781,7 +783,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 	defer timer.Stop()
 	select {
 	case allowed := <-ch:
-		return allowed
+		return allowed && ctx.Err() == nil
 	case <-timer.C:
 		allowed := dec.TimeoutAction == "allow"
 		action := "deny"
