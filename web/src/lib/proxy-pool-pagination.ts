@@ -51,5 +51,5 @@ export function proxyPoolPage<T>(entries: T[], requestedPage: number) {
 export function summarizeProxyImportErrors(errors: Array<{ line: number; error: string }>): string {
   const sample = errors.slice(0, PROXY_IMPORT_ERROR_LIMIT)
     .map((error) => `第${error.line}行：${error.error.slice(0, 160)}`).join("；");
-  return `共 ${errors.length} 行导入失败${errors.length > PROXY_IMPORT_ERROR_LIMIT ? "（仅显示前 5 条）" : ""}：${sample}`;
+  return `共 ${errors.length} 条格式错误${errors.length > PROXY_IMPORT_ERROR_LIMIT ? "（仅显示前 5 条）" : ""}：${sample}`;
 }

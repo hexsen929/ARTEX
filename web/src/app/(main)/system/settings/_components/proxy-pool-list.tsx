@@ -76,7 +76,7 @@ function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy"
           spellCheck={false}
           autoCorrect="off"
           autoCapitalize="off"
-          placeholder="每行一个代理：URL|名称|备注"
+          placeholder="代理 URL 或 IP:端口；支持 #备注、SOCKS5 分组和 URL|名称|备注"
           defaultValue={draft.current}
           onChange={(event) => {
             draft.current = event.target.value;
@@ -87,7 +87,7 @@ function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy"
           <Button type="button" size="sm" onClick={() => void submit()} disabled={busy || pending || !hasText}>
             {pending ? "导入中…" : "导入"}
           </Button>
-          <span className="text-muted-foreground">显示代理地址时会隐藏账号密码。</span>
+          <span className="text-muted-foreground">支持换行或空格分隔。裸地址默认 HTTP，随后沿用最近的明确协议；SOCKS5 列表前可单独写 socks5。# 后为备注，账号密码会掩码显示。</span>
         </div>
       </> : null}
     </div>

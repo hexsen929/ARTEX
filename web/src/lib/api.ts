@@ -1088,7 +1088,10 @@ export const api = {
     post<{
       ok: boolean;
       probe_queued: boolean;
-      errors: Array<{ line: number; input: string; error: string }>;
+      imported?: number;
+      skipped_duplicates?: number;
+      invalid?: number;
+      errors: Array<{ line: number; input: string; error: string; kind?: "duplicate" | "invalid" }>;
     }>(`/settings/proxy-pool/import?summary=1`, payload),
   updateProxyPool: (id: string, payload: Partial<Pick<ProxyPoolEntry, "url" | "name" | "remark" | "enabled">>) =>
     put<{ entry: ProxyPoolEntry }>(`/settings/proxy-pool/${encodeURIComponent(id)}`, payload),
