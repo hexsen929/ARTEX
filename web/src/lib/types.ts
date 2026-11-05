@@ -1090,6 +1090,7 @@ export interface ProxyPoolEntry {
   egress_ip?: string;
   latency_ms?: number;
   last_error?: string;
+  last_error_code?: string;
   last_checked_at?: string;
   consecutive_failures: number;
   health: "healthy" | "unhealthy-cooling" | "disabled" | string;
@@ -2222,6 +2223,7 @@ export interface EgressProbeResult {
   via_label?: string;
   latency_ms: number;
   error?: string;
+  error_code?: string;
   // 每个地址的明细：区分"连不上代理"和"代理通但出不了网"。
   probes: {
     url: string;
@@ -2229,7 +2231,17 @@ export interface EgressProbeResult {
     ip?: string;
     latency_ms: number;
     error?: string;
+    error_code?: string;
   }[];
+}
+
+export interface ProxyPoolDiagnosis {
+  id: string;
+  https: EgressProbeResult;
+  http: EgressProbeResult;
+  checked_at: string;
+  health_updated: false;
+  scope: string;
 }
 
 // 报告里的一行：① 直连 / ② 经全局代理。

@@ -129,6 +129,7 @@ type egressAttempt struct {
 	IP        string `json:"ip,omitempty"`
 	LatencyMS int64  `json:"latency_ms"`
 	Error     string `json:"error,omitempty"`
+	ErrorCode string `json:"error_code,omitempty"`
 }
 
 // egressProbeResult 是一个链路形态的探测汇总。
@@ -139,6 +140,7 @@ type egressProbeResult struct {
 	ViaLabel  string          `json:"via_label,omitempty"`
 	LatencyMS int64           `json:"latency_ms"`
 	Error     string          `json:"error,omitempty"`
+	ErrorCode string          `json:"error_code,omitempty"`
 	Probes    []egressAttempt `json:"probes"` // 每个地址的明细，便于排查
 }
 
@@ -173,7 +175,8 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 		if err != nil {
 			return egressProbeResult{
 				OK:        false,
-				Error:     maskSecrets(err.Error()),
+				Error:     "代理地址格式无效",
+				ErrorCode: "invalid_proxy_url",
 				LatencyMS: time.Since(start).Milliseconds(),
 				// 空数组不是 nil：nil 会序列化成 JSON null，前端按数组处理会炸。
 				Probes: []egressAttempt{},
@@ -201,11 +204,11 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 
 		a := egressAttempt{URL: maskSecrets(target), LatencyMS: time.Since(t0).Milliseconds()}
 		if err != nil {
-			a.Error = maskSecrets(err.Error())
+			a.ErrorCode, a.Error = classifyEgressProbeError(err)
 			// 只在证书类错误上补一句，否则连不上代理也会挂上不相干的 CA 说明。
 			// 必须写进 probes[].error——界面渲染的是它，不是 result.error。
-			if caErr != nil && strings.Contains(a.Error, "certificate") {
-				a.Error = "流量捕获的 CA 不可用（" + caErr.Error() + "）：证书错误可能由此而来。" + a.Error
+			if caErr != nil && strings.HasPrefix(a.ErrorCode, "certificate_") {
+				a.ErrorCode, a.Error = "capture_ca_unavailable", "流量捕获 CA 不可用，TLS 证书验证失败"
 			}
 		} else {
 			a.OK, a.IP = true, ip
@@ -229,9 +232,11 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 		}
 	}
 
+	errorCode, summary := summarizeEgressProbeFailures(attempts)
 	return egressProbeResult{
 		OK:        false,
-		Error:     "全部探测地址均失败",
+		Error:     summary,
+		ErrorCode: errorCode,
 		LatencyMS: time.Since(start).Milliseconds(),
 		Probes:    attempts,
 	}

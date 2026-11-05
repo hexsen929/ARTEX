@@ -7,8 +7,11 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { api } from "@/lib/api";
+import { assertProxyDiagnosis, proxyProbeStatus } from "@/lib/proxy-probe-status";
 import { filterProxyPool, PROXY_POOL_PAGE_SIZE, proxyCleanupEligible, proxyLastCheckFailed, proxyPoolPage } from "@/lib/proxy-pool-pagination";
-import type { ProxyPoolBulkRequest, ProxyPoolEntry } from "@/lib/types";
+import type { EgressProbeResult, ProxyPoolBulkRequest, ProxyPoolDiagnosis, ProxyPoolEntry } from "@/lib/types";
 
 type Props = {
   entries: ProxyPoolEntry[];
@@ -94,13 +97,52 @@ function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy"
   );
 }
 
-export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTestAll, onRefresh, onToggle, onActivate, onTest, onDelete, healthThreshold, onBulk }: Props) {
+function DiagnosisResult({ label, result }: { label: string; result: EgressProbeResult }) {
+  return <section className="space-y-2 rounded-md border p-3 text-sm">
+    <p className="font-medium">{label}：{result.ok ? "回显成功" : "失败"}</p>
+    <p className={result.ok ? "text-emerald-600" : "text-destructive"}>{result.ok ? `出口 IP：${result.exit_ip}` : result.error}</p>
+    <ul className="space-y-1 text-xs text-muted-foreground">
+      {result.probes.map((attempt, index) => <li key={index} className="break-all">{attempt.url} · {attempt.ok ? attempt.ip : attempt.error} · {attempt.latency_ms} ms</li>)}
+    </ul>
+  </section>;
+}
+
+export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onImport, onTestAll, onRefresh, onToggle, onActivate, onTest, onDelete, healthThreshold, onBulk }: Props) {
   const [query, setQuery] = React.useState("");
   const [failedOnly, setFailedOnly] = React.useState(false);
   const [requestedPage, setRequestedPage] = React.useState(1);
   const [selected, setSelected] = React.useState<Set<string>>(() => new Set());
   const [confirmation, setConfirmation] = React.useState<{ request: ProxyPoolBulkRequest; title: string; threshold: number } | null>(null);
   const submitting = React.useRef(false);
+  const [diagnosis, setDiagnosis] = React.useState<{ id: string; url: string; result?: ProxyPoolDiagnosis; error?: string } | null>(null);
+  const diagnosticRequest = React.useRef<AbortController | null>(null);
+  const [diagnosing, setDiagnosing] = React.useState(false);
+  const busy = parentBusy || diagnosing;
+  const closeDiagnosis = () => {
+    diagnosticRequest.current?.abort();
+    diagnosticRequest.current = null;
+    setDiagnosing(false);
+    setDiagnosis(null);
+  };
+  React.useEffect(() => () => { diagnosticRequest.current?.abort(); diagnosticRequest.current = null; }, []);
+  React.useEffect(() => {
+    if (diagnosis && !entries.some((entry) => entry.id === diagnosis.id && entry.url === diagnosis.url && entry.enabled)) closeDiagnosis();
+  }, [entries, diagnosis]);
+  const diagnose = async (entry: ProxyPoolEntry) => {
+    if (busy || diagnosticRequest.current) return;
+    const controller = new AbortController();
+    diagnosticRequest.current = controller;
+    setDiagnosing(true);
+    setDiagnosis({ id: entry.id, url: entry.url });
+    try {
+      const result = assertProxyDiagnosis(await api.diagnoseProxyPoolEntry(entry.id, controller.signal), entry.id);
+      if (diagnosticRequest.current === controller && !controller.signal.aborted) setDiagnosis({ id: entry.id, url: entry.url, result });
+    } catch (error) {
+      if (diagnosticRequest.current === controller && !controller.signal.aborted) setDiagnosis({ id: entry.id, url: entry.url, error: (error as Error).message });
+    } finally {
+      if (diagnosticRequest.current === controller) { diagnosticRequest.current = null; setDiagnosing(false); }
+    }
+  };
   const deferredQuery = React.useDeferredValue(query);
   const filtered = React.useMemo(() => filterProxyPool(failedOnly ? entries.filter(proxyLastCheckFailed) : entries, deferredQuery), [entries, deferredQuery, failedOnly]);
   const { items, page, pages } = proxyPoolPage(filtered, requestedPage);
@@ -207,12 +249,13 @@ export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTest
                   <p className="truncate font-mono" title={entry.url}>{entry.name ? `${entry.name} · ` : ""}{entry.url}</p>
                 </div>
                 <div>
-                  <p className="text-muted-foreground">测试出口 IP</p>
-                  <p className="break-all font-mono">{entry.egress_ip || (entry.last_error ? "探测失败" : "尚未测试")}</p>
+                  <p className="text-muted-foreground">HTTPS 测试出口 IP</p>
+                  <p className="break-all font-mono">{entry.last_error ? "最近检测失败" : entry.egress_ip || "尚未测试"}</p>
+                  {entry.last_error && entry.egress_ip ? <p className="text-muted-foreground">上次成功出口：{entry.egress_ip}</p> : null}
                 </div>
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <span className={entry.health === "healthy" ? "text-emerald-600" : entry.health === "disabled" ? "text-muted-foreground" : "text-amber-600"}>
-                    {!entry.enabled ? "已停用" : entry.health === "healthy" ? "健康" : entry.health === "unhealthy-cooling" ? "冷却中" : "待检测"}
+                  <span className={proxyProbeStatus(entry, healthThreshold).tone === "healthy" ? "text-emerald-600" : proxyProbeStatus(entry, healthThreshold).tone === "failed" ? "text-destructive" : "text-muted-foreground"}>
+                    {proxyProbeStatus(entry, healthThreshold).label}
                   </span>
                   {entry.id === activeId && <span className="text-primary">当前使用</span>}
                   <span className="text-muted-foreground">失败 {entry.consecutive_failures} 次</span>
@@ -220,18 +263,37 @@ export function ProxyPoolList({ entries, activeId, busy, draft, onImport, onTest
                 <div className="text-muted-foreground">
                   {entry.latency_ms != null ? `${entry.latency_ms} ms` : "暂无延迟数据"}
                   {entry.last_checked_at && !entry.last_checked_at.startsWith("0001-") && ` · ${new Date(entry.last_checked_at).toLocaleTimeString()}`}
-                  {entry.last_error && <span className="text-destructive"> · {entry.last_error}</span>}
+                  {entry.last_error && <span className="text-destructive"> · {entry.last_error === "全部探测地址均失败" ? "历史检测失败，点击诊断查看当前原因" : entry.last_error}</span>}
                 </div>
               </div>
             </div>
             <div className="flex justify-end gap-1">
               <Button type="button" variant="ghost" size="sm" disabled={busy || !entry.enabled || entry.id === activeId} onClick={() => onActivate(entry.id)}>使用</Button>
               <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => onTest(entry.id)}>测试</Button>
+              <Button type="button" variant="ghost" size="sm" disabled={busy || !entry.enabled} onClick={() => void diagnose(entry)}>诊断</Button>
               <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => onDelete(entry.id)}>删除</Button>
             </div>
           </div>
         ))}
       </div>
+      <Dialog open={diagnosis !== null} onOpenChange={(open) => { if (!open) closeDiagnosis(); }}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>代理 HTTP／HTTPS 诊断</DialogTitle>
+            <DialogDescription>分别访问公开出口回显服务。HTTP 回显不证明 HTTPS 可信；诊断保留证书校验，结果不修改健康状态、当前出口或任务暂停状态。</DialogDescription>
+          </DialogHeader>
+          <p className="break-all font-mono text-xs">{diagnosis?.url}</p>
+          {diagnosing ? <p role="status">正在诊断，请稍候…</p> : null}
+          {diagnosis?.error ? <p role="alert" className="text-destructive">{diagnosis.error}</p> : null}
+          {diagnosis?.result ? <div className="space-y-3">
+            <DiagnosisResult label="HTTPS（验证证书）" result={diagnosis.result.https} />
+            <DiagnosisResult label="HTTP（明文回显）" result={diagnosis.result.http} />
+            {diagnosis.result.http.ok && !diagnosis.result.https.ok ? <p className="text-amber-600 text-sm">HTTP 可用，HTTPS 检测失败。该代理尚未达到 HTTPS 健康条件。</p> : null}
+            <p className="text-muted-foreground text-xs">本次诊断：{new Date(diagnosis.result.checked_at).toLocaleString()}</p>
+          </div> : null}
+          <Button type="button" variant="outline" onClick={closeDiagnosis}>关闭诊断</Button>
+        </DialogContent>
+      </Dialog>
       <AlertDialog open={confirmation !== null} onOpenChange={(open) => { if (!open) setConfirmation(null); }}>
         <AlertDialogContent>
           <AlertDialogHeader>

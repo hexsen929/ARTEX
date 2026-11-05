@@ -51,8 +51,8 @@ const settings = {
   constraints_inject_planner: true, constraints_inject_worker: true, noa_compaction: false,
   notify_enabled: true, notify_public_base_url: "", notify_digest_interval_min: 30,
 };
-const state = { holdEgress: false, liveEgressReads: 0, peakEgressReads: 0, failBulk: false, recoverOnCleanup: "", rotateOnBulk: "", importMode: "invalid" };
-const requests = [], unexpected = new Set(), external = new Set(), errors = [], heldEgress = [];
+const state = { holdEgress: false, liveEgressReads: 0, peakEgressReads: 0, failBulk: false, recoverOnCleanup: "", rotateOnBulk: "", importMode: "invalid", holdDiagnosis: false };
+const requests = [], unexpected = new Set(), external = new Set(), errors = [], heldEgress = [], heldDiagnoses = [];
 
 function json(response, code, value) {
   if (response.destroyed || response.writableEnded) return;
@@ -164,11 +164,22 @@ async function serveAPI(request, response, url) {
     }
     return json(response, 200, { ok: true, changed, skipped: ids.size - changed, active_id: settings.proxy_pool_active_id, active_changed: settings.proxy_pool_active_id !== active });
   }
-  const entry = endpoint.match(/^\/api\/settings\/proxy-pool\/([^/]+)(?:\/(activate|test))?$/);
+  const entry = endpoint.match(/^\/api\/settings\/proxy-pool\/([^/]+)(?:\/(activate|test|diagnose))?$/);
   if (entry) {
     const id = decodeURIComponent(entry[1]);
     const found = settings.proxy_pool.find((p) => p.id === id);
     assert.ok(found, "Proxy action did not refer to a known stable ID");
+    if (entry[2] === "diagnose" && method === "POST") {
+      assert.deepEqual(body, {});
+      const report = {
+        id, health_updated: false, checked_at: "2026-11-05T00:00:00Z", scope: "fixture diagnostic",
+        https: { ok: false, error: "全部探测地址均失败：TLS 证书已过期或尚未生效", error_code: "certificate_time_invalid", latency_ms: 12,
+          probes: [{ url: "https://echo.fixture.invalid/ip", ok: false, error: "TLS 证书已过期或尚未生效", error_code: "certificate_time_invalid", latency_ms: 12 }] },
+        http: { ok: true, exit_ip: "192.0.2.5", latency_ms: 9, probes: [{ url: "http://echo.fixture.invalid/ip", ok: true, ip: "192.0.2.5", latency_ms: 9 }] },
+      };
+      if (state.holdDiagnosis) { heldDiagnoses.push({ release: () => json(response, 200, report) }); return; }
+      return json(response, 200, report);
+    }
     if (entry[2] === "activate" && method === "POST") {
       settings.proxy_pool_active_id = id; settings.global_proxy = found.url;
       return json(response, 200, { ok: true, active_id: id, active_proxy: found.url });
@@ -315,6 +326,39 @@ async function main() {
     assert.equal(settings.global_proxy, proxyEntry(17).url);
     assert.equal(callCount(`/api/settings/proxy-pool/${proxyID(17)}/activate`, "POST"), 1);
     console.log("PASS filtered row actions use stable proxy IDs and refresh the persisted route");
+
+    // The reported screenshot had one failed check still labeled untested.
+    const diagnosedEntry = settings.proxy_pool.find((entry) => entry.id === proxyID(17));
+    Object.assign(diagnosedEntry, { health: "healthy", last_error: "全部探测地址均失败", consecutive_failures: 1 });
+    await list().getByRole("button", { name: "刷新状态", exact: true }).click();
+    await selectedRow.getByText("检测失败（1/3）", { exact: true }).waitFor();
+    await selectedRow.getByText("历史检测失败，点击诊断查看当前原因", { exact: false }).waitFor();
+    assert.equal(await selectedRow.getByText("健康", { exact: true }).count(), 0);
+    assert.equal(await selectedRow.getByText("尚未检测", { exact: true }).count(), 0);
+    const beforeDiagnosis = JSON.stringify(settings);
+    const settingsReadsBeforeDiagnosis = callCount("/api/settings");
+    await selectedRow.getByRole("button", { name: "诊断", exact: true }).click();
+    const diagnosisDialog = () => page.getByRole("dialog", { name: "代理 HTTP／HTTPS 诊断", exact: true });
+    await diagnosisDialog().getByText("HTTPS（验证证书）：失败", { exact: true }).waitFor();
+    await diagnosisDialog().getByText("HTTP（明文回显）：回显成功", { exact: true }).waitFor();
+    await diagnosisDialog().getByText("HTTP 可用，HTTPS 检测失败。该代理尚未达到 HTTPS 健康条件。", { exact: true }).waitFor();
+    assert.match(await diagnosisDialog().innerText(), /证书已过期或尚未生效/);
+    assert.equal(JSON.stringify(settings), beforeDiagnosis, "HTTP-only diagnostic published healthy state or changed the exit");
+    assert.equal(callCount("/api/settings"), settingsReadsBeforeDiagnosis, "Read-only diagnosis reloaded mutable settings");
+    await diagnosisDialog().getByRole("button", { name: "关闭诊断", exact: true }).click();
+    state.holdDiagnosis = true;
+    await selectedRow.getByRole("button", { name: "诊断", exact: true }).click();
+    await eventually(() => heldDiagnoses.length === 1, "Diagnosis did not reach fixture");
+    await diagnosisDialog().getByRole("button", { name: "关闭诊断", exact: true }).click();
+    heldDiagnoses[0].release(); state.holdDiagnosis = false;
+    await list().getByRole("button", { name: "刷新状态", exact: true }).click();
+    await eventually(async () => await selectedRow.getByRole("button", { name: "诊断", exact: true }).isEnabled(), "Closing diagnostic kept the list busy");
+    assert.equal(await diagnosisDialog().count(), 0, "Late diagnosis reopened its closed modal");
+    assert.equal(callCount(`/api/settings/proxy-pool/${proxyID(17)}/diagnose`, "POST"), 2, "Diagnostic request replayed automatically");
+    Object.assign(diagnosedEntry, { last_error: "全部探测地址均失败：TLS 证书链不受信任", last_error_code: "certificate_untrusted" });
+    await list().getByRole("button", { name: "刷新状态", exact: true }).click();
+    await selectedRow.getByText("全部探测地址均失败：TLS 证书链不受信任", { exact: false }).waitFor();
+    console.log("PASS single failures have accurate labels; HTTP/HTTPS diagnosis shows TLS reasons without publishing health or replaying after close");
 
     await list().getByRole("button", { name: "批量导入代理", exact: true }).click();
     const importText = () => page.locator('textarea[aria-label="批量代理文本"]');
@@ -560,6 +604,7 @@ async function main() {
 }
 main().catch((error) => { console.error(error.message.split("\n", 1)[0], `(diagnostic characters=${error.message.length})`); process.exitCode = 1; }).finally(async () => {
   for (const held of heldEgress) held.release();
+  for (const held of heldDiagnoses) held.release();
   if (browser) await browser.close();
   server.closeAllConnections();
   if (server.listening) await new Promise((resolve) => server.close(resolve));
