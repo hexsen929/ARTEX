@@ -24,6 +24,14 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 		var p map[string]any
 		_ = json.Unmarshal(n.Payload, &p)
 		m := map[string]any{"id": n.ID, "summary": p["summary"], "state": n.State}
+		for _, key := range []string{"worker_result", "acceptance", "prerequisites", "stop_condition", "chain_tags"} {
+			if value, ok := p[key]; ok {
+				m[key] = value
+			}
+		}
+		if n.BlockedReason != "" {
+			m["blocked_reason"] = n.BlockedReason
+		}
 		if n.Inherited {
 			m["source_task_id"] = n.SourceTaskID
 			m["inherited"] = true
@@ -416,11 +424,16 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	fr, _ := t.ts.Frontier(openIntentsCap) // priority DESC, id ASC —— 优先级最高的前 N 条；真实总数见 frontier_open
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
 	all, _ := t.ts.ListByKind(db.KindIntent, 300)
-	var running, recentDone []*db.Node
+	running, runningErr := t.ts.RunningIntents()
+	if runningErr != nil {
+		out["runtime_state_error"] = "运行状态暂不可确认；不能据此当作没有在跑工作"
+	}
+	if counts, err := t.ts.IntentExecutionCounts(); err == nil {
+		out["execution_readiness"] = counts
+	}
+	var recentDone []*db.Node
 	for _, n := range all {
 		switch n.State {
-		case "running":
-			running = append(running, n)
 		case "done", "blocked", "exhausted":
 			if hidden(n.ID) {
 				continue // in a cold_digest and still cold — shown via cold_digests (§6.2)
@@ -891,6 +904,20 @@ func compactNode(n *db.Node) map[string]any {
 	var p map[string]any
 	_ = json.Unmarshal(n.Payload, &p)
 	m := map[string]any{"id": n.ID, "state": n.State, "summary": p["summary"]}
+	if n.Kind == db.KindFact {
+		m["fact_version"] = db.FactSnapshotVersion(n)
+		for _, key := range []string{"confidence", "tested_scope"} {
+			if value, ok := p[key]; ok {
+				m[key] = value
+			}
+		}
+		if scope, ok := m["tested_scope"].(string); ok && len([]rune(scope)) > 400 {
+			m["tested_scope"] = string([]rune(scope)[:400]) + "…"
+			m["tested_scope_truncated"] = true
+		}
+		verification, _ := p["verification_evidence"].(string)
+		m["has_verification_evidence"] = strings.TrimSpace(verification) != ""
+	}
 	if result, ok := p["worker_result"]; ok {
 		m["worker_result"] = result
 	}
@@ -1049,6 +1076,7 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 			if err := t.ts.PopulateFindingTrafficIDs([]*db.Node{n}); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
+			n.FactVersion = db.FactSnapshotVersion(n)
 			return jsonResult(n) // full payload incl. detail / evidence, plus explicit finding IDs
 		})
 }
@@ -1123,6 +1151,16 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if len(tags) > 0 {
 		payload["chain_tags"] = tags
 	}
+	if t.worker == "planner" {
+		if len(parents) == 0 {
+			if origin, err := t.ts.OriginFactID(); err != nil {
+				return 0, err
+			} else if origin > 0 {
+				parents = []int64{origin}
+			}
+		}
+		return t.ts.AddPlannerIntent(payload, priority, anchors, parents, MaxOpenIntents)
+	}
 	id, err := t.ts.AddIntent(payload, priority, anchors, "planner")
 	if err != nil {
 		return 0, err
@@ -1144,17 +1182,24 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 }
 
 func (t *ToolSet) addIntent() actool.CoreTool {
+	properties := map[string]any{
+		"summary":        str("一个明确的测试问题：对象、判断依据与本次要解决的未知；不把整条依赖链塞进一句话"),
+		"acceptance":     str("可观察的完成证据；把准备完成、核心检查已执行、验证成立分别说明"),
+		"stop_condition": str("停止条件与尚未完成时的交接；审批、模型或环境故障不能写成测试阴性"),
+		"prerequisites":  str("本次真正需要且已具备的前置条件，写明来源节点与可复用产物；未具备则先安排前置步骤"),
+		"asset_ids":      map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本次检查的授权目标资产ID，不能用无关资产扩大范围"},
+		"parent_ids":     map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "已有fact/finding来源节点；锚点表示依据来源，不表示已证实，须核对confidence和verification_status；顶层探索留空"},
+		"priority":       intp("优先级0-10，默认5"),
+		"chain_tags":     map[string]any{"type": "array", "maxItems": 2, "items": map[string]any{"type": "string", "enum": []string{"web", "ad", "app", "priv", "pwn", "recon", "rev", "pivot", "meta"}}, "description": "主要检查类别，可选1-2个；用于选择已授权的参考资料"},
+	}
+	itemProperties := map[string]any{}
+	for key, value := range properties {
+		itemProperties[key] = value
+	}
+	properties["intents"] = map[string]any{"type": "array", "minItems": 1, "maxItems": 4, "description": "同一轮最多4个独立方向；强依赖步骤只提交前置已具备的那一步", "items": obj(itemProperties, "summary")}
 	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
-		obj(map[string]any{
-			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority/chain_tags）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
-			"acceptance": str("完成所需的可观察证据；未满足不宣称完成"), "stop_condition": str("停止条件，含受阻、范围边界和预算停止"), "prerequisites": str("执行前置条件或依赖"),
-			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
-			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
-			"priority":   intp("优先级 0-10，默认5"),
-			"chain_tags": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "攻击面链标签（可选，1-2 个，取值仅限 web/ad/app/priv/pwn/recon/rev/pivot/meta）：按该方向的主要攻击面打标，引擎据此给执行 worker 注入对应场景的反问决策骨架（场景→判据→转向）。拿不准按关键词选（sql/注入→web、域/kerberos→ad、提权→priv、隧道/代理/横向→pivot、逆向/脱壳→rev、堆/栈/ctf→pwn、侦察/指纹→recon、apk/frida/小程序→app）；实在拿不准留空，引擎按 summary 关键词自动匹配。"},
-		}),
+		obj(properties),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Intents    []intentItem `json:"intents"`
@@ -1217,7 +1262,7 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			"goal_id":     idp("目标节点 id"),
 			"evidence_id": idp("证明它的发现/事实节点 id"),
 			"reason":      str("为什么这个证据满足该目标"),
-		}, "goal_id", "evidence_id"),
+		}, "goal_id", "evidence_id", "reason"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				GoalID     json.RawMessage `json:"goal_id"`
@@ -1248,8 +1293,9 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 					return actool.Errorf(fmt.Sprintf("该发现的验证状态为 %s，暂不作为目标达成证据；记录保持保留，可补充证据后复核", status)), nil
 				}
 			}
-			_ = t.ts.Link(ev, db.RelProves, goal)
-			_ = t.ts.SetNodeState(goal, "met")
+			if err := t.ts.CommitGoalProof(goal, ev, a.Reason); err != nil {
+				return actool.Errorf("目标证据未提交：" + err.Error()), nil
+			}
 			// 每标记一个目标 met，就检查本任务是否【所有目标】都已 met；若是，自动判定
 			// 任务完成（置 GoalMet），无需再依赖模型显式调 goal_met。
 			if goals, err := t.ts.ListByKind(db.KindGoal, 1000); err == nil && len(goals) > 0 {
@@ -1498,6 +1544,10 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, string
 	// confidence 永远落库（默认 observed）——红日3 复盘：阴性结论强制降级 inferred。
 	conf := normalizeFactConfidence(it.Confidence)
 	var note string
+	if conf == FactConfidenceConfirmed {
+		conf = FactConfidenceInferred
+		note = "事实已保存为 inferred；confirmed 需要读取 node_detail 后用 confirm_fact 保存复核证据、适用范围与判断依据。"
+	}
 	if conf == FactConfidenceObserved && isNegativeConclusion(it.Summary+"\n"+it.Detail) {
 		conf = FactConfidenceInferred
 		note = factDowngradeNote
@@ -1612,18 +1662,26 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 // （confirmed_by/confirmed_at 落进 payload），fact 必须属于本任务。
 func (t *ToolSet) confirmFact() actool.CoreTool {
 	return writeTool("confirm_fact",
-		"把一条 inferred 事实升级为 confirmed。【只有当你已用成熟工具/直接证据复核过该结论】才能调用——例如 record_fact 的阴性结论被系统自动降级后，你用 nmap/nc 等成熟工具复测坐实，再调本工具。输入 fact_id（graph_overview/list_facts 里本任务的 fact 节点 id）。",
+		"复核事实后保存确认依据。先读 node_detail，提交其 fact_version、实际复核证据、测过的范围与结论理由。工具名称、重复旧结论或只传事实编号不能代替复核。阴性结论只适用于 tested_scope，不代表其它身份、入口或条件已排除。",
 		obj(map[string]any{
-			"fact_id": idp("要升级为 confirmed 的事实节点 id（必须属于本任务）"),
-		}),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			"fact_id":               idp("要升级为 confirmed 的事实节点 id（必须属于本任务）"),
+			"fact_version":          str("node_detail 返回的 fact_version；事实变化后必须重新读取和核对"),
+			"verification_evidence": map[string]any{"type": "string", "maxLength": 12000, "description": "实际复核的请求/响应或命令输出摘要及证据位置，不得用工具名称或重复结论代替"},
+			"tested_scope":          map[string]any{"type": "string", "maxLength": 2000, "description": "实际测过的对象、身份/会话、输入与环境条件；明确哪些未测条件不在结论内"},
+			"verification_note":     map[string]any{"type": "string", "maxLength": 4000, "description": "复核证据为何支持该事实、对照和仍存在的限制；超时/模型失败/工具未执行不算反证"},
+		}, "fact_id", "fact_version", "verification_evidence", "tested_scope", "verification_note"),
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.ts == nil {
 				return actool.Errorf("confirm_fact 未启用: ExplorationStore 未初始化"), nil
 			}
 			var a struct {
-				FactID json.RawMessage `json:"fact_id"`
+				FactID      json.RawMessage `json:"fact_id"`
+				FactVersion string          `json:"fact_version"`
+				db.FactConfirmation
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("confirm_fact 参数必须是有效 JSON 对象"), nil
+			}
 			id := pid(a.FactID)
 			if id <= 0 {
 				return actool.Errorf("fact_id 必填"), nil
@@ -1632,12 +1690,15 @@ func (t *ToolSet) confirmFact() actool.CoreTool {
 			if err != nil || node == nil || node.Kind != db.KindFact {
 				return actool.Errorf("fact_id 必须是本任务的事实节点（关联任务节点只读）"), nil
 			}
+			if node.State != "confirmed" {
+				return actool.Errorf("该事实已被排除或不是可复核的观察，请重新读取 node_detail"), nil
+			}
 			var p map[string]any
 			_ = json.Unmarshal(node.Payload, &p)
-			if prev, _ := p["confidence"].(string); prev == FactConfidenceConfirmed {
-				return actool.Text(fmt.Sprintf("fact %d 已是 confirmed，无需重复确认", id)), nil
+			if prev, _ := p["confidence"].(string); prev == FactConfidenceConfirmed && a.FactVersion == "" && a.Evidence == "" && a.Scope == "" && a.Note == "" {
+				return actool.Text(fmt.Sprintf("fact %d 已是 confirmed，本次未增加复核证据；补充复核须读取 node_detail 后提交版本、证据、范围与依据", id)), nil
 			}
-			if err := t.ts.ConfirmFact(id, t.worker); err != nil {
+			if err := t.ts.ConfirmFact(ctx, id, t.worker, a.FactVersion, a.FactConfirmation); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
 			if t.notify != nil {
@@ -1998,23 +2059,9 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 			if intentNode == nil || intentNode.Kind != db.KindIntent {
 				return actool.Errorf("intent_id 不属于本任务或其直接关联任务"), nil
 			}
-			acts, _, err := t.ts.ActivityListWithSources(id, 0, 1000)
+			pick, err := t.ts.LatestIntentOutput(id)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
-			}
-			var chosen, fallback *db.Activity
-			for i := range acts {
-				switch acts[i].Kind {
-				case "result":
-					chosen = &acts[i]
-					fallback = &acts[i]
-				case "text":
-					fallback = &acts[i]
-				}
-			}
-			pick := chosen
-			if pick == nil {
-				pick = fallback
 			}
 			if pick == nil {
 				if intentNode.Inherited {
@@ -2024,13 +2071,18 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 				}
 				return actool.Text("（该 work 尚无任何输出）"), nil
 			}
-			detail, _ := t.ts.ActivityDetailWithSources(pick.ID)
+			detail := pick.Detail
 			if detail == "" {
 				detail = pick.Summary
 			}
 			result := map[string]any{
 				"intent_id": id, "final_text": detail,
 				"summary": pick.Summary, "is_error": pick.IsError,
+				"intent_state": intentNode.State, "output_at": pick.CreatedAt,
+			}
+			var payload map[string]any
+			if json.Unmarshal(intentNode.Payload, &payload) == nil {
+				result["worker_result"] = payload["worker_result"]
 			}
 			if intentNode.Inherited {
 				inheritedMap(result, intentNode.SourceTaskID)

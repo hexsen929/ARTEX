@@ -84,6 +84,8 @@ func Classify(err error) Kind {
 		return ModelUnavailable
 	}
 	switch n := Status(err); {
+	case (n == 402 || n == 403 || n == 429) && (strings.Contains(s, "用户额度不足") || strings.Contains(s, "insufficient_quota") || strings.Contains(s, "insufficient balance")):
+		return Quota
 	case n == 401 || n == 403:
 		return Auth
 	case n == 402:

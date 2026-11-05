@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -123,6 +124,7 @@ func jsonUTF16EscapeAt(b []byte, offset int) (uint16, bool) {
 
 // Node is a typed reasoning node (= old task_nodes). kind ∈ goal|intent|finding|hint.
 type Node struct {
+	FactVersion        string          `json:"fact_version,omitempty"`
 	VerificationStatus string          `json:"verification_status,omitempty"`
 	VerificationNote   string          `json:"verification_note,omitempty"`
 	EvidenceVersion    int64           `json:"evidence_version,omitempty"`
@@ -350,28 +352,6 @@ func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) e
 	return nil
 }
 
-// ConfirmFact 把本 exploration 的一条 fact 节点 confidence 升级为 confirmed，并写入审计
-// 字段（confirmed_by/confirmed_at）。scoped 到 kind='fact'，不会误改 intent/goal；无此
-// 事实时报错。content_version 与 SetNodeState 同步 bump，让已折叠 digest 的缓存体失效。
-func (s *ExplorationStore) ConfirmFact(id int64, origin string) error {
-	if origin == "" {
-		origin = "system"
-	}
-	audit, _ := json.Marshal(map[string]any{
-		"confidence":   "confirmed",
-		"confirmed_by": origin,
-		"confirmed_at": time.Now().UTC().Format(time.RFC3339),
-	})
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload = payload || $1::jsonb, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3 AND kind='fact'`, string(audit), id, s.expID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("事实不存在")
-	}
-	return nil
-}
-
 // DeleteGoal hard-deletes a goal node; scoped to kind='goal' so it can never drop
 // an intent/fact by id. The edges (spawns) and anchors reference it with ON DELETE
 // CASCADE, so they go with it; activity.node_id is ON DELETE SET NULL. Returns an
@@ -436,7 +416,8 @@ func (s *ExplorationStore) SetIntentState(id int64, state string) error {
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
 	_, err := s.db.Exec(`UPDATE exploration_nodes
 SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $4 THEN now() ELSE NULL END
-WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, terminal)
+,payload=CASE WHEN $1='running' AND state<>'running' THEN jsonb_set(payload,'{worker_run_token}',to_jsonb($5::text)) ELSE payload END
+WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, terminal, rand.Text())
 	return err
 }
 
@@ -447,7 +428,8 @@ func (s *ExplorationStore) CompareAndSetIntentState(id int64, expected, state st
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
 	res, err := s.db.Exec(`UPDATE exploration_nodes
 SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $5 THEN now() ELSE NULL END
-WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, state, id, s.expID, expected, terminal)
+,payload=CASE WHEN $1='running' AND state<>'running' THEN jsonb_set(payload,'{worker_run_token}',to_jsonb($6::text)) ELSE payload END
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, state, id, s.expID, expected, terminal, rand.Text())
 	if err != nil {
 		return false, err
 	}
@@ -1254,8 +1236,9 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exist
 
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
-WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id, s.expID)
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1,
+payload=jsonb_set(payload,'{worker_run_token}',to_jsonb($4::text))
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id, s.expID, rand.Text())
 	if err != nil {
 		return false, err
 	}

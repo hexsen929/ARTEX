@@ -39,7 +39,7 @@ func (f *frontierCapTool) Call(ctx context.Context, in json.RawMessage, tc *acto
 	if f.ts != nil {
 		if open, err := f.ts.CountOpenIntents(); err == nil && FrontierFull(open) {
 			return actool.Errorf(fmt.Sprintf(
-				"frontier 已满(%d open),先消化存量:用 kill_work 终止跑偏的在跑意图、cancel_intent 作废不再需要的 open 意图,或等 worker 消化后再派",
+				"frontier 已满(%d open)，等待现有工作，或用 cancel_intent 作废过期/重复的open；不要为腾位终止正常运行的Worker",
 				MaxOpenIntents)), nil
 		}
 	}

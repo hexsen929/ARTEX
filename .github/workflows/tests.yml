@@ -110,6 +110,13 @@ jobs:
           exit "$failed"
       - name: Go static checks
         run: go vet ./...
+      - name: Execution reliability regressions
+        run: |
+          set -euo pipefail
+          go test -race -p=1 -v ./db ./intercept ./agent ./server -run '^TestExecution' -count=1 -timeout=4m | tee "$RUNNER_TEMP/execution-reliability.log"
+          for case in ExecutionHydraMigrationPreservesApprovalPolicy ExecutionOutcomeGenerationCannotSettleNewRun ExecutionApprovalWaitCanceledRunNeverExecutesLateApproval ExecutionApprovalBudgetIsNotReportedAsExplorationFailure ExecutionCompactionCanceledAndBoundedRounds ExecutionCompactionFailurePreservesPreviousCoverage ExecutionOutcomeRetryAndOrphanRecovery ExecutionBrowserTrustPinsOnlyRecordingCA ExecutionPlannerDispatchIsAtomicAndMetadataSurvives ExecutionPlanningSchemaMigrationPreservesCustomizations ExecutionStagnationSignalsPreserveMeaningfulDifferences ExecutionPlannerReadinessRepairsStoredLegacyBody ExecutionGoalProofRejectsInferenceAndCommitsAtomically ExecutionPlannerReadsLatestOutputBeyondHistoryPage ExecutionCorruptHistoryCannotSilentlyRestartWorker ExecutionScenarioGuidanceDoesNotUndoEvidenceCalibration ExecutionStartupRecoveryFailureBlocksAllStartPaths ExecutionClaimGenerationPrecedesWorkerSetup ExecutionCompactionRejectsChangedSourceBeforePublication ExecutionFactConfirmationKeepsEvidenceAndScope ExecutionFactConfirmationSchemaPreservesPolicy; do
+            grep -q -- "^--- PASS: Test${case} " "$RUNNER_TEMP/execution-reliability.log"
+          done
       - name: MCP lifecycle concurrency regressions
         run: |
           go test -race ./server -run 'Test(LazyMCP|MCPSlotQueue|LeasedMCP|ManagerClose)' -count=1 -timeout=3m
@@ -223,6 +230,12 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/credential-ui-runtime" --no-save --package-lock=false --ignore-scripts --no-audit --no-fund playwright@1.58.2
           node "$RUNNER_TEMP/credential-ui-runtime/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Browser recording CA isolation regression
+        env:
+          ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
+        run: node scripts/browser-recording-ca-smoke.cjs
+        working-directory: web
       - name: Credential management browser regressions
         env:
           ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright

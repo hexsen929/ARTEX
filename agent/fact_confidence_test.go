@@ -175,7 +175,12 @@ func TestConfirmFact(t *testing.T) {
 	if got := factPayload(t, ts, id)["confidence"]; got != FactConfidenceInferred {
 		t.Fatalf("pre-confirm confidence=%v want inferred", got)
 	}
-	msg := callFactTool(t, ts.confirmFact(), fmt.Sprintf(`{"fact_id":%d}`, id))
+	node, err := ts.ts.GetNode(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, _ := json.Marshal(map[string]any{"fact_id": id, "fact_version": db.FactSnapshotVersion(node), "verification_evidence": "fixture connection result and control captured", "tested_scope": "fixture address, port, source and observation window only", "verification_note": "direct observation under the stated conditions; other paths untested"})
+	msg := callFactTool(t, ts.confirmFact(), string(input))
 	if !strings.Contains(msg, "confirmed") {
 		t.Fatalf("confirm_fact return: %q", msg)
 	}

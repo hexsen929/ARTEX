@@ -46,6 +46,7 @@ var (
 	stuckReRand      = regexp.MustCompile(`\b[\w+-]{24,}\b`)
 	stuckReDigits    = regexp.MustCompile(`\d+`)
 	stuckReSpace     = regexp.MustCompile(`\s+`)
+	stuckReSignal    = regexp.MustCompile(`(?i)(?:http/[0-9.]+\s+\d{3}|["']?(?:status(?:_code)?|exit(?: code)?|content-length)["']?\s*[:=]\s*\d+)`)
 )
 
 // normalizeStuckOutput 把工具输出归一化成可比较的形态:小写化后剥离时间戳、路径、
@@ -103,10 +104,11 @@ type StuckEvent struct {
 }
 
 type stuckEntry struct {
-	tool  string
-	sig   string
-	norm  string
-	isErr bool
+	tool   string
+	sig    string
+	norm   string
+	isErr  bool
+	signal string
 }
 
 // StuckDetector 是滚动停滞检测器:每条意图一个(建在 model_error 重跑循环外,重跑
@@ -135,10 +137,15 @@ func NewStuckDetector(cfg StuckConfig) *StuckDetector {
 // 上限内的同质输入照常统计(冷却一结束、仍同质可再触发,直到 MaxFires 用尽)。
 func (d *StuckDetector) Observe(tool, output string, isErr bool) *StuckEvent {
 	norm := normalizeStuckOutput(output)
+	signals := stuckReSignal.FindAllString(strings.ToLower(output), 16)
+	signal := strings.Join(signals, "|")
+	// Hash the complete bounded tool output, not just its generic header. Keep
+	// status/exit/length signals which number normalization otherwise erases.
+	sig := stuckSignature(tool, norm+"\n"+signal)
 	if d.cfg.SigPrefix > 0 && utf8.RuneCountInString(norm) > d.cfg.SigPrefix {
 		norm = string([]rune(norm)[:d.cfg.SigPrefix])
 	}
-	e := stuckEntry{tool: tool, sig: stuckSignature(tool, norm), norm: norm, isErr: isErr}
+	e := stuckEntry{tool: tool, sig: sig, norm: norm, isErr: isErr, signal: signal}
 
 	if n := len(d.recent); n > 0 && d.recent[n-1].sig == e.sig {
 		d.consecSig++
@@ -211,6 +218,9 @@ func (d *StuckDetector) failSimilar() bool {
 	latest := tail[n-1].norm
 	sum := 0.0
 	for _, e := range tail[:n-1] {
+		if e.signal != tail[n-1].signal {
+			return false
+		}
 		sum += bigramDice(e.norm, latest)
 	}
 	return sum/float64(n-1) > d.cfg.FailSimilarity
@@ -239,7 +249,7 @@ func StuckIntervention(ev StuckEvent) string {
 		tool = "?"
 	}
 	return fmt.Sprintf("【停滞检测】最近 %d 次响应%s(签名 %s,工具 %s),信息梯度为零。"+
-		"立即停止同轴重试:要么换维度(参数/信道/漏洞类/入口),要么写回 fact 标记此方向榨干并请求转向。"+
+		"暂停当前重复动作，核对是应用结果相同，还是审批/网络/模型/工具故障。此信号不证明整条方向已穷尽；仅记录实际测过的条件和未满足前提，修复前提或取得新证据后再决定是否继续。"+
 		"(本次工具调用未执行,先响应这条系统指令;这是本意图第 %d 次停滞提醒,提醒次数有限。)",
 		ev.Count, what, ev.Signature, tool, ev.N)
 }

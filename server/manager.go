@@ -1065,9 +1065,12 @@ func (m *Manager) syncBrowserMCPProxy() {
 	// reason to reactivate a browser disabled after that choice.
 	delete(env, "NODE_EXTRA_CA_CERTS")
 	if proxy != "" {
-		if u, perr := url.Parse(proxy); perr == nil && u.User != nil {
-			user := u.User.Username()
-			pass, _ := u.User.Password()
+		if u, perr := url.Parse(proxy); perr == nil && (u.User != nil || cert != "") {
+			user, pass := "", ""
+			if u.User != nil {
+				user = u.User.Username()
+				pass, _ = u.User.Password()
+			}
 			u.User = nil
 			switch {
 			case hasForeignProxyConfig(raw, cfgPath):
@@ -1076,7 +1079,7 @@ func (m *Manager) syncBrowserMCPProxy() {
 				// dropping their settings, leave the proxy unattached and warn.
 				log.Printf("[mcp] browser MCP 自带 --config，无法注入代理认证凭据；浏览器流量将不经过录制代理。请在其 config 的 browser.launchOptions.proxy 中配置 server=%s 及 username/password（口令见 data/traffic/_auth）", u.String())
 			default:
-				if err := writeBrowserMCPProxyConfig(cfgPath, u.String(), user, pass); err != nil {
+				if err := writeBrowserMCPProxyConfig(cfgPath, u.String(), user, pass, cert); err != nil {
 					log.Printf("[mcp] browser 代理同步: 写代理 config 失败: %v", err)
 				} else {
 					args = append(args, "--config", cfgPath)
@@ -1158,7 +1161,7 @@ func (m *Manager) browserMCPProxyConfigPath() string {
 // writeBrowserMCPProxyConfig persists the minimal playwright-mcp config that
 // routes the browser through a credentialed proxy. CLI args keep precedence
 // over a config file, so this only needs the proxy block.
-func writeBrowserMCPProxyConfig(path, server, username, password string) error {
+func writeBrowserMCPProxyConfig(path, server, username, password string, certPaths ...string) error {
 	cfg := map[string]any{
 		"browser": map[string]any{
 			"launchOptions": map[string]any{
@@ -1169,6 +1172,16 @@ func writeBrowserMCPProxyConfig(path, server, username, password string) error {
 				},
 			},
 		},
+	}
+	if len(certPaths) > 0 && certPaths[0] != "" {
+		pin, err := browserProxyCAPin(certPaths[0])
+		if err != nil {
+			return err
+		}
+		launch := cfg["browser"].(map[string]any)["launchOptions"].(map[string]any)
+		// Chromium has a separate verifier from Node. Trust only this recording
+		// CA's public key; unrelated certificates still fail verification.
+		launch["args"] = []string{"--ignore-certificate-errors-spki-list=" + pin}
 	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -98,12 +99,15 @@ type Engine struct {
 
 	bc *Broadcaster // live activity pub/sub (SSE)
 
-	started  sync.Map // taskID -> bool, so Run is idempotent per task
-	lastAct  sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
-	llmCalls sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
-	paused   sync.Map // taskID -> bool, user-paused (planner + workers idle but loops alive)
-	deleting sync.Map // taskID -> bool, delete barrier (no new task-owned writes)
-	dropCnt  sync.Map // taskID -> *int64, running count of dropped (unpersistable) activity records
+	started         sync.Map // taskID -> bool, so Run is idempotent per task
+	lastAct         sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
+	llmCalls        sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
+	paused          sync.Map // taskID -> bool, user-paused (planner + workers idle but loops alive)
+	deleting        sync.Map // taskID -> bool, delete barrier (no new task-owned writes)
+	dropCnt         sync.Map // taskID -> *int64, running count of dropped (unpersistable) activity records
+	outcomes        sync.Map // intentID -> *pendingWorkerOutcome; retry persistence, never execution
+	recovery        sync.Map // taskID -> *workerRecoverySchedule
+	recoveryBlocked sync.Map // taskID -> unresolved startup outcome journal; separate from user pause
 
 	// deleteMu makes installing the delete barrier atomic with registering a new
 	// task operation. Once BeginDelete returns, every admitted writer is reflected
@@ -177,9 +181,10 @@ type taskRuntime struct {
 }
 
 type workExecution struct {
-	cancel context.CancelCauseFunc
-	done   chan error
-	action string // user action: pause | cancel
+	cancel    context.CancelCauseFunc
+	done      chan error
+	action    string // user action: pause | cancel
+	finishing bool
 }
 
 // nextPlannerRound returns the next planner round number for a task (1-based).
@@ -296,6 +301,8 @@ func (e *Engine) StopTask(taskID string) {
 	e.llmCalls.Delete(taskID)
 	e.paused.Delete(taskID)
 	e.dropCnt.Delete(taskID)
+	e.recovery.Delete(taskID)
+	e.recoveryBlocked.Delete(taskID)
 	e.plannerRound.Delete(taskID)
 	e.p0Reported.Delete(taskID)
 	e.settling.Delete(taskID)
@@ -304,6 +311,15 @@ func (e *Engine) StopTask(taskID string) {
 	e.inflight.Delete(taskID)
 	e.coordStarted.Delete(taskID)
 	e.slotPlans.Delete(taskID)
+	e.outcomes.Range(func(key, value any) bool {
+		if value.(*pendingWorkerOutcome).taskID == taskID {
+			e.outcomes.Delete(key)
+		}
+		return true
+	})
+	if dir := e.outcomeJournalDir(taskID); dir != "" {
+		_ = os.RemoveAll(dir)
+	}
 	e.slotState.Range(func(key, _ any) bool {
 		keyText, ok := key.(string)
 		if ok && strings.HasPrefix(keyText, taskID+"/") {
@@ -345,7 +361,7 @@ func (e *Engine) Resume(t *Task) {
 	}
 	e.deleteMu.RLock()
 	defer e.deleteMu.RUnlock()
-	if e.IsDeleting(t.ID) {
+	if e.IsDeleting(t.ID) || e.OutcomeRecoveryBlocked(t.ID) {
 		return
 	}
 	e.paused.Delete(t.ID)
@@ -374,6 +390,9 @@ func (e *Engine) execContextFor(parent context.Context, taskID string) context.C
 
 // IsPaused reports whether a task is user-paused.
 func (e *Engine) IsPaused(taskID string) bool {
+	if e.OutcomeRecoveryBlocked(taskID) {
+		return true
+	}
 	v, ok := e.paused.Load(taskID)
 	return ok && v.(bool)
 }
@@ -440,7 +459,7 @@ func (e *Engine) detachWork(intentID int64) (action string, complete func(error)
 	e.workMu.Lock()
 	run := e.work[intentID]
 	if run != nil {
-		delete(e.work, intentID)
+		run.finishing = true
 		action = run.action
 		run.cancel(agent.AbortWorkFinished) // release resources (no-op if already cancelled)
 	}
@@ -451,7 +470,14 @@ func (e *Engine) detachWork(intentID int64) (action string, complete func(error)
 	if run == nil {
 		return action, func(error) {}
 	}
-	return action, func(err error) { run.done <- err }
+	return action, func(err error) {
+		e.workMu.Lock()
+		if e.work[intentID] == run {
+			delete(e.work, intentID)
+		}
+		e.workMu.Unlock()
+		run.done <- err
+	}
 }
 
 // ControlWork requests a user-visible pause or cancellation and waits until the
@@ -470,7 +496,7 @@ func (e *Engine) ControlWork(ctx context.Context, intentID int64, action string)
 		e.workMu.Unlock()
 		return fmt.Errorf("%w: 意图 %d 当前没有运行中的 work（可能已结束或未被领取）", errWorkControlConflict, intentID)
 	}
-	if run.action != "" {
+	if run.action != "" || run.finishing {
 		e.workMu.Unlock()
 		return fmt.Errorf("%w: 意图 %d 正在执行 %s 操作", errWorkControlConflict, intentID, run.action)
 	}
@@ -528,7 +554,8 @@ func (e *Engine) SteerWork(intentID int64, msg string) error {
 		return fmt.Errorf("纠偏消息不能为空")
 	}
 	e.workMu.Lock()
-	running := e.work[intentID] != nil
+	run := e.work[intentID]
+	running := run != nil && !run.finishing
 	e.workMu.Unlock()
 	if !running {
 		return fmt.Errorf("意图 %d 当前没有运行中的 work（可能已结束或未被领取）", intentID)
@@ -691,7 +718,7 @@ func (e *Engine) KillWorkAs(intentID int64, cause *agent.AbortCause) error {
 	e.workMu.Lock()
 	run := e.work[intentID]
 	e.workMu.Unlock()
-	if run == nil {
+	if run == nil || run.finishing {
 		return fmt.Errorf("意图 %d 当前没有运行中的 work（可能已结束或未被领取）", intentID)
 	}
 	run.cancel(cause)
@@ -835,6 +862,9 @@ func (e *Engine) Ready() bool {
 // An explicit task profile chain can be runnable even when no global default
 // provider is configured, so task status must not rely on Ready alone.
 func (e *Engine) ReadyFor(t *Task) bool {
+	if t == nil || e.OutcomeRecoveryBlocked(t.ID) {
+		return false
+	}
 	// A standalone injected resolver has no Manager settings to consult. In
 	// the server, check configuration before constructing any fallback agents.
 	if e.m != nil {
@@ -850,7 +880,7 @@ func (e *Engine) ReadyFor(t *Task) bool {
 // but no-op until an LLM is configured (so a task created while idle picks up
 // automatically once LLM is set from the UI).
 func (e *Engine) Run(ctx context.Context, t *Task) {
-	if t == nil {
+	if t == nil || e.OutcomeRecoveryBlocked(t.ID) {
 		return
 	}
 	slots, err := e.m.WorkerSlotsForTaskChecked(t)
@@ -998,6 +1028,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			return
 		}
 		defer e.decInflight(t.ID)
+		e.reconcileWorkerOutcomes(ctx, t)
 		if err := e.m.StartTaskRunSegment(t.ID); err != nil {
 			log.Printf("[runtime] task %s start segment failed: %v", t.ID, err)
 		}
@@ -1139,6 +1170,7 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, slot WorkerSlot) {
 // runIntent. Returns false when nothing was claimable. The pool worker loop is its
 // only caller.
 func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker *agent.Worker) bool {
+	e.reconcileWorkerOutcomes(ctx, t)
 	intent := e.claimNext(t, name)
 	if intent == nil {
 		return false
@@ -1178,6 +1210,15 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// per-work child context so the planner's kill_work can stop just this work.
 	workCtx, workCancel := context.WithCancelCause(ectx)
 	e.registerWork(intent.ID, workCancel)
+	bindCtx, bindCancel := context.WithTimeout(workCtx, 5*time.Second)
+	runToken, bindErr := t.Store.BindIntentRun(bindCtx, intent.ID)
+	bindCancel()
+	if bindErr != nil {
+		_, complete := e.detachWork(intent.ID)
+		complete(bindErr)
+		log.Printf("[worker %s] task %s intent #%d execution generation unavailable; no tools executed", name, t.ID, intent.ID)
+		return true
+	}
 	// wrap the guard hooks so steer_work can inject a mid-run course-correction
 	// for THIS intent (drained before the worker's next tool call).
 	iid := intent.ID
@@ -1342,8 +1383,23 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		log.Printf("[worker %s] intent %d: %v", name, intent.ID, err)
 	}
 	state, outcomeCode, outcomeMessage := workerOutcome(reason, err)
-	if stateErr := t.Store.SetIntentOutcome(intent.ID, state, outcomeCode, outcomeMessage); stateErr != nil {
-		log.Printf("[worker %s] task %s intent #%d outcome persistence failed: %v", name, t.ID, intent.ID, stateErr)
+	outcome := &pendingWorkerOutcome{taskID: t.ID, token: runToken, state: state, code: outcomeCode, message: outcomeMessage, worker: name}
+	if err := e.journalWorkerOutcome(intent.ID, outcome); err != nil {
+		log.Printf("[worker %s] task %s intent #%d outcome journal unavailable", name, t.ID, intent.ID)
+	}
+	if stateErr := t.Store.SetIntentOutcome(intent.ID, state, outcomeCode, outcomeMessage, runToken); stateErr != nil {
+		controlErr = stateErr
+		if !errors.Is(stateErr, db.ErrIntentStateConflict) {
+			e.outcomes.Store(intent.ID, outcome)
+			e.emitActivity(t, db.Activity{NodeID: &intent.ID, Worker: name, Kind: "status", Summary: "执行已结束，结果待落库；系统将重试保存，不会重新执行操作", Detail: "termination_code=outcome_pending"})
+		} else if outcome.journal != "" {
+			_ = os.Remove(outcome.journal)
+		}
+		log.Printf("[worker %s] task %s intent #%d outcome not committed", name, t.ID, intent.ID)
+		return true
+	}
+	if outcome.journal != "" {
+		_ = os.Remove(outcome.journal)
 	}
 	e.emitActivity(t, db.Activity{NodeID: &intent.ID, Worker: name, Kind: "status", Summary: outcomeMessage, Detail: "termination_code=" + outcomeCode})
 
@@ -1366,6 +1422,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 // task pause/delete/shutdown still stops it). Returns an error if the run could not
 // be started; the intent is left untouched in that case.
 func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message, agentMessage string) error {
+	if t == nil || e.OutcomeRecoveryBlocked(t.ID) {
+		return errors.New("Worker 结果恢复尚未完成，请先恢复任务")
+	}
 	if !e.beginTaskOperation(t.ID) {
 		return fmt.Errorf("task is being deleted")
 	}
