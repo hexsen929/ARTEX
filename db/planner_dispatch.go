@@ -85,7 +85,7 @@ func (s *ExplorationStore) AddPlannerIntent(payload map[string]any, priority int
 	}
 	defer tx.Rollback()
 	var exp int64
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM explorations WHERE id=$1 FOR UPDATE`, s.expID).Scan(&exp); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM explorations WHERE id=$1 FOR NO KEY UPDATE`, s.expID).Scan(&exp); err != nil {
 		return 0, err
 	}
 	var existing int64

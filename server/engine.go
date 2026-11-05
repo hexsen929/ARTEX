@@ -1191,6 +1191,7 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *agent.Worker, intent *db.Node, requestID, message string) bool {
 	hasChatMessage := message != ""
 	var runToken string
+	var missingActivity atomic.Bool
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)
 	emit := func(r db.Activity) {
@@ -1206,7 +1207,10 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		if r.Kind == "tool_result" && r.IsError && e.proxyFailure != nil && isGlobalProxyDialFailure(errors.New(r.Detail+" "+r.Summary)) {
 			e.proxyFailure(t.ID, errors.New(r.Detail+" "+r.Summary))
 		}
-		e.emitActivity(t, r)
+		saved := e.emitActivity(t, r)
+		if saved.ID == 0 && (r.Kind == "tool_use" || r.Kind == "tool_result") {
+			missingActivity.Store(true)
+		}
 	}
 	ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false) // cancellable by Pause; 带任务 deadline
 	if ectx.Err() != nil || e.IsDeleting(t.ID) {
@@ -1395,11 +1399,14 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		log.Printf("[worker %s] intent %d: %v", name, intent.ID, err)
 	}
 	state, outcomeCode, outcomeMessage := workerOutcome(reason, err)
-	outcome := &pendingWorkerOutcome{taskID: t.ID, token: runToken, state: state, code: outcomeCode, message: outcomeMessage, worker: name}
+	outcome := &pendingWorkerOutcome{taskID: t.ID, token: runToken, state: state, code: outcomeCode, message: outcomeMessage, worker: name, incomplete: missingActivity.Load()}
 	if err := e.journalWorkerOutcome(intent.ID, outcome); err != nil {
 		log.Printf("[worker %s] task %s intent #%d outcome journal unavailable", name, t.ID, intent.ID)
 	}
-	if stateErr := t.Store.SetIntentOutcome(intent.ID, state, outcomeCode, outcomeMessage, runToken); stateErr != nil {
+	persistCtx, persistCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	stateErr := t.Store.SetIntentRunOutcome(persistCtx, intent.ID, runToken, state, outcomeCode, outcomeMessage, outcome.incomplete)
+	persistCancel()
+	if stateErr != nil {
 		controlErr = stateErr
 		if !errors.Is(stateErr, db.ErrIntentStateConflict) {
 			e.outcomes.Store(intent.ID, outcome)

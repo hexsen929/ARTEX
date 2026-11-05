@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/Autumn-27/artex/db"
 )
 
 func TestExecutionOutcomeRetryAndOrphanRecovery(t *testing.T) {
@@ -80,7 +83,7 @@ func TestExecutionOutcomeRetryAndOrphanRecovery(t *testing.T) {
 	// The same durable outcome can be recovered by a fresh engine before any
 	// startup requeue, without invoking a provider or tool.
 	restoredID, restoredToken := create()
-	record := &pendingWorkerOutcome{taskID: task.ID, token: restoredToken, state: "done", code: "completed", message: "restart fixture", worker: "worker"}
+	record := &pendingWorkerOutcome{taskID: task.ID, token: restoredToken, state: "done", code: "completed", message: "restart fixture", worker: "worker", incomplete: true}
 	if err := e.journalWorkerOutcome(restoredID, record); err != nil {
 		t.Fatal(err)
 	}
@@ -89,6 +92,13 @@ func TestExecutionOutcomeRetryAndOrphanRecovery(t *testing.T) {
 	}
 	if node, _ := task.Store.GetNode(restoredID); node.State != "done" {
 		t.Fatal("restart did not restore pending outcome")
+	} else {
+		var p struct {
+			Checkpoint db.ExecutionCheckpoint `json:"execution_checkpoint"`
+		}
+		if err := json.Unmarshal(node.Payload, &p); err != nil || !p.Checkpoint.Incomplete {
+			t.Fatal("journal recovery lost incomplete checkpoint", p, err)
+		}
 	}
 	orphan, _ := create()
 	live, _ := create()
