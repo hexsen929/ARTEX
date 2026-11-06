@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   assertSettingsSnapshot,
   egressSettingsSnapshot,
+  readEgressProbeURL,
 } from "../app/(main)/system/settings/_components/settings-response.ts";
 
 const fixture = () => ({
@@ -34,7 +35,7 @@ const fixture = () => ({
   brave_key_set: false,
   tavily_key_set: false,
   workers: 3,
-  worker_pools: [],
+  egress_probe_url: "", worker_pools: [],
   global_proxy: "",
   show_egress_ip: false,
   opsec_enabled: false,
@@ -145,7 +146,7 @@ test("merged settings retain callback and inline merge cards behind the new cate
   assert.match(page, /onCheckedChange=\{\(enabled\) => void toggleInlineFindingMerge\(enabled\)\}/);
   assert.match(page, /const apply = React\.useCallback\(\(s: Settings\) => \{\s*try \{\s*assertSettingsSnapshot\(s, MAX_TASK_WORKER_COUNT\)/);
   assert.doesNotMatch(page, /setWorkerPools\(s\.worker_pools \?\? \[\]\)/);
-  assert.match(page, /页面载入和手动刷新会访问公共 IP 回显服务/);
+  assert.match(page, /未配置时使用公共 IP 回显服务/);
 });
 
 test("egress provider suppresses stale results and consumes rejected UI promises", () => {
@@ -195,4 +196,21 @@ test("proxy tests do not silently request task resume and mutations reload the p
   assert.match(page, /apply\(await api\.settings\(\)\)/);
   assert.match(page, /fieldset disabled=\{!loaded \|\| proxyPoolBusy\}/);
   assert.match(page, /api\.activateProxyPool\(id\)/);
+});
+
+
+test("saved egress service requires an explicit string; omitted is never interpreted as clear", () => {
+  assert.equal(readEgressProbeURL({ egress_probe_url: "" }), "");
+  assert.equal(readEgressProbeURL({ egress_probe_url: "http://echo.fixture.invalid/ip" }), "http://echo.fixture.invalid/ip");
+  for (const value of [null, [], {}, { egress_probe_url: null }, { egress_probe_url: false }, { egress_probe_url: 1 }]) assert.throws(() => readEgressProbeURL(value), /未确认/);
+  const page = readFileSync(new URL("../app/(main)/system/settings/page.tsx", import.meta.url), "utf8");
+  const save = page.slice(page.indexOf("const saveEgressProbeUrl ="), page.indexOf("const testEgress ="));
+  assert.match(save, /api\.setSettings\(\{ egress_probe_url: submitted \}\)/);
+  assert.match(save, /if \(confirmed !== submitted\) throw new Error/);
+  assert.doesNotMatch(save, /apply\(settings\)/);
+  assert.match(page, /if \(!egressProbeHydrated\.current\)/);
+  assert.match(save, /if \(version !== egressProbeDraftVersion\.current\) return/);
+  const probe = page.slice(page.indexOf("const testEgress ="), page.indexOf("const toggleEgressVisibility ="));
+  assert.match(probe, /probe_url: egressProbeUrl\.trim\(\)/);
+  assert.doesNotMatch(probe, /resume:\s*true/);
 });

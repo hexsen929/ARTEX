@@ -656,6 +656,11 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 	if s.m == nil || s.m.proxyPool == nil || s.proxyShuttingDown() {
 		return outcome
 	}
+	probes, err := s.m.egressProbesChecked()
+	if err != nil {
+		// An unreadable/invalid service setting is not proxy-health evidence.
+		return outcome
+	}
 	now := time.Now()
 	threshold, cooldown, healthInterval := s.m.proxyHealthConfig()
 	s.m.proxyPool.mu.Lock()
@@ -728,7 +733,7 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 						<-sem
 						continue
 					}
-					res := s.runProxyProbe(ctx, eligible[n].RawURL, "", defaultEgressProbes, proxyPoolProbeTimeout)
+					res := s.runProxyProbe(ctx, eligible[n].RawURL, "", probes, proxyPoolProbeTimeout)
 					<-sem
 					results[n] = proxyBatchProbe{entry: eligible[n], result: res, complete: true}
 				}
@@ -749,6 +754,12 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 		wg.Wait()
 		// A canceled or superseded round is not evidence of proxy failure.
 		if ctx.Err() != nil || s.proxyShuttingDown() {
+			return proxyPoolTickOutcome{}
+		}
+		if !s.m.egressProbesMatch(probes) {
+			if forceHealth {
+				s.queueProxyPoolHealth(true)
+			}
 			return proxyPoolTickOutcome{}
 		}
 		s.m.proxyPool.mu.Lock()
@@ -914,8 +925,12 @@ func (s *Server) handleProxyPoolFailure(cause error) bool {
 	if cur == "" {
 		return false
 	}
-	res := s.runProxyProbe(serverContext(s), cur, "", defaultEgressProbes, proxyPoolProbeTimeout)
-	if s.proxyShuttingDown() {
+	probes, err := s.m.egressProbesChecked()
+	if err != nil {
+		return true
+	}
+	res := s.runProxyProbe(serverContext(s), cur, "", probes, proxyPoolProbeTimeout)
+	if s.proxyShuttingDown() || !s.m.egressProbesMatch(probes) {
 		return true
 	}
 	if res.OK {
@@ -1465,14 +1480,19 @@ func (s *Server) testProxyPoolEntry(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "代理不存在")
 		return
 	}
+	probes, err := s.m.egressProbesChecked()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
 	s.m.proxyPool.mu.Lock()
 	entries := append([]proxyPoolEntry(nil), s.m.proxyPool.entries...)
 	generation := s.m.proxyPool.generation
 	s.m.proxyPool.mu.Unlock()
 	for _, e := range entries {
 		if e.ID == id && e.Enabled && strings.TrimSpace(e.RawURL) != "" {
-			res := s.runProxyProbe(r.Context(), e.RawURL, "", defaultEgressProbes, proxyPoolProbeTimeout)
-			if r.Context().Err() != nil || s.proxyShuttingDown() {
+			res := s.runProxyProbe(r.Context(), e.RawURL, "", probes, proxyPoolProbeTimeout)
+			if r.Context().Err() != nil || s.proxyShuttingDown() || !s.m.egressProbesMatch(probes) {
 				writeErr(w, http.StatusServiceUnavailable, "请求已取消或服务正在停止，结果未保存")
 				return
 			}

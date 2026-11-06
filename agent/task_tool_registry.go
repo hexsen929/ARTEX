@@ -23,12 +23,13 @@ type taskToolRegistry struct {
 type taskToolRegistryKey struct{}
 type taskToolRegistryDisabled struct{}
 
-// IsTaskDomainReadTool identifies existing native exploration readers. No
+// IsTaskDomainReadTool identifies existing native task readers. No
 // writes, execution tools or newly enabled catalog defaults are added here.
 func IsTaskDomainReadTool(name string) bool {
 	switch name {
 	case "graph_overview", "list_findings", "list_facts", "node_detail", "list_goals",
-		"get_worker_output", "get_worker_trace", "list_worker_traces", "search_all_worker_traces":
+		"get_worker_output", "get_worker_trace", "list_worker_traces", "search_all_worker_traces",
+		"list_assets", "list_companies":
 		return true
 	default:
 		return false
@@ -61,6 +62,7 @@ func WithTaskToolSet(ctx context.Context, role string, ts *ToolSet) context.Cont
 	candidates := []actool.CoreTool{
 		ts.graphOverview(), ts.listFindings(), ts.listFacts(), ts.nodeDetail(), ts.listGoals(),
 		ts.getWorkerOutput(), ts.getWorkerTrace(), ts.listWorkerTraces(), ts.searchAllWorkerTraces(),
+		ts.listAssets(), ts.listCompanies(),
 	}
 	// Respect run-local feature ceilings, including coverage opt-outs. This is
 	// deliberately separate from catalog seeding and never changes bindings.

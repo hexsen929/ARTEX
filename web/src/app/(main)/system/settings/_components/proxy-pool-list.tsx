@@ -9,7 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
-import { assertProxyDiagnosis, proxyProbeStatus } from "@/lib/proxy-probe-status";
+import { assertProxyDiagnosis, proxyDiagnosisPrimaryLabel, proxyProbeStatus } from "@/lib/proxy-probe-status";
 import { filterProxyPool, PROXY_POOL_PAGE_SIZE, proxyCleanupEligible, proxyLastCheckFailed, proxyPoolPage } from "@/lib/proxy-pool-pagination";
 import type { EgressProbeResult, ProxyPoolBulkRequest, ProxyPoolDiagnosis, ProxyPoolEntry } from "@/lib/types";
 
@@ -249,7 +249,7 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
                   <p className="truncate font-mono" title={entry.url}>{entry.name ? `${entry.name} · ` : ""}{entry.url}</p>
                 </div>
                 <div>
-                  <p className="text-muted-foreground">HTTPS 测试出口 IP</p>
+                  <p className="text-muted-foreground">探测出口 IP</p>
                   <p className="break-all font-mono">{entry.last_error ? "最近检测失败" : entry.egress_ip || "尚未测试"}</p>
                   {entry.last_error && entry.egress_ip ? <p className="text-muted-foreground">上次成功出口：{entry.egress_ip}</p> : null}
                 </div>
@@ -280,15 +280,16 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>代理 HTTP／HTTPS 诊断</DialogTitle>
-            <DialogDescription>分别访问公开出口回显服务。HTTP 回显不证明 HTTPS 可信；诊断保留证书校验，结果不修改健康状态、当前出口或任务暂停状态。</DialogDescription>
+            <DialogDescription>已保存自定义探测服务时仅访问该服务；默认模式分别访问公开 HTTP／HTTPS 回显服务。HTTP 回显不证明 HTTPS 可信；诊断保留证书校验，结果不修改健康状态、当前出口或任务暂停状态。</DialogDescription>
           </DialogHeader>
           <p className="break-all font-mono text-xs">{diagnosis?.url}</p>
           {diagnosing ? <p role="status">正在诊断，请稍候…</p> : null}
           {diagnosis?.error ? <p role="alert" className="text-destructive">{diagnosis.error}</p> : null}
           {diagnosis?.result ? <div className="space-y-3">
-            <DiagnosisResult label="HTTPS（验证证书）" result={diagnosis.result.https} />
-            <DiagnosisResult label="HTTP（明文回显）" result={diagnosis.result.http} />
-            {diagnosis.result.http.ok && !diagnosis.result.https.ok ? <p className="text-amber-600 text-sm">HTTP 可用，HTTPS 检测失败。该代理尚未达到 HTTPS 健康条件。</p> : null}
+            <DiagnosisResult label={proxyDiagnosisPrimaryLabel(diagnosis.result)} result={diagnosis.result.https} />
+            {diagnosis.result.http_skipped ? <p className="text-muted-foreground text-sm">已使用保存的探测服务，未额外访问公共 HTTP 回显地址。</p> : <DiagnosisResult label="HTTP（明文回显）" result={diagnosis.result.http} />}
+            {!diagnosis.result.http_skipped && diagnosis.result.http.ok && !diagnosis.result.https.ok ? <p className="text-amber-600 text-sm">HTTP 可用，HTTPS 检测失败。该代理尚未达到 HTTPS 健康条件。</p> : null}
+            {diagnosis.result.probe_mode === "configured" ? <p className="break-all font-mono text-xs">探测服务：{diagnosis.result.probe_url}</p> : null}
             <p className="text-muted-foreground text-xs">本次诊断：{new Date(diagnosis.result.checked_at).toLocaleString()}</p>
           </div> : null}
           <Button type="button" variant="outline" onClick={closeDiagnosis}>关闭诊断</Button>

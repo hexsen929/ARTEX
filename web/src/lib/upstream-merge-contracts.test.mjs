@@ -141,3 +141,21 @@ test("side-question query contexts survive route construction without changing c
   assert.equal(calls[2].path, "/conversations/12/side-questions?context_task=20");
   assert.equal(calls[2].options.method, "DELETE");
 });
+
+test("new tasks explicitly default global asset sharing off while metadata patches stay single-field", async () => {
+  let posted;
+  const create = method("createTask", { post: (path, body) => { posted = { path, body }; return body; } });
+  const input = { description: "fixture", goal: "fixture", sourceTaskIds: ["source-task"] };
+  create(input);
+  assert.equal(posted.path, "/tasks");
+  assert.equal(posted.body.share_global_assets, false);
+  create({ ...input, shareGlobalAssets: true });
+  assert.equal(posted.body.share_global_assets, true);
+  let changed;
+  const update = method("updateTask", { patch: (path, body) => { changed = { path, body }; return body; } });
+  const updateBody = { share_global_assets: false };
+  update("fixture-task", updateBody);
+  assert.equal(changed.path, "/tasks/fixture-task");
+  assert.equal(changed.body, updateBody);
+  assert.deepEqual(Object.keys(changed.body), ["share_global_assets"]);
+});

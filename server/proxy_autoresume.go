@@ -177,10 +177,14 @@ func (s *Server) handleProxyFailure(taskID string, cause error) {
 	if s.handleProxyPoolFailure(cause) {
 		return
 	}
-	if probe := s.runProxyProbe(serverContext(s), s.m.GlobalProxy(), "", defaultEgressProbes, 10*time.Second); probe.OK {
+	probes, err := s.m.egressProbesChecked()
+	if err != nil {
 		return
 	}
-	if s.proxyShuttingDown() {
+	if probe := s.runProxyProbe(serverContext(s), s.m.GlobalProxy(), "", probes, 10*time.Second); probe.OK {
+		return
+	}
+	if s.proxyShuttingDown() || !s.m.egressProbesMatch(probes) {
 		return
 	}
 	s.pauseProxyTask(taskID, cause)
@@ -251,10 +255,14 @@ func (s *Server) handleProxyTrafficFailure(cause error) {
 	}
 	// Confirm the saved global proxy itself before pausing. MITM RequestError can
 	// also represent a target-side failure, and those must not pause a task.
-	if probe := s.runProxyProbe(serverContext(s), s.m.GlobalProxy(), "", defaultEgressProbes, 10*time.Second); probe.OK {
+	probes, err := s.m.egressProbesChecked()
+	if err != nil {
 		return
 	}
-	if s.proxyShuttingDown() {
+	if probe := s.runProxyProbe(serverContext(s), s.m.GlobalProxy(), "", probes, 10*time.Second); probe.OK {
+		return
+	}
+	if s.proxyShuttingDown() || !s.m.egressProbesMatch(probes) {
 		return
 	}
 	for _, t := range s.m.List() {
@@ -281,10 +289,14 @@ func (s *Server) handleProxyToolFailure(ctx context.Context, cause error) {
 	if !isGlobalProxyDialFailure(cause) || strings.TrimSpace(s.m.GlobalProxy()) == "" {
 		return
 	}
-	if probe := s.runProxyProbe(serverContext(s), s.m.GlobalProxy(), "", defaultEgressProbes, 10*time.Second); probe.OK {
+	probes, err := s.m.egressProbesChecked()
+	if err != nil {
 		return
 	}
-	if s.proxyShuttingDown() {
+	if probe := s.runProxyProbe(serverContext(s), s.m.GlobalProxy(), "", probes, 10*time.Second); probe.OK {
+		return
+	}
+	if s.proxyShuttingDown() || !s.m.egressProbesMatch(probes) {
 		return
 	}
 	if info.TaskID > 0 {
@@ -332,6 +344,10 @@ func (s *Server) proxyReconnectTickContext(ctx context.Context) {
 		s.proxyReconnectSuccess()
 		return
 	}
+	probes, err := s.m.egressProbesChecked()
+	if err != nil {
+		return
+	}
 	if s.m.proxyPool != nil && len(s.m.proxyPoolEntries()) > 0 {
 		// A pool tick may confirm the active route or switch to another available
 		// member. If it cannot confirm either, retain the original #106 per-task
@@ -374,8 +390,19 @@ func (s *Server) proxyReconnectTickContext(ctx context.Context) {
 		if !claimed {
 			continue
 		}
-		res := s.runProxyProbe(ctx, s.m.GlobalProxy(), "", defaultEgressProbes, 10*time.Second)
+		res := s.runProxyProbe(ctx, s.m.GlobalProxy(), "", probes, 10*time.Second)
 		if ctx.Err() != nil {
+			return
+		}
+		if !s.m.egressProbesMatch(probes) {
+			// A settings edit/read failure is not a failed reconnect attempt.
+			// Undo only this exact claim, never a newer pause generation.
+			t.updateLifecycle(func(v *taskLifecycleState) {
+				if v.PauseReason == "paused_by_proxy" && v.ReconnectGeneration == round && v.ReconnectAttempt == attempt {
+					v.ReconnectAttempt = st.ReconnectAttempt
+					v.ReconnectNextAt = st.ReconnectNextAt
+				}
+			})
 			return
 		}
 		if res.OK {
@@ -520,7 +547,16 @@ func (s *Server) testTaskProxy(w http.ResponseWriter, r *http.Request) {
 		s.proxyReconnectSuccessWithGuards(guards, nil)
 		return
 	}
-	res := s.runProxyProbe(r.Context(), proxy, "", defaultEgressProbes, 10*time.Second)
+	probes, err := s.m.egressProbesChecked()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	res := s.runProxyProbe(r.Context(), proxy, "", probes, 10*time.Second)
+	if r.Context().Err() != nil || s.proxyShuttingDown() || !s.m.egressProbesMatch(probes) {
+		writeErr(w, http.StatusConflict, "请求已取消或出口探测服务已变更，结果已作废")
+		return
+	}
 	if res.OK {
 		s.proxyReconnectSuccessWithGuards(guards, nil)
 	}
