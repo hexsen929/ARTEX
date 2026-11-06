@@ -266,6 +266,7 @@ function mockTaskArchiveBlocker(taskID: string): string | undefined {
 
 function publicMockTask(task: Task): Task {
   const item = structuredClone(task);
+  item.share_global_assets = task.share_global_assets ?? false;
   const blocker = mockTaskArchiveBlocker(task.id);
   if (blocker) item.archive_blocked_by_task_id = blocker;
   else delete item.archive_blocked_by_task_id;
@@ -1281,6 +1282,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const categoryID = mockIntegerField(b.category_id, "category_id") ?? undefined;
     const category = categoryID === undefined ? undefined : mockTaskCategories.find((item) => item.id === categoryID);
     if (categoryID !== undefined && !category) throw new Error("任务分类不存在");
+    if (Object.hasOwn(b, "share_global_assets") && b.share_global_assets !== null && typeof b.share_global_assets !== "boolean") throw new Error("share_global_assets 必须是布尔值");
     const created: Task = {
       id,
       name,
@@ -1311,6 +1313,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       llm_failover_state: profileIDs.length ? "ready" : "default",
       source_task_ids: sourceTaskIDs,
       company_ids: companyIDs,
+      share_global_assets: b.share_global_assets === true,
     };
     const numericTaskID = nextMockTaskAssetID++;
     mockTaskAssetIDs.set(id, numericTaskID);
@@ -1499,10 +1502,12 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (has("name") && b.name !== null && typeof b.name !== "string") throw new Error("任务名称必须是字符串");
     if (has("remark") && b.remark !== null && typeof b.remark !== "string") throw new Error("备注必须是字符串");
     if (has("pinned") && b.pinned !== null && typeof b.pinned !== "boolean") throw new Error("pinned 必须是布尔值");
+    if (has("share_global_assets") && b.share_global_assets !== null && typeof b.share_global_assets !== "boolean") throw new Error("share_global_assets 必须是布尔值");
+    const sharingPresent = has("share_global_assets") && b.share_global_assets !== null;
     const namePresent = has("name") && b.name !== null;
     const remarkPresent = has("remark") && b.remark !== null;
     const pinnedPresent = has("pinned") && b.pinned !== null;
-    if (!namePresent && !remarkPresent && !pinnedPresent) throw new Error("至少需要提供 name、pinned 或 remark");
+    if (!namePresent && !remarkPresent && !pinnedPresent && !sharingPresent) throw new Error("至少需要提供 name、pinned、remark 或 share_global_assets");
     let nextName = task.name;
     let nextRemark = task.remark;
     let nextPinned = task.pinned;
@@ -1519,6 +1524,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       nextPinned = pinned;
       nextPinnedAt = pinned ? (task.pinned_at ?? new Date().toISOString()) : null;
     }
+    if (sharingPresent) task.share_global_assets = b.share_global_assets as boolean;
     task.name = nextName;
     task.remark = nextRemark;
     task.pinned = nextPinned;
@@ -2452,7 +2458,12 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (Object.hasOwn(b, "finding_verify_mode") && b.finding_verify_mode !== "auto" && b.finding_verify_mode !== "off") {
       throw new Error("finding_verify_mode 必须是 auto 或 off");
     }
+    if (Object.hasOwn(b, "egress_probe_url") && b.egress_probe_url !== null && typeof b.egress_probe_url !== "string") {
+      throw new Error("egress_probe_url 必须是字符串");
+    }
     const next = { ...D.settings, ...b };
+    if (b.egress_probe_url === null) next.egress_probe_url = D.settings.egress_probe_url;
+    else if (typeof b.egress_probe_url === "string") next.egress_probe_url = b.egress_probe_url.trim();
     for (const key of ["roe_enforcement", "llm_records_retention_days", "finding_verify_mode"] as const) {
       if (!mockRuntimeControlValid(key, next[key])) throw new Error(`${key} is invalid`);
     }
@@ -2492,11 +2503,16 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/settings/proxy-pool" && m === "GET") return { entries: D.settings.proxy_pool ?? [], active_id: D.settings.proxy_pool_active_id ?? "", active_proxy: D.settings.global_proxy ?? "", switch_log: [] };
   if (path === "/settings/proxy-pool/import" && m === "POST") return { ok: true, probe_queued: true, errors: [] };
   if (path === "/settings/proxy-pool/test-all" && m === "POST") return { ok: true, probe_queued: true };
-  if (path.endsWith("/diagnose") && path.startsWith("/settings/proxy-pool/") && m === "POST") return {
-    id: decodeURIComponent(path.split("/").at(-2) ?? ""), checked_at: new Date().toISOString(), health_updated: false, scope: "示例诊断，不访问网络",
-    https: { ok: false, error: "TLS 证书链不受信任", error_code: "certificate_untrusted", latency_ms: 12, probes: [] },
-    http: { ok: true, exit_ip: "192.0.2.5", latency_ms: 10, probes: [] },
-  };
+  if (path.endsWith("/diagnose") && path.startsWith("/settings/proxy-pool/") && m === "POST") {
+    const custom = D.settings.egress_probe_url ?? "";
+    return {
+      id: decodeURIComponent(path.split("/").at(-2) ?? ""), checked_at: new Date().toISOString(), health_updated: false, scope: "示例诊断，不访问网络",
+      probe_mode: custom ? "configured" : "default", probe_url: custom, http_skipped: !!custom,
+      https: { ok: false, error: "示例回显服务未连接；演示模式未发请求", error_code: "not_requested", latency_ms: 0, probes: [] },
+      http: custom ? { ok: false, error: "未额外请求默认公网服务", error_code: "not_requested", latency_ms: 0, probes: [] }
+        : { ok: true, exit_ip: "192.0.2.5", latency_ms: 10, probes: [] },
+    };
+  }
   if (path === "/settings/proxy-pool/bulk" && m === "POST") {
     const ids = new Set(Array.isArray(b.ids) ? b.ids : []);
     const previous = D.settings.proxy_pool_active_id ?? "";

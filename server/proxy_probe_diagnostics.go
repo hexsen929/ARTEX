@@ -128,22 +128,44 @@ func (s *Server) diagnoseProxyPoolEntry(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusNotFound, "代理不存在或已禁用")
 		return
 	}
+	probes, err := s.m.egressProbesChecked()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	custom, err := s.m.EgressProbeURLChecked()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	stopCancellation := context.AfterFunc(serverContext(s), cancel)
 	defer stopCancellation()
-	https := s.runProxyProbe(ctx, selected.RawURL, "", defaultEgressProbes, proxyPoolProbeTimeout)
-	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) {
+	primary := s.runProxyProbe(ctx, selected.RawURL, "", probes, proxyPoolProbeTimeout)
+	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) || !s.m.egressProbesMatch(probes) {
 		writeErr(w, http.StatusConflict, "请求已取消或代理配置已变更，诊断结果已作废")
 		return
 	}
-	httpResult := s.runProxyProbe(ctx, selected.RawURL, "", []string{"http://api.ipify.org?format=json"}, proxyPoolProbeTimeout)
-	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) {
+	mode := "default"
+	httpResult := egressProbeResult{Probes: []egressAttempt{}}
+	if custom == "" {
+		httpResult = s.runProxyProbe(ctx, selected.RawURL, "", []string{"http://api.ipify.org?format=json"}, proxyPoolProbeTimeout)
+	} else {
+		// Explicit custom service selection is also a network boundary: a
+		// diagnostic must not silently issue an extra request to public echoes.
+		mode = "configured"
+		httpResult.ErrorCode, httpResult.Error = "not_requested", "已配置自定义回显服务，未请求默认公网 HTTP 服务"
+	}
+	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) || !s.m.egressProbesMatch(probes) {
 		writeErr(w, http.StatusConflict, "请求已取消或代理配置已变更，诊断结果已作废")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": selected.ID, "https": https, "http": httpResult,
+		// Keep the old primary slot, but explicitly label configured HTTP so
+		// clients never infer HTTPS certificate trust from its success.
+		"id": selected.ID, "https": primary, "http": httpResult,
+		"probe_mode": mode, "probe_url": maskSecrets(custom), "http_skipped": custom != "",
 		"checked_at": time.Now(), "health_updated": false,
 		"scope": "仅诊断这条代理；HTTP 回显不证明 HTTPS 可信，不改健康状态、出口或任务暂停状态",
 	})

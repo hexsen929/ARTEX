@@ -30,6 +30,16 @@ export function readFindingVerifyMode(value: unknown): Settings["finding_verify_
   return mode;
 }
 
+// Missing is not an explicit clear: older/partial snapshots must never replace
+// a saved probe service with the default public endpoint in the editor.
+export function readEgressProbeURL(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      typeof (value as Record<string, unknown>).egress_probe_url !== "string") {
+    throw new Error("服务未返回有效的 IP 探测服务地址，当前值未确认");
+  }
+  return (value as { egress_probe_url: string }).egress_probe_url;
+}
+
 export function isRoEEnforcement(value: unknown): value is Settings["roe_enforcement"] {
   return value === "off" || value === "warn" || value === "strict";
 }
@@ -80,6 +90,7 @@ const requiredStringSettings = [
   "web_search_backend",
   "web_search_proxy",
   "global_proxy",
+  "egress_probe_url",
   "proxy_pool_active_id",
   "proxy_rotate_strategy",
   "python_interpreter",

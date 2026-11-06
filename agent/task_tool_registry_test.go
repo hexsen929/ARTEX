@@ -28,7 +28,7 @@ func taskRegistryFixture(role string) (context.Context, *ToolSet, RunInfo) {
 func TestTaskToolRegistryResolvesOnlyExistingNativeReaders(t *testing.T) {
 	for _, role := range []string{"worker", "planner", "mainagent"} {
 		ctx, _, _ := taskRegistryFixture(role)
-		for _, name := range []string{"graph_overview", "list_findings", "list_facts", "node_detail", "list_goals", "get_worker_output", "get_worker_trace", "list_worker_traces", "search_all_worker_traces"} {
+		for _, name := range []string{"graph_overview", "list_findings", "list_facts", "node_detail", "list_goals", "get_worker_output", "get_worker_trace", "list_worker_traces", "search_all_worker_traces", "list_assets", "list_companies"} {
 			tool, managed, err := TaskDomainTool(ctx, role, name)
 			if err != nil || !managed || tool == nil || tool.Name() != name || !tool.IsReadOnly(nil) {
 				t.Fatalf("%s/%s did not resolve its native reader: managed=%v err=%v", role, name, managed, err)
@@ -40,6 +40,43 @@ func TestTaskToolRegistryResolvesOnlyExistingNativeReaders(t *testing.T) {
 				t.Fatalf("%s gained a non-reader %s", role, name)
 			}
 		}
+	}
+}
+
+func TestTaskToolRegistryAssetReadersRetainExactNativeRun(t *testing.T) {
+	ctx, ts, info := taskRegistryFixture("worker")
+	for _, name := range []string{"list_assets", "list_companies"} {
+		tool, managed, err := TaskDomainTool(ctx, "worker", name)
+		if err != nil || !managed || tool == nil || !tool.IsReadOnly(nil) {
+			t.Fatalf("native asset reader %s not resolved: managed=%v err=%v", name, managed, err)
+		}
+		newRun := WithTaskToolSet(WithRunInfo(context.Background(), info), "worker", ts)
+		result, err := tool.Call(newRun, json.RawMessage(`{}`), nil)
+		if err != nil || !result.IsError {
+			t.Fatalf("old native asset reader %s was accepted in a new run", name)
+		}
+		changed := info
+		changed.TaskID++
+		result, err = tool.Call(WithRunInfo(ctx, changed), json.RawMessage(`{}`), nil)
+		if err != nil || !result.IsError {
+			t.Fatalf("native asset reader %s accepted a different task", name)
+		}
+	}
+}
+
+func TestTaskDomainAssetFactoryHasNoExplorationCapabilities(t *testing.T) {
+	ts := NewToolSet(nil, "associated-chat")
+	ts.SetTaskID(117)
+	tools := ts.AssetDomainTools()
+	var names []string
+	for _, tool := range tools {
+		names = append(names, tool.Name())
+		if tool.Name() != "insert_assets" && !tool.IsReadOnly(nil) {
+			t.Fatalf("asset factory returned a non-reader %s", tool.Name())
+		}
+	}
+	if !reflect.DeepEqual(names, []string{"insert_assets", "list_assets", "list_companies"}) || ts.ts != nil {
+		t.Fatal("asset factory granted exploration capabilities")
 	}
 }
 
