@@ -175,8 +175,8 @@ func (s *Server) finishProxyProbeRound(round *proxyProbeRound, state string) {
 	if round.State == "running" {
 		round.State = state
 		round.FinishedAt = time.Now()
-		round.Running = 0
 	}
+	round.Running = 0
 	if round.cancel != nil {
 		round.cancel()
 	}

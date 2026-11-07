@@ -206,7 +206,7 @@ func TestProxyPoolProgressCancelLeavesHealthUnchanged(t *testing.T) {
 			t.Fatal("cancellation changed health")
 		}
 	}
-	if m.proxyPool.probeRound.State != "cancelled" {
+	if m.proxyPool.probeRound.State != "cancelled" || m.proxyPool.probeRound.Running != 0 {
 		t.Fatal(m.proxyPool.probeRound.State)
 	}
 }

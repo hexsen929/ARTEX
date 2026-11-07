@@ -816,6 +816,11 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 			return proxyPoolTickOutcome{}
 		}
 		confirmed, err := s.m.applyProxyProbeBatchLocked(results, threshold)
+		if err == nil {
+			round.State = "completed"
+			round.FinishedAt = time.Now()
+			round.Running = 0
+		}
 		s.m.proxyPool.mu.Unlock()
 		if err != nil {
 			// Persist failures do not authorize a route change or an all-pool pause.
