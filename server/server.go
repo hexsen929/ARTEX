@@ -150,17 +150,19 @@ type Server struct {
 
 	// Cold task archives run through one persistent FIFO worker. The buffered wake
 	// channel coalesces enqueue bursts; the database remains the source of truth.
-	archiveWake       chan struct{}
-	archiveWG         sync.WaitGroup
-	credentialWake    chan struct{}
-	proxyReconnect    proxyReconnectSupervisor
-	proxyPoolWake     chan struct{}
-	proxyPoolWG       sync.WaitGroup
-	proxyCallbackWG   sync.WaitGroup
-	proxyCtx          context.Context
-	proxyCancel       context.CancelFunc
-	proxyPoolProbeSem chan struct{}
-	proxyPoolTickMu   sync.Mutex
+	archiveWake          chan struct{}
+	archiveWG            sync.WaitGroup
+	credentialWake       chan struct{}
+	proxyReconnect       proxyReconnectSupervisor
+	proxyPoolWake        chan struct{}
+	proxyPoolWG          sync.WaitGroup
+	proxyCallbackWG      sync.WaitGroup
+	proxyCtx             context.Context
+	proxyCancel          context.CancelFunc
+	proxyPoolProbeSem    chan struct{}
+	proxyPoolTickMu      sync.Mutex
+	proxyInteractiveOnce sync.Once
+	proxyInteractiveSem  chan struct{}
 	// proxyProbe is injectable for deterministic reconnect race tests. Production
 	// servers leave it nil and use probeEgress directly.
 	proxyProbe func(context.Context, string, string, []string, time.Duration) egressProbeResult
@@ -1190,6 +1192,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/settings/proxy-pool/{id}/test", s.testProxyPoolEntry)
 	mux.HandleFunc("POST /api/settings/proxy-pool/{id}/diagnose", s.diagnoseProxyPoolEntry)
 	mux.HandleFunc("POST /api/settings/proxy-pool/test-all", s.testAllProxyPool)
+	mux.HandleFunc("GET /api/settings/proxy-pool/progress", s.getProxyProbeProgress)
+	mux.HandleFunc("POST /api/settings/proxy-pool/cancel-tests", s.cancelProxyPoolTests)
 	mux.HandleFunc("POST /api/settings/proxy-pool/{id}/activate", s.activateProxyPool)
 	mux.HandleFunc("POST /api/tasks/{id}/proxy/test", s.testTaskProxy)
 	mux.HandleFunc("GET /api/report", s.getReport)

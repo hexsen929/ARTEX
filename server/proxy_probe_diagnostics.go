@@ -95,16 +95,11 @@ func summarizeEgressProbeFailures(attempts []egressAttempt) (string, string) {
 // Diagnostics never publish health, persist settings, switch routes, or release
 // paused tasks. Plain HTTP is a separate explicit check, not a TLS fallback.
 func (s *Server) diagnoseProxyPoolEntry(w http.ResponseWriter, r *http.Request) {
-	if !s.proxyPoolTickMu.TryLock() {
-		writeErr(w, http.StatusConflict, "批量探测中，请稍后诊断单条代理")
+	release, ok := s.beginInteractiveProxyProbe(w)
+	if !ok {
 		return
 	}
-	defer s.proxyPoolTickMu.Unlock()
-	if !s.beginProxyCallback() {
-		writeErr(w, http.StatusServiceUnavailable, "服务正在停止，诊断未执行")
-		return
-	}
-	defer s.proxyCallbackWG.Done()
+	defer release()
 	if r.Context().Err() != nil || s.proxyShuttingDown() {
 		writeErr(w, http.StatusServiceUnavailable, "请求已取消或服务正在停止，诊断未执行")
 		return

@@ -1094,6 +1094,8 @@ export interface Settings {
 }
 
 export interface ProxyPoolEntry {
+  protocol_auto?: boolean;
+  detected_protocol?: string;
   id: string;
   url: string;
   name?: string;
@@ -1106,6 +1108,18 @@ export interface ProxyPoolEntry {
   last_checked_at?: string;
   consecutive_failures: number;
   health: "healthy" | "unhealthy-cooling" | "disabled" | string;
+}
+
+export interface ProxyProbeProgress {
+  id: number;
+  state: "idle" | "queued" | "running" | "completed" | "cancelled" | "superseded" | "save_failed";
+  total: number;
+  completed: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  concurrency: number;
+  items: Record<string, { state: string; ok: boolean; error?: string; ip?: string; protocol?: string; latency_ms?: number }>;
 }
 
 export interface ProxySwitchLog { at: string; from: string; to: string; reason: string }

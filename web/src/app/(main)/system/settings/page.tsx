@@ -527,10 +527,10 @@ export default function SystemSettingsPage() {
       setProxyPoolBusy(false);
     }
   };
-  const importProxyPool = async (text: string) => {
+  const importProxyPool = async (text: string, protocol: string) => {
     const response: { value?: Awaited<ReturnType<typeof api.importProxyPool>> } = {};
     const confirmed = await runProxyPoolOperation(async () => {
-      response.value = await api.importProxyPool({ text });
+      response.value = await api.importProxyPool({ text, default_protocol: protocol });
       assessProxyImportReply(response.value);
     });
     const result = response.value;
@@ -543,7 +543,7 @@ export default function SystemSettingsPage() {
       if (added! > 0) toast.success(summary); else toast.info(summary);
     } else if (!result.errors.length) toast.success("代理池已导入");
     if (invalidErrors.length) toast.error(summarizeProxyImportErrors(invalidErrors));
-    if (probeQueued) toast.info("代理探测已排队，稍后点击“刷新状态”查看结果");
+    if (probeQueued) toast.info("代理探测已排队，下方自动显示进度");
     return clearDraft;
   };
   const saveProxyPoolStrategy = () => {
@@ -568,21 +568,21 @@ export default function SystemSettingsPage() {
       })
       .catch((e) => toast.error("保存失败：" + (e as Error).message));
   };
-  const testAllProxyPool = () => void (async () => {
-    const response: { value?: Awaited<ReturnType<typeof api.testAllProxyPool>> } = {};
-    const confirmed = await runProxyPoolOperation(async () => {
-      response.value = await api.testAllProxyPool();
-      if (response.value.ok !== true || response.value.probe_queued !== true) {
-        throw new Error("服务未确认后台探测排队，请刷新状态后核对");
-      }
-    });
-    const result = response.value;
-    if (confirmed && result) {
-      toast.success("全部代理探测已排队，稍后点击“刷新状态”查看结果");
-    }
-  })();
+  const testAllProxyPool = async () => {
+    try {
+      const response = await api.testAllProxyPool();
+      if (!response.ok || !response.probe_queued) throw new Error("服务未确认测试排队");
+      toast.success("代理测试已排队，进度会自动更新");
+    } catch (error) { toast.error("测试未启动：" + (error as Error).message); }
+  };
+  const applyPoolSnapshot = (snapshot: Awaited<ReturnType<typeof api.proxyPool>>) => {
+    setProxyPool(snapshot.entries); setProxyPoolActiveId(snapshot.active_id);
+  };
   const refreshProxyPool = () => void runProxyPoolOperation(async () => undefined, "已刷新代理状态");
-  const testOneProxyPool = (id: string) => void runProxyPoolOperation(() => api.testProxyPoolEntry(id));
+  const testOneProxyPool = async (id: string) => {
+    try { await api.testProxyPoolEntry(id); applyPoolSnapshot(await api.proxyPool()); }
+    catch (error) { toast.error("单条测试未完成：" + (error as Error).message); }
+  };
   const toggleProxyPoolEntry = (entry: ProxyPoolEntry) =>
     void runProxyPoolOperation(() => api.updateProxyPool(entry.id, { enabled: !entry.enabled }));
   const deleteProxyPoolEntry = (id: string) =>
@@ -1157,6 +1157,7 @@ export default function SystemSettingsPage() {
                     draft={proxyPoolDraft}
                     onImport={importProxyPool}
                     onTestAll={testAllProxyPool}
+                    onSnapshot={applyPoolSnapshot}
                     onRefresh={refreshProxyPool}
                     onToggle={toggleProxyPoolEntry}
                     onActivate={activateProxyPoolEntry}

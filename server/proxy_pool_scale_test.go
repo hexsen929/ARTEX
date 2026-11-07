@@ -234,16 +234,19 @@ func TestProxyPoolCanceledOrSupersededRoundDoesNotPublish(t *testing.T) {
 }
 
 func TestProxyPoolSingleProbeDoesNotWaitBehindBatch(t *testing.T) {
-	m := &Manager{proxyPool: &proxyPoolState{entries: proxyScaleEntries(1000)}}
+	m := &Manager{proxyPool: &proxyPoolState{entries: proxyScaleEntries(1), disabled: true}}
 	s := &Server{m: m}
 	s.proxyPoolTickMu.Lock()
 	defer s.proxyPoolTickMu.Unlock()
+	s.proxyProbe = func(context.Context, string, string, []string, time.Duration) egressProbeResult {
+		return egressProbeResult{OK: true, ExitIP: "192.0.2.1"}
+	}
 	r := httptest.NewRequest(http.MethodPost, "/api/settings/proxy-pool/scale-0/test", nil)
 	r.SetPathValue("id", "scale-0")
 	w := httptest.NewRecorder()
 	s.testProxyPoolEntry(w, r)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("single probe queued behind running batch: status=%d", w.Code)
+	if w.Code != http.StatusOK || m.proxyPoolEntries()[0].Health != "healthy" {
+		t.Fatalf("single probe blocked by batch: %d", w.Code)
 	}
 }
 
