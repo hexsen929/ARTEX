@@ -65,6 +65,7 @@ func (s *Server) beginInteractiveProxyProbe(w http.ResponseWriter) (func(), bool
 // Progress contains only visible IDs (at most one UI page). It never contains
 // endpoint credentials or the full pool and is not a durable health snapshot.
 func (s *Server) getProxyProbeProgress(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	out := proxyProbeRound{State: "idle", Items: map[string]proxyProbeItem{}, Concurrency: proxyPoolMaxProbeConcurrency}
 	if s.m != nil && s.m.proxyPool != nil {
 		pool := s.m.proxyPool

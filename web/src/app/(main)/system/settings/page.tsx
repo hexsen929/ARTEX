@@ -67,6 +67,7 @@ export default function SystemSettingsPage() {
   const [proxyInput, setProxyInput] = React.useState("");
   const [savingProxy, setSavingProxy] = React.useState(false);
   const [globalProxyInput, setGlobalProxyInput] = React.useState("");
+  const savedGlobalProxy = React.useRef("");
   const [globalProxyEnabled, setGlobalProxyEnabled] = React.useState(false);
   const [proxyPoolBusy, setProxyPoolBusy] = React.useState(false);
   const [proxyPool, setProxyPool] = React.useState<ProxyPoolEntry[]>([]);
@@ -153,7 +154,7 @@ export default function SystemSettingsPage() {
     setTavilyKeySet(s.tavily_key_set);
     setDeepSeekKeySet(s.deepseek_search_key_set);
     if (typeof s.web_search_proxy === "string") setProxyInput(s.web_search_proxy);
-    if (typeof s.global_proxy === "string") setGlobalProxyInput(s.global_proxy);
+    if (typeof s.global_proxy === "string") { setGlobalProxyInput(s.global_proxy); savedGlobalProxy.current = s.global_proxy; }
     setGlobalProxyEnabled(s.global_proxy_enabled ?? Boolean(s.global_proxy?.trim()));
     setProxyPool(s.proxy_pool!);
     setProxyPoolActiveId(s.proxy_pool_active_id!);
@@ -579,6 +580,10 @@ export default function SystemSettingsPage() {
   };
   const applyPoolSnapshot = (snapshot: Awaited<ReturnType<typeof api.proxyPool>>) => {
     setProxyPool(snapshot.entries); setProxyPoolActiveId(snapshot.active_id);
+    const previous = savedGlobalProxy.current;
+    setGlobalProxyInput((draft) => draft === previous ? snapshot.active_proxy : draft);
+    savedGlobalProxy.current = snapshot.active_proxy;
+    setGlobalProxyEnabled(Boolean(snapshot.active_proxy)); setProxyPoolLogs(snapshot.switch_log);
   };
   const refreshProxyPool = () => void runProxyPoolOperation(async () => undefined, "已刷新代理状态");
   const testOneProxyPool = async (id: string) => {
