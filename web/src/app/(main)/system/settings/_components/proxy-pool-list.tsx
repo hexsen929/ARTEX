@@ -9,9 +9,9 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
-import { assertProxyDiagnosis, proxyProbeStatus } from "@/lib/proxy-probe-status";
+import { assertProxyDiagnosis, proxyProbeStatus, proxyProtocolStatus } from "@/lib/proxy-probe-status";
 import { filterProxyPool, PROXY_POOL_PAGE_SIZE, proxyCleanupEligible, proxyLastCheckFailed, proxyPoolPage } from "@/lib/proxy-pool-pagination";
-import type { EgressProbeResult, ProxyPoolBulkRequest, ProxyPoolDiagnosis, ProxyPoolEntry, ProxyProbeProgress } from "@/lib/types";
+import type { EgressProbeResult, ProxyCapabilityCheck, ProxyProtocolCheck, ProxyPoolBulkRequest, ProxyPoolDiagnosis, ProxyPoolEntry, ProxyProbeProgress } from "@/lib/types";
 
 type Props = {
   entries: ProxyPoolEntry[];
@@ -114,6 +114,19 @@ function DiagnosisResult({ label, result }: { label: string; result: EgressProbe
       {result.probes.map((attempt, index) => <li key={index} className="break-all">{attempt.url} · {attempt.ok ? attempt.ip : attempt.error} · {attempt.latency_ms} ms</li>)}
     </ul>
   </section>;
+}
+
+function capabilityLabel(check: ProxyCapabilityCheck) {
+  if (!check.checked) return "未执行";
+  return check.ok ? `回显通过 · ${check.ip}` : check.error || "未通过";
+}
+
+function ProtocolChecks({ checks }: { checks: ProxyProtocolCheck[] }) {
+  return <div className="space-y-2" data-testid="proxy-protocol-checks">{checks.map((check) => <section key={check.protocol} className="rounded-md border p-2 text-xs">
+    <p className="font-medium">代理协议 {check.protocol.toUpperCase()}：{check.recognized ? "已识别" : "未确认"}{!check.supported ? " · 暂不支持转发" : ""}</p>
+    <p className="text-muted-foreground">{check.evidence}</p>
+    {check.supported ? <><p>访问 HTTPS 网站（校验证书）：{capabilityLabel(check.https)}</p><p>访问 HTTP 网站（明文回显）：{capabilityLabel(check.http)}</p></> : null}
+  </section>)}</div>;
 }
 
 export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onImport, onTestAll, onSnapshot, onRefresh, onToggle, onActivate, onTest, onDelete, healthThreshold, onBulk }: Props) {
@@ -314,7 +327,8 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
                 <div className="min-w-0">
                   <p className="text-muted-foreground">代理地址</p>
                   <p className="truncate font-mono" title={entry.url}>{entry.name ? `${entry.name} · ` : ""}{entry.url}</p>
-                  {entry.protocol_auto ? <p className="text-muted-foreground">{entry.detected_protocol ? `已识别 ${entry.detected_protocol.toUpperCase()}` : "协议待识别"}</p> : null}
+                  {entry.protocol_auto ? <p className="text-muted-foreground">{proxyProtocolStatus(entry)}</p> : null}
+                  {entry.protocol_checks?.length ? <details className="mt-1"><summary className="cursor-pointer">各代理协议检测详情</summary><ProtocolChecks checks={entry.protocol_checks} /></details> : null}
                 </div>
                 <div>
                   <p className="text-muted-foreground">HTTPS 测试出口 IP</p>
@@ -322,11 +336,11 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
                   {entry.last_error && entry.egress_ip ? <p className="text-muted-foreground">上次成功出口：{entry.egress_ip}</p> : null}
                 </div>
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <span className={proxyProbeStatus(entry, healthThreshold).tone === "healthy" ? "text-emerald-600" : proxyProbeStatus(entry, healthThreshold).tone === "failed" ? "text-destructive" : "text-muted-foreground"}>
+                  <span className={proxyProbeStatus(entry, healthThreshold).tone === "healthy" ? "text-emerald-600" : proxyProbeStatus(entry, healthThreshold).tone === "failed" ? "text-destructive" : proxyProbeStatus(entry, healthThreshold).tone === "limited" ? "text-amber-600" : "text-muted-foreground"}>
                     {proxyProbeStatus(entry, healthThreshold).label}
                   </span>
                   {entry.id === activeId && <span className="text-primary">当前使用</span>}
-                  <span className="text-muted-foreground">失败 {entry.consecutive_failures} 次</span>
+                  <span className="text-muted-foreground">检测失败 {entry.consecutive_failures} 次</span>
                 </div>
                 <div className="text-muted-foreground">
                   {progress?.items[entry.id] && ["running", "queued"].includes(progress.state) ? <p data-testid="proxy-row-progress">本轮：{progress.items[entry.id].state === "done" ? (progress.items[entry.id].ok ? `通过 ${progress.items[entry.id].protocol?.toUpperCase() ?? ""} · ${progress.items[entry.id].ip ?? ""}` : `失败 · ${progress.items[entry.id].error ?? ""}`) : progress.items[entry.id].state === "running" ? "测试中…" : progress.items[entry.id].state === "superseded" ? "已由单条测试更新" : "等待测试"}</p> : null}
@@ -349,15 +363,18 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>代理 HTTP／HTTPS 诊断</DialogTitle>
-            <DialogDescription>分别访问公开出口回显服务。HTTP 回显不证明 HTTPS 可信；诊断保留证书校验，结果不修改健康状态、当前出口或任务暂停状态。</DialogDescription>
+            <DialogDescription>分别检查代理协议和出口回显。HTTP 回显可能受网络转发影响，不能单独证明代理身份或 HTTPS 可信。诊断保留证书校验，结果不修改健康状态、当前出口或任务暂停状态。</DialogDescription>
           </DialogHeader>
           <p className="break-all font-mono text-xs">{diagnosis?.url}</p>
           {diagnosing ? <p role="status">正在诊断，请稍候…</p> : null}
           {diagnosis?.error ? <p role="alert" className="text-destructive">{diagnosis.error}</p> : null}
           {diagnosis?.result ? <div className="space-y-3">
-            <DiagnosisResult label="HTTPS（验证证书）" result={diagnosis.result.https} />
-            <DiagnosisResult label="HTTP（明文回显）" result={diagnosis.result.http} />
-            {diagnosis.result.http.ok && !diagnosis.result.https.ok ? <p className="text-amber-600 text-sm">HTTP 可用，HTTPS 检测失败。该代理尚未达到 HTTPS 健康条件。</p> : null}
+            {diagnosis.result.https.protocol_checks?.length ? <ProtocolChecks checks={diagnosis.result.https.protocol_checks} /> : <>
+            <p className="text-sm">代理连接协议：{diagnosis.result.https.via?.toUpperCase() || "按已配置协议"}</p>
+            <DiagnosisResult label="访问 HTTPS 网站（校验证书）" result={diagnosis.result.https} />
+            <DiagnosisResult label="访问 HTTP 网站（明文回显）" result={diagnosis.result.http} />
+            </>}
+            {diagnosis.result.http.ok && !diagnosis.result.https.ok ? <p className="text-amber-600 text-sm">仅访问 HTTP 网站回显通过，HTTPS 未通过；这不代表已找到可完整使用的代理协议。</p> : null}
             <p className="text-muted-foreground text-xs">本次诊断：{new Date(diagnosis.result.checked_at).toLocaleString()}</p>
           </div> : null}
           <Button type="button" variant="outline" onClick={closeDiagnosis}>关闭诊断</Button>

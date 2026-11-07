@@ -88,6 +88,9 @@ func TestProxyPoolAutoProtocolWithRealSOCKS5Handshake(t *testing.T) {
 	}()
 	defer func() { _ = listener.Close(); <-done; wg.Wait() }()
 	s := &Server{proxyProbe: func(ctx context.Context, raw, _ string, _ []string, timeout time.Duration) egressProbeResult {
+		if raw == "http://203.0.113.1:80" {
+			return egressProbeResult{Error: "fixture control unavailable", Probes: []egressAttempt{}}
+		}
 		return probeEgress(ctx, raw, ca, []string{echo.URL}, timeout)
 	}}
 	entry := proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ProtocolAuto: true}, RawURL: "http://" + listener.Addr().String()}
@@ -97,10 +100,13 @@ func TestProxyPoolAutoProtocolWithRealSOCKS5Handshake(t *testing.T) {
 	}
 	// The same response with an untrusted TLS certificate must not qualify.
 	s.proxyProbe = func(ctx context.Context, raw, _ string, _ []string, timeout time.Duration) egressProbeResult {
+		if raw == "http://203.0.113.1:80" {
+			return egressProbeResult{Error: "fixture control unavailable", Probes: []egressAttempt{}}
+		}
 		return probeEgress(ctx, raw, "", []string{echo.URL}, timeout)
 	}
 	res, raw = s.probePoolEntry(t.Context(), entry)
-	if res.OK || raw != "" || res.ErrorCode != "protocol_unidentified" {
+	if res.OK || raw != "" || res.ErrorCode != "certificate_untrusted" || !res.ProtocolRecognized || len(res.ProtocolChecks) != 4 {
 		t.Fatal("detection bypassed TLS trust", res, raw)
 	}
 }
@@ -227,11 +233,12 @@ func TestProxyPoolAutoProtocolPersistsOnlyVerifiedCandidate(t *testing.T) {
 	entry := proxyPoolEntry{ProxyPoolEntry: parsed[0], RawURL: parsed[0].URL}
 	m := &Manager{proxyPool: &proxyPoolState{entries: []proxyPoolEntry{entry}, disabled: true}}
 	s := &Server{m: m}
+	s.proxySOCKS4Probe = func(context.Context, string) (bool, string) { return false, "fixture" }
 	var mu sync.Mutex
 	seen := map[string]bool{}
 	s.proxyProbe = func(ctx context.Context, raw, ca string, probes []string, timeout time.Duration) egressProbeResult {
 		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) > proxyPoolProbeTimeout || timeout != 5*time.Second || ca != "" {
+		if !ok || time.Until(deadline) > proxyPoolProbeTimeout || (timeout != 5*time.Second && !(raw == "http://203.0.113.1:80" && timeout == 2*time.Second)) || ca != "" {
 			t.Error("probe lost time/trust bounds")
 		}
 		mu.Lock()

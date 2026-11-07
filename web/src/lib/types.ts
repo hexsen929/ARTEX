@@ -1096,6 +1096,7 @@ export interface Settings {
 export interface ProxyPoolEntry {
   protocol_auto?: boolean;
   detected_protocol?: string;
+  protocol_checks?: ProxyProtocolCheck[];
   id: string;
   url: string;
   name?: string;
@@ -2245,7 +2246,9 @@ export interface IntelligencePage {
 export interface EgressProbeResult {
   ok: boolean;
   exit_ip?: string;
-  via?: "direct" | "http" | "https" | "socks5";
+  via?: "direct" | "http" | "https" | "socks5" | "socks4";
+  protocol_recognized?: boolean;
+  protocol_checks?: ProxyProtocolCheck[];
   via_label?: string;
   latency_ms: number;
   error?: string;
@@ -2259,6 +2262,25 @@ export interface EgressProbeResult {
     error?: string;
     error_code?: string;
   }[];
+}
+
+export interface ProxyCapabilityCheck {
+  checked: boolean;
+  ok: boolean;
+  ip?: string;
+  error?: string;
+  error_code?: string;
+  latency_ms: number;
+}
+
+export interface ProxyProtocolCheck {
+  protocol: "http" | "https" | "socks5" | "socks4";
+  recognized: boolean;
+  supported: boolean;
+  evidence?: string;
+  auto_selection_blocked?: boolean;
+  http: ProxyCapabilityCheck;
+  https: ProxyCapabilityCheck;
 }
 
 export interface ProxyPoolDiagnosis {

@@ -37,20 +37,21 @@ const (
 
 // ProxyPoolEntry is the public shape. URL is always masked in API responses.
 type ProxyPoolEntry struct {
-	ProtocolAuto        bool      `json:"protocol_auto,omitempty"`
-	DetectedProtocol    string    `json:"detected_protocol,omitempty"`
-	ID                  string    `json:"id"`
-	URL                 string    `json:"url"`
-	Name                string    `json:"name,omitempty"`
-	Remark              string    `json:"remark,omitempty"`
-	Enabled             bool      `json:"enabled"`
-	EgressIP            string    `json:"egress_ip,omitempty"`
-	LatencyMS           int64     `json:"latency_ms,omitempty"`
-	LastError           string    `json:"last_error,omitempty"`
-	LastErrorCode       string    `json:"last_error_code,omitempty"`
-	LastCheckedAt       time.Time `json:"last_checked_at,omitempty"`
-	ConsecutiveFailures int       `json:"consecutive_failures"`
-	Health              string    `json:"health"`
+	ProtocolAuto        bool                 `json:"protocol_auto,omitempty"`
+	DetectedProtocol    string               `json:"detected_protocol,omitempty"`
+	ProtocolChecks      []proxyProtocolCheck `json:"protocol_checks,omitempty"`
+	ID                  string               `json:"id"`
+	URL                 string               `json:"url"`
+	Name                string               `json:"name,omitempty"`
+	Remark              string               `json:"remark,omitempty"`
+	Enabled             bool                 `json:"enabled"`
+	EgressIP            string               `json:"egress_ip,omitempty"`
+	LatencyMS           int64                `json:"latency_ms,omitempty"`
+	LastError           string               `json:"last_error,omitempty"`
+	LastErrorCode       string               `json:"last_error_code,omitempty"`
+	LastCheckedAt       time.Time            `json:"last_checked_at,omitempty"`
+	ConsecutiveFailures int                  `json:"consecutive_failures"`
+	Health              string               `json:"health"`
 }
 
 type proxyPoolEntry struct {
@@ -481,6 +482,7 @@ func (m *Manager) markProxyProbeLocked(id string, res egressProbeResult) {
 		m.proxyPool.probeSequence++
 		e.probeRevision = m.proxyPool.probeSequence
 		e.LastCheckedAt, e.LatencyMS, e.EgressIP = time.Now(), res.LatencyMS, res.ExitIP
+		e.ProtocolChecks = res.ProtocolChecks
 		if res.OK {
 			e.ConsecutiveFailures, e.LastError, e.Health = 0, "", "healthy"
 			e.LastErrorCode = ""
@@ -540,6 +542,7 @@ func (m *Manager) applyProxyProbeBatchLocked(results []proxyBatchProbe, threshol
 			e.RawURL, e.URL, e.DetectedProtocol = u.String(), maskSecrets(u.String()), u.Scheme
 		}
 		e.LastCheckedAt, e.LatencyMS, e.EgressIP = now, res.LatencyMS, res.ExitIP
+		e.ProtocolChecks = res.ProtocolChecks
 		if res.OK {
 			e.ConsecutiveFailures, e.LastError, e.Health = 0, "", "healthy"
 			e.LastErrorCode = ""
@@ -1307,6 +1310,7 @@ func (s *Server) updateProxyPool(w http.ResponseWriter, r *http.Request) {
 			}
 			e.RawURL, e.URL = raw, maskSecrets(raw)
 			e.ProtocolAuto, e.DetectedProtocol = false, ""
+			e.ProtocolChecks = nil
 			if e.ID == s.m.proxyPool.active && e.Enabled && raw != "" {
 				// A validated edit replaces the endpoint and starts a fresh health round,
 				// including when the old endpoint was cooling down.

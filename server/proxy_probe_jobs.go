@@ -189,41 +189,14 @@ func (s *Server) finishProxyProbeRound(round *proxyProbeRound, state string) {
 	}
 }
 
-// Each entry has one wall-clock budget including echo fallback. For an inferred
-// protocol, race only the supported protocols and accept a verified HTTPS echo.
-// An explicit protocol is never silently changed and TLS validation stays on.
+// Protocol observations are independent of HTTPS health. Only a verified HTTPS
+// echo can resolve a routable URL; explicit protocols are never changed.
 func (s *Server) probePoolEntry(parent context.Context, e proxyPoolEntry) (egressProbeResult, string) {
 	ctx, cancel := context.WithTimeout(parent, proxyPoolProbeTimeout)
 	defer cancel()
 	if !e.ProtocolAuto || e.DetectedProtocol != "" {
 		return s.runProxyProbe(ctx, e.RawURL, "", defaultEgressProbes, 5*time.Second), ""
 	}
-	type answer struct {
-		result egressProbeResult
-		raw    string
-	}
-	answers := make(chan answer, 3)
-	u, err := url.Parse(e.RawURL)
-	if err != nil {
-		return egressProbeResult{Error: "代理地址格式无效", ErrorCode: "invalid_proxy_url", Probes: []egressAttempt{}}, ""
-	}
-	for _, scheme := range []string{"http", "https", "socks5"} {
-		candidate := *u
-		candidate.Scheme = scheme
-		go func(raw string) {
-			answers <- answer{s.runProxyProbe(ctx, raw, "", defaultEgressProbes, 5*time.Second), raw}
-		}(candidate.String())
-	}
-	var winner *answer
-	for range 3 {
-		a := <-answers
-		if a.result.OK && winner == nil {
-			winner = &a
-			cancel()
-		}
-	}
-	if winner != nil {
-		return winner.result, winner.raw
-	}
-	return egressProbeResult{Error: "协议尚未确认：HTTP、HTTPS、SOCKS5 均未完成有效的 HTTPS 出口验证；可能离线、需要认证或使用其它协议", ErrorCode: "protocol_unidentified", Probes: []egressAttempt{}}, ""
+	result, _, raw := s.inspectProxyProtocols(ctx, e, true)
+	return result, raw
 }

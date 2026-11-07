@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertProxyDiagnosis, proxyProbeStatus } from "./proxy-probe-status.ts";
+import { assertProxyDiagnosis, proxyProbeStatus, proxyProtocolStatus } from "./proxy-probe-status.ts";
 
 const entry = { id: "fixture", url: "socks5://proxy.invalid:1080", enabled: true, health: "unknown", consecutive_failures: 0 };
 
@@ -22,4 +22,25 @@ test("HTTP-only success preserves the failed HTTPS result", () => {
 });
 test("partial or wrong-member responses are rejected", () => {
   for (const patch of [{ id: "other" }, { health_updated: true }, { checked_at: "invalid" }, { https: null }, { http: { ...report.http, exit_ip: "" } }, { https: { ...report.https, probes: null } }]) assert.throws(() => assertProxyDiagnosis({ ...report, ...patch }, "fixture"));
+});
+
+const failedCapability = { checked: true, ok: false, error: "TLS 证书链不受信任", error_code: "certificate_untrusted", latency_ms: 10 };
+const capabilityChecks = ["http", "https", "socks5", "socks4"].map((protocol) => ({
+  protocol, supported: protocol !== "socks4", recognized: protocol === "socks5" || protocol === "socks4",
+  http: protocol === "socks4" ? { checked: false, ok: false, latency_ms: 0 } : { checked: true, ok: true, ip: "192.0.2.5", latency_ms: 2 },
+  https: protocol === "socks4" ? { checked: false, ok: false, latency_ms: 0 } : failedCapability,
+}));
+test("recognized protocols and HTTP capability remain visible without claiming HTTPS health", () => {
+  const partial = { ...entry, protocol_auto: true, protocol_checks: capabilityChecks, last_error: "certificate", consecutive_failures: 3, health: "unhealthy-cooling" };
+  assert.match(proxyProtocolStatus(partial), /SOCKS5/);
+  assert.match(proxyProtocolStatus(partial), /SOCKS4（暂不支持转发）/);
+  assert.match(proxyProtocolStatus(partial), /尚未通过完整访问/);
+  assert.equal(proxyProbeStatus(partial, 3).tone, "limited");
+});
+test("automatic diagnosis validates all protocol capability results", () => {
+  const auto = { ...report, https: { ...report.https, protocol_checks: capabilityChecks } };
+  assert.equal(assertProxyDiagnosis(auto, "fixture"), auto);
+  for (const checks of [[], capabilityChecks.slice(0, 3), [...capabilityChecks.slice(0, 3), capabilityChecks[0]], capabilityChecks.map((check) => ({ ...check, http: null }))]) {
+    assert.throws(() => assertProxyDiagnosis({ ...auto, https: { ...auto.https, protocol_checks: checks } }, "fixture"));
+  }
 });
