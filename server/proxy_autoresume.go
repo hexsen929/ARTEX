@@ -400,6 +400,11 @@ func (s *Server) proxyReconnectTickContext(ctx context.Context) {
 }
 
 func (s *Server) proxyReconnectSuccess() {
+	// HTTP-only health cannot establish that a task blocked on HTTPS has
+	// recovered. Keep the route usable without clearing those pause guards.
+	if s.m != nil && s.m.activeProxyHTTPOnly(s.m.GlobalProxy()) {
+		return
+	}
 	s.proxyReconnectSuccessWithGuards(s.snapshotProxyReconnectGuards(false), nil)
 }
 

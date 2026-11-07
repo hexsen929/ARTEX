@@ -290,6 +290,13 @@ func TestProxyProtocolAutoSelectsHTTPAndPrefersHTTPSWhenAvailable(t *testing.T) 
 	if err != nil || automatic != entry.ID || stored.DetectedProtocol != "socks5" || !stored.HTTPOnly || stored.Health != "http-only" {
 		t.Fatal("HTTP route was left locked", automatic, stored, err)
 	}
+	if s.reconcileProxyPoolAfterProbe(false) || s.m.GlobalProxy() != "" {
+		t.Fatal("automatic detection enabled a disabled global proxy")
+	}
+	s.m.proxyPool.disabled = false
+	if !s.reconcileProxyPoolAfterProbe(false) || s.m.GlobalProxy() != raw {
+		t.Fatal("available HTTP protocol was not activated automatically")
+	}
 	full := proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ID: "full", Enabled: true, Health: "healthy"}, RawURL: "http://full.invalid:80"}
 	s.m.proxyPool.mu.Lock()
 	s.m.proxyPool.entries = append(s.m.proxyPool.entries, full)

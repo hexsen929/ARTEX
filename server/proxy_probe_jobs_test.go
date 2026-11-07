@@ -88,6 +88,9 @@ func TestProxyPoolAutoProtocolWithRealSOCKS5Handshake(t *testing.T) {
 	}()
 	defer func() { _ = listener.Close(); <-done; wg.Wait() }()
 	s := &Server{proxyProbe: func(ctx context.Context, raw, _ string, _ []string, timeout time.Duration) egressProbeResult {
+		if raw == "http://203.0.113.1:80" {
+			return egressProbeResult{Error: "fixture control unavailable", Probes: []egressAttempt{}}
+		}
 		return probeEgress(ctx, raw, ca, []string{echo.URL}, timeout)
 	}}
 	entry := proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ProtocolAuto: true}, RawURL: "http://" + listener.Addr().String()}
@@ -97,6 +100,9 @@ func TestProxyPoolAutoProtocolWithRealSOCKS5Handshake(t *testing.T) {
 	}
 	// The same response with an untrusted TLS certificate must not qualify.
 	s.proxyProbe = func(ctx context.Context, raw, _ string, _ []string, timeout time.Duration) egressProbeResult {
+		if raw == "http://203.0.113.1:80" {
+			return egressProbeResult{Error: "fixture control unavailable", Probes: []egressAttempt{}}
+		}
 		return probeEgress(ctx, raw, "", []string{echo.URL}, timeout)
 	}
 	res, raw = s.probePoolEntry(t.Context(), entry)
