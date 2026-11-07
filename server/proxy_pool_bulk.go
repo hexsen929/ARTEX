@@ -110,7 +110,7 @@ func (s *Server) bulkProxyPool(w http.ResponseWriter, r *http.Request) {
 		} else {
 			next := ""
 			for _, entry := range entries {
-				if entry.Enabled && entry.RawURL != "" {
+				if proxyEntryUsable(entry) {
 					next = entry.ID
 					break
 				}

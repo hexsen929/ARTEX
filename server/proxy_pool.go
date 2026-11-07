@@ -32,11 +32,13 @@ const (
 	defaultProxyHealthCooldown   = 60
 	defaultProxyHealthInterval   = 30
 	proxyPoolProbeTimeout        = 10 * time.Second
-	proxyPoolMaxProbeConcurrency = 4
+	proxyPoolMaxProbeConcurrency = 12
 )
 
 // ProxyPoolEntry is the public shape. URL is always masked in API responses.
 type ProxyPoolEntry struct {
+	ProtocolAuto        bool      `json:"protocol_auto,omitempty"`
+	DetectedProtocol    string    `json:"detected_protocol,omitempty"`
 	ID                  string    `json:"id"`
 	URL                 string    `json:"url"`
 	Name                string    `json:"name,omitempty"`
@@ -53,7 +55,8 @@ type ProxyPoolEntry struct {
 
 type proxyPoolEntry struct {
 	ProxyPoolEntry
-	RawURL string `json:"raw_url"`
+	RawURL        string `json:"raw_url"`
+	probeRevision uint64
 }
 
 type ProxySwitchLog struct {
@@ -104,8 +107,16 @@ type proxyPoolState struct {
 	lastHealth time.Time
 	// Configuration changes invalidate a whole in-flight probe round. A result
 	// for an old endpoint must not bless a newly edited/re-enabled member.
-	generation  uint64
-	forceHealth bool
+	generation            uint64
+	forceHealth           bool
+	probeSequence         uint64
+	roundSequence         uint64
+	probeCancelGeneration uint64
+	probeRound            *proxyProbeRound
+}
+
+func proxyEntryUsable(e proxyPoolEntry) bool {
+	return e.Enabled && e.RawURL != "" && (!e.ProtocolAuto || e.DetectedProtocol != "")
 }
 
 type proxyPoolTickOutcome struct {
@@ -165,14 +176,14 @@ func decodeProxyPoolStartup(values map[string]string) (proxyPoolPersist, string,
 	// explicitly disabled/cleared, choose another enabled endpoint, not that URL.
 	chosen := ""
 	for _, e := range pool.Entries {
-		if e.ID == pool.Active && e.Enabled && e.RawURL != "" {
+		if e.ID == pool.Active && proxyEntryUsable(e) {
 			chosen = e.ID
 			break
 		}
 	}
 	if chosen == "" {
 		for _, e := range pool.Entries {
-			if e.Enabled && e.RawURL != "" && e.Health != "unhealthy-cooling" {
+			if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" {
 				chosen = e.ID
 				break
 			}
@@ -180,7 +191,7 @@ func decodeProxyPoolStartup(values map[string]string) (proxyPoolPersist, string,
 	}
 	if chosen == "" {
 		for _, e := range pool.Entries {
-			if e.Enabled && e.RawURL != "" {
+			if proxyEntryUsable(e) {
 				chosen = e.ID
 				break
 			}
@@ -283,7 +294,7 @@ func (m *Manager) ProxyPoolSnapshot() ([]ProxyPoolEntry, string, []ProxySwitchLo
 	entries := make([]ProxyPoolEntry, 0, len(snapshot))
 	for _, e := range snapshot {
 		p := e.ProxyPoolEntry
-		p.URL = maskSecrets(e.RawURL)
+		p.URL = publicProxyEntryURL(e)
 		p.LastError = maskSecrets(p.LastError)
 		if !p.Enabled {
 			p.Health = "disabled"
@@ -332,12 +343,12 @@ func (m *Manager) setProxyPoolEntries(entries []proxyPoolEntry, active string, e
 		return m.applyActiveProxyLockedWithHealth(active, "manual", true)
 	}
 	for _, e := range entries {
-		if e.Enabled && e.RawURL != "" && e.Health != "unhealthy-cooling" {
+		if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" {
 			return m.applyActiveProxyLocked(e.ID, "reconnect")
 		}
 	}
 	for _, e := range entries {
-		if e.Enabled && e.RawURL != "" {
+		if proxyEntryUsable(e) {
 			return m.applyActiveProxyLockedWithHealth(e.ID, "reconnect", true)
 		}
 	}
@@ -354,7 +365,7 @@ func (m *Manager) applyActiveProxyLockedWithHealth(id, reason string, allowUnhea
 	}
 	var next string
 	for _, e := range m.proxyPool.entries {
-		if e.ID == id && e.Enabled && e.RawURL != "" && (allowUnhealthy || e.Health != "unhealthy-cooling") {
+		if e.ID == id && proxyEntryUsable(e) && (allowUnhealthy || e.Health != "unhealthy-cooling") {
 			next = e.RawURL
 			break
 		}
@@ -403,13 +414,13 @@ func (m *Manager) selectHealthyLocked(exclude string) string {
 	}
 	pool := make([]string, 0)
 	for _, e := range m.proxyPool.entries {
-		if e.Enabled && e.RawURL != "" && e.Health != "unhealthy-cooling" && e.ID != exclude {
+		if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" && e.ID != exclude {
 			pool = append(pool, e.ID)
 		}
 	}
 	if len(pool) == 0 && exclude != "" {
 		for _, e := range m.proxyPool.entries {
-			if e.Enabled && e.RawURL != "" && e.Health != "unhealthy-cooling" {
+			if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" {
 				pool = append(pool, e.ID)
 			}
 		}
@@ -429,7 +440,7 @@ func (m *Manager) selectHealthyLocked(exclude string) string {
 	}
 	for n := 0; n < len(m.proxyPool.entries); n++ {
 		e := m.proxyPool.entries[(start+n)%len(m.proxyPool.entries)]
-		if e.Enabled && e.RawURL != "" && e.Health != "unhealthy-cooling" && e.ID != exclude {
+		if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" && e.ID != exclude {
 			return e.ID
 		}
 	}
@@ -467,6 +478,8 @@ func (m *Manager) markProxyProbeLocked(id string, res egressProbeResult) {
 		if e.ID != id {
 			continue
 		}
+		m.proxyPool.probeSequence++
+		e.probeRevision = m.proxyPool.probeSequence
 		e.LastCheckedAt, e.LatencyMS, e.EgressIP = time.Now(), res.LatencyMS, res.ExitIP
 		if res.OK {
 			e.ConsecutiveFailures, e.LastError, e.Health = 0, "", "healthy"
@@ -489,9 +502,10 @@ func (m *Manager) markProxyProbeLocked(id string, res egressProbeResult) {
 }
 
 type proxyBatchProbe struct {
-	entry    proxyPoolEntry
-	result   egressProbeResult
-	complete bool
+	entry       proxyPoolEntry
+	result      egressProbeResult
+	complete    bool
+	resolvedURL string
 }
 
 // applyProxyProbeBatchLocked publishes one durable health snapshot per round,
@@ -514,10 +528,17 @@ func (m *Manager) applyProxyProbeBatchLocked(results []proxyBatchProbe, threshol
 			continue
 		}
 		e := &candidate[i]
-		if !e.Enabled || e.RawURL == "" || e.RawURL != probe.entry.RawURL {
+		if !e.Enabled || e.RawURL == "" || e.RawURL != probe.entry.RawURL || e.probeRevision != probe.entry.probeRevision {
 			continue
 		}
 		res := probe.result
+		if res.OK && e.ProtocolAuto && e.DetectedProtocol == "" && probe.resolvedURL != "" {
+			u, err := traffic.ValidateProxyURL(probe.resolvedURL)
+			if err != nil {
+				return false, err
+			}
+			e.RawURL, e.URL, e.DetectedProtocol = u.String(), maskSecrets(u.String()), u.Scheme
+		}
 		e.LastCheckedAt, e.LatencyMS, e.EgressIP = now, res.LatencyMS, res.ExitIP
 		if res.OK {
 			e.ConsecutiveFailures, e.LastError, e.Health = 0, "", "healthy"
@@ -550,6 +571,14 @@ func (s *Server) queueProxyPoolHealth(force bool) bool {
 	if s.proxyShuttingDown() {
 		s.m.proxyPool.mu.Unlock()
 		return false
+	}
+	if round := s.m.proxyPool.probeRound; force && round != nil && round.generation == s.m.proxyPool.generation && (round.State == "running" || round.State == "queued") {
+		s.m.proxyPool.mu.Unlock()
+		return true
+	}
+	if force {
+		s.m.proxyPool.roundSequence++
+		s.m.proxyPool.probeRound = &proxyProbeRound{ID: s.m.proxyPool.roundSequence, State: "queued", Concurrency: proxyPoolMaxProbeConcurrency, Items: map[string]proxyProbeItem{}, generation: s.m.proxyPool.generation}
 	}
 	s.m.proxyPool.lastHealth = time.Time{}
 	s.m.proxyPool.forceHealth = s.m.proxyPool.forceHealth || force
@@ -695,6 +724,7 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 	// Eligibility, force intent and configuration provenance share one snapshot.
 	var entries []proxyPoolEntry
 	generation, activeID := s.m.proxyPool.generation, s.m.proxyPool.active
+	cancelGeneration := s.m.proxyPool.probeCancelGeneration
 	if healthDue || forceHealth {
 		entries = append([]proxyPoolEntry(nil), s.m.proxyPool.entries...)
 	}
@@ -720,6 +750,9 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 				break
 			}
 		}
+		ctx, round, eligible := s.startProxyProbeRound(ctx, eligible, generation, cancelGeneration)
+		finalState := "superseded"
+		defer func() { s.finishProxyProbeRound(round, finalState) }()
 		sem := s.proxyPoolProbeSem
 		if sem == nil {
 			sem = make(chan struct{}, proxyPoolMaxProbeConcurrency)
@@ -745,9 +778,11 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 						<-sem
 						continue
 					}
-					res := s.runProxyProbe(ctx, eligible[n].RawURL, "", defaultEgressProbes, proxyPoolProbeTimeout)
+					s.updateProxyProbeProgress(round, eligible[n], nil)
+					res, resolved := s.probePoolEntry(ctx, eligible[n])
+					s.updateProxyProbeProgress(round, eligible[n], &res)
 					<-sem
-					results[n] = proxyBatchProbe{entry: eligible[n], result: res, complete: true}
+					results[n] = proxyBatchProbe{entry: eligible[n], result: res, complete: true, resolvedURL: resolved}
 				}
 			}()
 		}
@@ -783,13 +818,20 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 			return proxyPoolTickOutcome{}
 		}
 		confirmed, err := s.m.applyProxyProbeBatchLocked(results, threshold)
+		if err == nil {
+			round.State = "completed"
+			round.FinishedAt = time.Now()
+			round.Running = 0
+		}
 		s.m.proxyPool.mu.Unlock()
 		if err != nil {
 			// Persist failures do not authorize a route change or an all-pool pause.
 			// Do not log DB errors here: they may contain the persisted proxy JSON.
+			finalState = "save_failed"
 			log.Printf("[proxy] health round not saved; route kept unchanged")
 			return proxyPoolTickOutcome{}
 		}
+		finalState = "completed"
 		outcome.confirmed = confirmed
 		if s.reconcileProxyPoolAfterProbe(confirmed, generation) {
 			outcome.switched = true
@@ -863,7 +905,7 @@ func (s *Server) reconcileProxyPoolAfterProbe(activeConfirmed bool, expectedGene
 	activeID := s.m.proxyPool.active
 	activeAvailable := false
 	for _, e := range s.m.proxyPool.entries {
-		if e.ID == activeID && e.Enabled && e.RawURL != "" && e.Health != "unhealthy-cooling" {
+		if e.ID == activeID && proxyEntryUsable(e) && e.Health != "unhealthy-cooling" {
 			activeAvailable = true
 			break
 		}
@@ -886,7 +928,7 @@ func (s *Server) reconcileProxyPoolAfterProbe(activeConfirmed bool, expectedGene
 	}
 	allCooling, enabled := false, 0
 	for _, e := range s.m.proxyPool.entries {
-		if e.Enabled && e.RawURL != "" {
+		if proxyEntryUsable(e) {
 			enabled++
 			if e.Health == "unhealthy-cooling" {
 				allCooling = true
@@ -1012,20 +1054,31 @@ func (s *Server) importProxyPool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Text           string  `json:"text"`
-		TimedEnabled   *bool   `json:"timed_enabled"`
-		Interval       *int    `json:"interval_seconds"`
-		OnFailure      *bool   `json:"on_failure"`
-		Strategy       *string `json:"strategy"`
-		Threshold      *int    `json:"health_fail_threshold"`
-		Cooldown       *int    `json:"health_cooldown_seconds"`
-		HealthInterval *int    `json:"health_check_interval_seconds"`
+		Text            string  `json:"text"`
+		DefaultProtocol string  `json:"default_protocol"`
+		TimedEnabled    *bool   `json:"timed_enabled"`
+		Interval        *int    `json:"interval_seconds"`
+		OnFailure       *bool   `json:"on_failure"`
+		Strategy        *string `json:"strategy"`
+		Threshold       *int    `json:"health_fail_threshold"`
+		Cooldown        *int    `json:"health_cooldown_seconds"`
+		HealthInterval  *int    `json:"health_check_interval_seconds"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	parsed, errs := ParseProxyBatch(req.Text)
+	if req.DefaultProtocol == "" {
+		req.DefaultProtocol = "auto"
+	}
+	if req.DefaultProtocol != "auto" && proxyImportScheme(req.DefaultProtocol) == "" {
+		writeErr(w, 400, "无协议地址处理方式必须是auto/http/https/socks5")
+		return
+	}
+	if req.DefaultProtocol != "auto" {
+		req.DefaultProtocol = proxyImportScheme(req.DefaultProtocol)
+	}
+	parsed, errs := parseProxyBatchWithProtocol(req.Text, req.DefaultProtocol)
 	if errs == nil {
 		errs = []ProxyImportError{}
 	}
@@ -1040,12 +1093,22 @@ func (s *Server) importProxyPool(w http.ResponseWriter, r *http.Request) {
 	}
 	seen := map[string]bool{}
 	for _, e := range entries {
-		seen[proxyURLKeyRaw(e.RawURL)] = true
+		key := proxyURLKeyRaw(e.RawURL)
+		seen[key] = true
+		if e.ProtocolAuto {
+			if u, err := url.Parse(e.RawURL); err == nil {
+				u.Scheme = "http"
+				seen["auto:"+proxyURLKey(u)] = true
+			}
+		}
 	}
 	imported := 0
 	for _, p := range parsed {
 		u, _ := traffic.ValidateProxyURL(p.URL)
 		key := proxyURLKey(u)
+		if p.ProtocolAuto {
+			key = "auto:" + key
+		}
 		if seen[key] {
 			line := 0
 			if i := strings.LastIndex(p.ID, "-"); i >= 0 {
@@ -1056,7 +1119,7 @@ func (s *Server) importProxyPool(w http.ResponseWriter, r *http.Request) {
 		}
 		entries = append(entries, proxyPoolEntry{ProxyPoolEntry: p, RawURL: u.String()})
 		imported++
-		seen[proxyURLKey(u)] = true
+		seen[key] = true
 	}
 	duplicates, invalid := 0, 0
 	for _, item := range errs {
@@ -1243,6 +1306,7 @@ func (s *Server) updateProxyPool(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			e.RawURL, e.URL = raw, maskSecrets(raw)
+			e.ProtocolAuto, e.DetectedProtocol = false, ""
 			if e.ID == s.m.proxyPool.active && e.Enabled && raw != "" {
 				// A validated edit replaces the endpoint and starts a fresh health round,
 				// including when the old endpoint was cooling down.
@@ -1266,7 +1330,7 @@ func (s *Server) updateProxyPool(w http.ResponseWriter, r *http.Request) {
 		}
 		if s.m.proxyPool.active == id {
 			if req.URL != nil || req.Enabled != nil {
-				if e.Enabled && e.RawURL != "" {
+				if proxyEntryUsable(*e) {
 					if err := s.m.applyActiveProxyLockedWithHealth(id, "manual", req.URL != nil); err != nil {
 						*e = oldEntry
 						unlock()
@@ -1300,7 +1364,7 @@ func (s *Server) updateProxyPool(w http.ResponseWriter, r *http.Request) {
 					// establish a healthy route.
 					next := ""
 					for _, candidate := range s.m.proxyPool.entries {
-						if candidate.ID != id && candidate.Enabled && candidate.RawURL != "" {
+						if candidate.ID != id && proxyEntryUsable(candidate) {
 							next = candidate.ID
 							break
 						}
@@ -1404,7 +1468,7 @@ func (s *Server) deleteProxyPool(w http.ResponseWriter, r *http.Request) {
 			// every remaining member is cooling down; never retain the deleted URL.
 			next := ""
 			for _, e := range s.m.proxyPool.entries {
-				if e.Enabled && e.RawURL != "" {
+				if proxyEntryUsable(e) {
 					next = e.ID
 					break
 				}
@@ -1426,7 +1490,7 @@ func (s *Server) deleteProxyPool(w http.ResponseWriter, r *http.Request) {
 				// Only an enabled member that is actually cooling warrants the
 				// pool-wide proxy pause barrier.
 				for _, candidate := range s.m.proxyPool.entries {
-					if candidate.Enabled && candidate.RawURL != "" && candidate.Health == "unhealthy-cooling" {
+					if proxyEntryUsable(candidate) && candidate.Health == "unhealthy-cooling" {
 						needPause = true
 						break
 					}
@@ -1475,11 +1539,16 @@ func (s *Server) activateProxyPool(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) testProxyPoolEntry(w http.ResponseWriter, r *http.Request) {
-	if !s.proxyPoolTickMu.TryLock() {
-		writeErr(w, http.StatusConflict, "批量探测中，请稍后测试单条代理")
+	release, ok := s.beginInteractiveProxyProbe(w)
+	if !ok {
 		return
 	}
-	defer s.proxyPoolTickMu.Unlock()
+	defer release()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	stop := context.AfterFunc(serverContext(s), cancel)
+	defer stop()
+	r = r.WithContext(ctx)
 	if r.Context().Err() != nil || s.proxyShuttingDown() {
 		writeErr(w, http.StatusServiceUnavailable, "请求已取消或服务正在停止，探测未执行")
 		return
@@ -1490,18 +1559,38 @@ func (s *Server) testProxyPoolEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.m.proxyPool.mu.Lock()
+	for i := range s.m.proxyPool.entries {
+		if s.m.proxyPool.entries[i].ID == id {
+			s.m.proxyPool.probeSequence++
+			s.m.proxyPool.entries[i].probeRevision = s.m.proxyPool.probeSequence
+			if round := s.m.proxyPool.probeRound; round != nil {
+				item, ok := round.Items[id]
+				if ok {
+					item.State = "superseded"
+					round.Items[id] = item
+				}
+			}
+		}
+	}
 	entries := append([]proxyPoolEntry(nil), s.m.proxyPool.entries...)
 	generation := s.m.proxyPool.generation
 	s.m.proxyPool.mu.Unlock()
 	for _, e := range entries {
 		if e.ID == id && e.Enabled && strings.TrimSpace(e.RawURL) != "" {
-			res := s.runProxyProbe(r.Context(), e.RawURL, "", defaultEgressProbes, proxyPoolProbeTimeout)
+			res, resolved := s.probePoolEntry(r.Context(), e)
 			if r.Context().Err() != nil || s.proxyShuttingDown() {
 				writeErr(w, http.StatusServiceUnavailable, "请求已取消或服务正在停止，结果未保存")
 				return
 			}
 			s.m.proxyPool.mu.Lock()
-			if r.Context().Err() != nil || s.proxyShuttingDown() || s.m.proxyPool.generation != generation {
+			latest := false
+			for _, current := range s.m.proxyPool.entries {
+				if current.ID == id && current.RawURL == e.RawURL && current.probeRevision == e.probeRevision {
+					latest = true
+					break
+				}
+			}
+			if r.Context().Err() != nil || s.proxyShuttingDown() || s.m.proxyPool.generation != generation || !latest {
 				s.m.proxyPool.mu.Unlock()
 				writeErr(w, http.StatusConflict, "代理配置已变更，旧探测结果未保存")
 				return
@@ -1510,7 +1599,7 @@ func (s *Server) testProxyPoolEntry(w http.ResponseWriter, r *http.Request) {
 			if s.m.pg != nil {
 				threshold = proxyIntSetting(s.m.pg, settingProxyHealthThreshold, threshold)
 			}
-			confirmed, err := s.m.applyProxyProbeBatchLocked([]proxyBatchProbe{{entry: e, result: res, complete: true}}, threshold)
+			confirmed, err := s.m.applyProxyProbeBatchLocked([]proxyBatchProbe{{entry: e, result: res, complete: true, resolvedURL: resolved}}, threshold)
 			s.m.proxyPool.mu.Unlock()
 			if err != nil {
 				writeErr(w, http.StatusInternalServerError, "探测结果保存失败，路线保持不变")

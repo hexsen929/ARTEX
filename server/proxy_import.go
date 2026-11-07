@@ -22,7 +22,7 @@ func proxyImportScheme(label string) string {
 	switch label {
 	case "http", "https":
 		return label
-	case "socks5", "socks5h", "shsocks5":
+	case "socks", "socks5", "socks5h", "shsocks5":
 		return "socks5"
 	}
 	return ""
@@ -86,6 +86,9 @@ func normalizeProxyImportToken(token, inherited string) (*url.URL, bool, error) 
 			if !validProxyImportAuthority(token) {
 				return nil, false, errors.New("invalid proxy endpoint")
 			}
+			if inherited == "auto" {
+				inherited = "http"
+			}
 			token = inherited + "://" + token
 		}
 	}
@@ -103,13 +106,17 @@ func proxyImportDisplayURL(u *url.URL) string {
 
 // ParseProxyBatch supports URLs, bare endpoints, whitespace-separated URL
 // blocks, protocol labels and whitespace-prefixed # remarks. Bare endpoints
-// default to HTTP and then inherit the most recent explicit scheme/label.
+// are marked for protocol detection, then inherit an explicit scheme/label.
 // Existing URL|name|remark fields are retained. No network probing occurs here.
 func ParseProxyBatch(raw string) ([]ProxyPoolEntry, []ProxyImportError) {
+	return parseProxyBatchWithProtocol(raw, "auto")
+}
+
+func parseProxyBatchWithProtocol(raw, defaultProtocol string) ([]ProxyPoolEntry, []ProxyImportError) {
 	var out []ProxyPoolEntry
 	var errs []ProxyImportError
 	seen := map[string]bool{}
-	inherited := "http"
+	inherited := defaultProtocol
 	batch := time.Now().UnixNano()
 	for n, original := range strings.Split(raw, "\n") {
 		line := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(original), "\ufeff"))
@@ -142,10 +149,14 @@ func ParseProxyBatch(raw string) ([]ProxyPoolEntry, []ProxyImportError) {
 				errs = append(errs, ProxyImportError{Line: n + 1, Error: "地址格式无效，请使用代理 URL 或 IP:端口", Kind: "invalid"})
 				continue
 			}
+			auto := !explicit && inherited == "auto"
 			if explicit {
 				inherited = u.Scheme
 			}
 			key := proxyURLKey(u)
+			if auto {
+				key = "auto:" + key
+			}
 			if seen[key] {
 				errs = append(errs, ProxyImportError{Line: n + 1, Input: proxyImportDisplayURL(u), Error: "重复代理，已跳过", Kind: "duplicate"})
 				continue
@@ -153,7 +164,7 @@ func ParseProxyBatch(raw string) ([]ProxyPoolEntry, []ProxyImportError) {
 			seen[key] = true
 			// Keep source line as the last ID segment for existing duplicate
 			// diagnostics; the ordinal makes same-line IDs unconditionally unique.
-			out = append(out, ProxyPoolEntry{ID: fmt.Sprintf("proxy-%d-%d-%d", batch, len(out)+1, n+1), URL: u.String(), Name: name, Remark: remark, Enabled: true, Health: "unknown"})
+			out = append(out, ProxyPoolEntry{ID: fmt.Sprintf("proxy-%d-%d-%d", batch, len(out)+1, n+1), URL: u.String(), Name: name, Remark: remark, Enabled: true, Health: "unknown", ProtocolAuto: auto})
 		}
 	}
 	return out, errs

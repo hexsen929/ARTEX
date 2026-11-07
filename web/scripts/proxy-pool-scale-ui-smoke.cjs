@@ -51,6 +51,7 @@ const settings = {
   constraints_inject_planner: true, constraints_inject_worker: true, noa_compaction: false,
   notify_enabled: true, notify_public_base_url: "", notify_digest_interval_min: 30,
 };
+const batch = { id: 0, state: "idle", total: 0, completed: 0, running: 0, succeeded: 0, failed: 0, concurrency: 12 };
 const state = { holdEgress: false, liveEgressReads: 0, peakEgressReads: 0, failBulk: false, failToggle: false, recoverOnCleanup: "", rotateOnBulk: "", importMode: "invalid", holdDiagnosis: false };
 const requests = [], unexpected = new Set(), external = new Set(), errors = [], heldEgress = [], heldDiagnoses = [];
 
@@ -113,9 +114,16 @@ async function serveAPI(request, response, url) {
     assert.equal(body.resume, undefined, "A probe silently requested task resume");
     return json(response, 200, probeReport());
   }
+  if (endpoint === "/api/settings/proxy-pool/progress" && method === "GET") {
+    const ids = (url.searchParams.get("ids") || "").split(",").filter(Boolean);
+    assert.ok(ids.length <= 50, "Progress request loaded more than the visible page");
+    return json(response, 200, { ...batch, items: Object.fromEntries(ids.map((id) => [id, {state: batch.state === "running" ? "running" : "done", ok: true, ip: "192.0.2.5"}])) });
+  }
+  if (endpoint === "/api/settings/proxy-pool/cancel-tests" && method === "POST") { batch.state = "cancelled"; batch.running = 0; return json(response, 200, {ok:true}); }
   if (endpoint === "/api/settings/proxy-pool" && method === "GET") return json(response, 200, proxySnapshot());
   if (endpoint === "/api/settings/proxy-pool/import" && method === "POST") {
     assert.equal(typeof body.text, "string");
+    assert.equal(body.default_protocol, "auto");
     if (state.importMode !== "invalid") {
       let added = 0, duplicates = 0, invalid = 0, issues = [];
       if (state.importMode === "valid") {
@@ -140,6 +148,7 @@ async function serveAPI(request, response, url) {
     });
   }
   if (endpoint === "/api/settings/proxy-pool/test-all" && method === "POST") {
+    Object.assign(batch, {id:batch.id+1,state:"running",total:settings.proxy_pool.length,completed:17,running:12,succeeded:12,failed:5});
     return json(response, 200, {
       ...(url.searchParams.get("summary") === "1" ? { ok: true, count: settings.proxy_pool.length } : proxySnapshot()),
       probe_queued: true,
@@ -457,8 +466,15 @@ async function main() {
     await eventually(async () => await list().getByRole("button", { name: "测试全部", exact: true }).isEnabled(), "Import kept all proxy operations disabled");
     await list().getByRole("button", { name: "测试全部", exact: true }).click();
     await eventually(() => callCount("/api/settings/proxy-pool/test-all", "POST") === 1, "Batch probe acknowledgement missing");
-    await eventually(async () => await list().getByRole("button", { name: "测试全部", exact: true }).isEnabled(), "Queued batch probe was treated as a long-running UI request");
-    const batchToast = page.locator("[data-sonner-toast]").filter({ hasText: /后台.*探测|探测.*后台|代理探测已排队/ }).first();
+    await page.getByTestId("proxy-probe-progress").filter({hasText: `17 / ${settings.proxy_pool.length}`}).waitFor();
+    const firstRow = rows().first();
+    const singleBefore = requests.filter((r) => r.endpoint.endsWith("/test") && r.endpoint.includes("proxy-pool/")).length;
+    await firstRow.getByRole("button", {name:"测试", exact:true}).click();
+    await eventually(() => requests.filter((r) => r.endpoint.endsWith("/test") && r.endpoint.includes("proxy-pool/")).length === singleBefore + 1, "Manual test blocked during batch");
+    await list().getByRole("button", {name:"停止本轮测试", exact:true}).click();
+    await page.getByTestId("proxy-probe-progress").filter({hasText:"本轮已停止"}).waitFor();
+    console.log("PASS live progress, independent single test and cancellation during batch");
+    const batchToast = page.locator("[data-sonner-toast]").filter({ hasText: /全部代理探测已排队/ }).first();
     await batchToast.waitFor();
     assert.equal(await page.locator("[data-sonner-toast]").filter({ hasText: "已完成全部代理探测" }).count(), 0, "Queued batch was mislabeled complete");
     assert.equal(requests.find((r) => r.endpoint === "/api/settings/proxy-pool/test-all").query, "?summary=1", "Batch probe retrieved a redundant full pool");

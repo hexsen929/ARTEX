@@ -117,6 +117,13 @@ jobs:
           for case in ExecutionHydraMigrationPreservesApprovalPolicy ExecutionOutcomeGenerationCannotSettleNewRun ExecutionApprovalWaitCanceledRunNeverExecutesLateApproval ExecutionApprovalBudgetIsNotReportedAsExplorationFailure ExecutionCompactionCanceledAndBoundedRounds ExecutionCompactionFailurePreservesPreviousCoverage ExecutionOutcomeRetryAndOrphanRecovery ExecutionBrowserTrustPinsOnlyRecordingCA ExecutionPlannerDispatchIsAtomicAndMetadataSurvives ExecutionPlanningSchemaMigrationPreservesCustomizations ExecutionStagnationSignalsPreserveMeaningfulDifferences ExecutionPlannerReadinessRepairsStoredLegacyBody ExecutionGoalProofRejectsInferenceAndCommitsAtomically ExecutionPlannerReadsLatestOutputBeyondHistoryPage ExecutionCorruptHistoryCannotSilentlyRestartWorker ExecutionScenarioGuidanceDoesNotUndoEvidenceCalibration ExecutionStartupRecoveryFailureBlocksAllStartPaths ExecutionClaimGenerationPrecedesWorkerSetup ExecutionCompactionRejectsChangedSourceBeforePublication ExecutionFactConfirmationKeepsEvidenceAndScope ExecutionFactConfirmationSchemaPreservesPolicy ExecutionStableCheckIdentitySurvivesWordingAndFailures ExecutionCheckpointAtomicityAndContinuation ExecutionCheckContinuationToolKeepsOriginalSession ExecutionEnginePersistsActualToolCheckpoint; do
             grep -q -- "^--- PASS: Test${case} " "$RUNNER_TEMP/execution-reliability.log"
           done
+      - name: Proxy progress and protocol detection regressions
+        run: |
+          set -euo pipefail
+          go test -race -v ./server -run '^TestProxyPool(Progress|AutoProtocol|AutoImport)' -count=1 -timeout=3m | tee "$RUNNER_TEMP/proxy-progress.log"
+          for name in ProgressAndInteractiveResultWinsBatch ProgressCancelLeavesHealthUnchanged AutoProtocolPersistsOnlyVerifiedCandidate AutoProtocolWithRealSOCKS5Handshake AutoImportWaitsForResolution; do
+            grep -q -- "^--- PASS: TestProxyPool${name} " "$RUNNER_TEMP/proxy-progress.log"
+          done
       - name: MCP lifecycle concurrency regressions
         run: |
           go test -race ./server -run 'Test(LazyMCP|MCPSlotQueue|LeasedMCP|ManagerClose)' -count=1 -timeout=3m

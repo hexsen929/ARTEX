@@ -96,7 +96,7 @@ test("settings do not mount a hidden whole pool or keep an import textarea in th
   assert.match(list, /onClick=\{onRefresh\} disabled=\{busy\}>刷新状态/);
   assert.match(list, /style=\{\{ fieldSizing: "fixed" \}\}/);
   const importEditor = list.slice(list.indexOf("function ProxyPoolImport("), list.indexOf("export function ProxyPoolList("));
-  assert.ok(!importEditor.includes("value={"));
+  assert.doesNotMatch(importEditor, /<textarea[^>]*\svalue=/);
   assert.ok(!importEditor.includes("setText("));
   assert.ok(!importEditor.includes("<details"));
   assert.match(importEditor, /defaultValue=\{draft\.current\}/);

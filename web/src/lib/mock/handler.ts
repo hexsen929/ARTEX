@@ -2498,6 +2498,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       ],
       warnings: [],
     };
+  if (path === "/settings/proxy-pool/progress" && m === "GET") return {id:0,state:"idle",total:0,completed:0,running:0,succeeded:0,failed:0,concurrency:12,items:{}};
+  if (path === "/settings/proxy-pool/cancel-tests" && m === "POST") return {ok:true};
   if (path === "/settings/proxy-pool" && m === "GET") return { entries: D.settings.proxy_pool ?? [], active_id: D.settings.proxy_pool_active_id ?? "", active_proxy: D.settings.global_proxy ?? "", switch_log: [] };
   if (path === "/settings/proxy-pool/import" && m === "POST") return { ok: true, probe_queued: true, errors: [] };
   if (path === "/settings/proxy-pool/test-all" && m === "POST") return { ok: true, probe_queued: true };

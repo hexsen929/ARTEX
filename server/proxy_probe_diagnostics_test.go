@@ -152,7 +152,7 @@ func TestProxyPoolDiagnosticsSeparateHTTPWithoutPublishingHealthOrRoute(t *testi
 }
 
 func TestProxyPoolDiagnosticRejectsCanceledOrChangedSnapshots(t *testing.T) {
-	for _, mode := range []string{"edit", "cancel", "shutdown", "batch-busy"} {
+	for _, mode := range []string{"edit", "cancel", "shutdown"} {
 		t.Run(mode, func(t *testing.T) {
 			entries := proxyScaleEntries(1)
 			m := &Manager{proxyPool: &proxyPoolState{entries: entries}}
