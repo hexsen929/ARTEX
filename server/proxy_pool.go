@@ -40,7 +40,6 @@ type ProxyPoolEntry struct {
 	ProtocolAuto        bool                 `json:"protocol_auto,omitempty"`
 	DetectedProtocol    string               `json:"detected_protocol,omitempty"`
 	ProtocolChecks      []proxyProtocolCheck `json:"protocol_checks,omitempty"`
-	HTTPOnly            bool                 `json:"http_only,omitempty"`
 	ID                  string               `json:"id"`
 	URL                 string               `json:"url"`
 	Name                string               `json:"name,omitempty"`
@@ -121,10 +120,6 @@ func proxyEntryUsable(e proxyPoolEntry) bool {
 	return e.Enabled && e.RawURL != "" && (!e.ProtocolAuto || e.DetectedProtocol != "")
 }
 
-func proxyEntryAutomatic(e proxyPoolEntry) bool {
-	return proxyEntryUsable(e) && (!e.HTTPOnly || e.ProtocolAuto) && e.Health != "unhealthy-cooling"
-}
-
 type proxyPoolTickOutcome struct {
 	confirmed bool
 	switched  bool
@@ -189,19 +184,15 @@ func decodeProxyPoolStartup(values map[string]string) (proxyPoolPersist, string,
 	}
 	if chosen == "" {
 		for _, e := range pool.Entries {
-			if proxyEntryAutomatic(e) {
-				if chosen == "" || !e.HTTPOnly {
-					chosen = e.ID
-				}
-				if !e.HTTPOnly {
-					break
-				}
+			if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" {
+				chosen = e.ID
+				break
 			}
 		}
 	}
 	if chosen == "" {
 		for _, e := range pool.Entries {
-			if proxyEntryUsable(e) && !e.HTTPOnly {
+			if proxyEntryUsable(e) {
 				chosen = e.ID
 				break
 			}
@@ -352,11 +343,13 @@ func (m *Manager) setProxyPoolEntries(entries []proxyPoolEntry, active string, e
 	if active != "" {
 		return m.applyActiveProxyLockedWithHealth(active, "manual", true)
 	}
-	if next := m.selectHealthyLocked(""); next != "" {
-		return m.applyActiveProxyLocked(next, "reconnect")
+	for _, e := range entries {
+		if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" {
+			return m.applyActiveProxyLocked(e.ID, "reconnect")
+		}
 	}
 	for _, e := range entries {
-		if proxyEntryUsable(e) && !e.HTTPOnly {
+		if proxyEntryUsable(e) {
 			return m.applyActiveProxyLockedWithHealth(e.ID, "reconnect", true)
 		}
 	}
@@ -420,23 +413,15 @@ func (m *Manager) selectHealthyLocked(exclude string) string {
 			strategy = v
 		}
 	}
-	fullAvailable := false
-	for _, e := range m.proxyPool.entries {
-		if proxyEntryAutomatic(e) && !e.HTTPOnly {
-			fullAvailable = true
-			break
-		}
-	}
-	eligible := func(e proxyPoolEntry) bool { return proxyEntryAutomatic(e) && (!fullAvailable || !e.HTTPOnly) }
 	pool := make([]string, 0)
 	for _, e := range m.proxyPool.entries {
-		if eligible(e) && e.ID != exclude {
+		if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" && e.ID != exclude {
 			pool = append(pool, e.ID)
 		}
 	}
 	if len(pool) == 0 && exclude != "" {
 		for _, e := range m.proxyPool.entries {
-			if eligible(e) {
+			if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" {
 				pool = append(pool, e.ID)
 			}
 		}
@@ -456,7 +441,7 @@ func (m *Manager) selectHealthyLocked(exclude string) string {
 	}
 	for n := 0; n < len(m.proxyPool.entries); n++ {
 		e := m.proxyPool.entries[(start+n)%len(m.proxyPool.entries)]
-		if eligible(e) && e.ID != exclude {
+		if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" && e.ID != exclude {
 			return e.ID
 		}
 	}
@@ -500,9 +485,6 @@ func (m *Manager) markProxyProbeLocked(id string, res egressProbeResult) {
 		e.ProtocolChecks = res.ProtocolChecks
 		if res.OK {
 			e.ConsecutiveFailures, e.LastError, e.Health = 0, "", "healthy"
-			if e.HTTPOnly {
-				e.Health = "http-only"
-			}
 			e.LastErrorCode = ""
 		} else {
 			e.ConsecutiveFailures++
@@ -558,20 +540,13 @@ func (m *Manager) applyProxyProbeBatchLocked(results []proxyBatchProbe, threshol
 				return false, err
 			}
 			e.RawURL, e.URL, e.DetectedProtocol = u.String(), maskSecrets(u.String()), u.Scheme
-			e.HTTPOnly = res.HTTPOnly
-		}
-		if res.OK && e.ProtocolAuto {
-			e.HTTPOnly = res.HTTPOnly
 		}
 		e.LastCheckedAt, e.LatencyMS, e.EgressIP = now, res.LatencyMS, res.ExitIP
 		e.ProtocolChecks = res.ProtocolChecks
 		if res.OK {
 			e.ConsecutiveFailures, e.LastError, e.Health = 0, "", "healthy"
-			if e.HTTPOnly {
-				e.Health = "http-only"
-			}
 			e.LastErrorCode = ""
-			confirmed = confirmed || (!e.HTTPOnly && e.ID == m.proxyPool.active)
+			confirmed = confirmed || e.ID == m.proxyPool.active
 		} else {
 			e.ConsecutiveFailures++
 			e.LastError = maskSecrets(res.Error)
@@ -1008,17 +983,12 @@ func (s *Server) handleProxyPoolFailure(cause error) bool {
 	if cur == "" {
 		return false
 	}
-	httpOnly := s.m.activeProxyHTTPOnly(cur)
-	probes := defaultEgressProbes
-	if httpOnly {
-		probes = []string{"http://api.ipify.org?format=json"}
-	}
-	res := s.runProxyProbe(serverContext(s), cur, "", probes, proxyPoolProbeTimeout)
+	res := s.runProxyProbe(serverContext(s), cur, "", defaultEgressProbes, proxyPoolProbeTimeout)
 	if s.proxyShuttingDown() {
 		return true
 	}
 	if res.OK {
-		return httpOnly
+		return false
 	}
 	_, _, onFailure, _ := s.m.proxyRotateConfig()
 	s.proxyPoolTickMu.Lock()
@@ -1341,7 +1311,6 @@ func (s *Server) updateProxyPool(w http.ResponseWriter, r *http.Request) {
 			e.RawURL, e.URL = raw, maskSecrets(raw)
 			e.ProtocolAuto, e.DetectedProtocol = false, ""
 			e.ProtocolChecks = nil
-			e.HTTPOnly = false
 			if e.ID == s.m.proxyPool.active && e.Enabled && raw != "" {
 				// A validated edit replaces the endpoint and starts a fresh health round,
 				// including when the old endpoint was cooling down.
@@ -1562,22 +1531,12 @@ func (s *Server) deleteProxyPool(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) activateProxyPool(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	selection, err := decodeProxyProtocolSelection(w, r)
-	if err != nil {
-		writeErr(w, 400, err.Error())
-		return
-	}
 	before := s.m.proxyPoolActiveID()
-	if selection.Protocol != "" {
-		err = s.m.activateProxyProtocol(id, selection)
-	} else {
-		err = s.m.activateProxyID(id, "manual")
-	}
-	if err != nil {
+	if err := s.m.activateProxyID(id, "manual"); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if before != id && !s.m.activeProxyHTTPOnly(s.m.GlobalProxy()) {
+	if before != id {
 		s.proxyReconnectSuccess()
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "active_id": id, "active_proxy": maskSecrets(s.m.GlobalProxy())})

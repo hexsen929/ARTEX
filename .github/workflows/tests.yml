@@ -124,7 +124,7 @@ jobs:
           for name in ProgressAndInteractiveResultWinsBatch ProgressCancelLeavesHealthUnchanged AutoProtocolPersistsOnlyVerifiedCandidate AutoProtocolWithRealSOCKS5Handshake AutoImportWaitsForResolution; do
             grep -q -- "^--- PASS: TestProxyPool${name} " "$RUNNER_TEMP/proxy-progress.log"
           done
-          for name in HTTPResponsesDoNotProveHTTPSOrProxyIdentity SOCKS4ResponseRecognizedButNotRoutable RecognitionAndFailureDetailsPersistWithoutRouteActivation AutoDiagnosisUsesAllCandidatesAndDoesNotMutate CancellationJoinsEveryCandidate ManualHTTPUseSurvivesChecksAndRestart ManualSelectionRejectsStaleAndMalformedRequests AutoSelectsHTTPAndPrefersHTTPSWhenAvailable NegativeControlBlocksTransparentHTTPFalsePositive; do
+          for name in HTTPResponsesDoNotProveHTTPSOrProxyIdentity SOCKS4ResponseRecognizedButNotRoutable RecognitionAndFailureDetailsPersistWithoutRouteActivation AutoDiagnosisUsesAllCandidatesAndDoesNotMutate CancellationJoinsEveryCandidate AutoSelectsCompleteProtocolWithoutCandidateVeto PartialCapabilityNeverBecomesCompleteRoute NegativeControlBlocksTransparentHTTPFalsePositive; do
             grep -q -- "^--- PASS: TestProxyProtocol${name} " "$RUNNER_TEMP/proxy-progress.log"
           done
       - name: MCP lifecycle concurrency regressions

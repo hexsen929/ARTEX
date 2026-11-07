@@ -206,117 +206,59 @@ func TestProxyProtocolCancellationJoinsEveryCandidate(t *testing.T) {
 	joined.Wait()
 }
 
-func TestProxyProtocolManualHTTPUseSurvivesChecksAndRestart(t *testing.T) {
-	entry := proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ID: "limited", ProtocolAuto: true, Enabled: true}, RawURL: "http://proxy.invalid:8080"}
-	s := capabilityFixtureServer(entry)
-	result, raw := s.probePoolEntry(t.Context(), entry)
-	s.m.proxyPool.mu.Lock()
-	_, err := s.m.applyProxyProbeBatchLocked([]proxyBatchProbe{{entry: entry, result: result, complete: true, resolvedURL: raw}}, 1)
-	s.m.proxyPool.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if proxyCleanupEligible(s.m.proxyPoolEntries()[0].ProxyPoolEntry, 1) {
-		t.Fatal("HTTP-capable node selected for failed-node cleanup")
-	}
-	if err := s.m.activateProxyProtocol(entry.ID, proxyProtocolSelection{Protocol: "socks5"}); err == nil {
-		t.Fatal("unverified HTTPS route activated")
-	}
-	if err := s.m.activateProxyProtocol(entry.ID, proxyProtocolSelection{Protocol: "socks4", HTTPOnly: true}); err == nil {
-		t.Fatal("unsupported protocol activated")
-	}
-	if err := s.m.activateProxyProtocol(entry.ID, proxyProtocolSelection{Protocol: "socks5", HTTPOnly: true}); err != nil {
-		t.Fatal(err)
-	}
-	stored := s.m.proxyPoolEntries()[0]
-	if !stored.HTTPOnly || stored.ProtocolAuto || stored.Health != "http-only" || s.m.GlobalProxy() != "socks5://proxy.invalid:8080" {
-		t.Fatal(stored)
-	}
-	res, raw := s.probePoolEntry(t.Context(), stored)
-	if !res.OK || raw != "" || res.Via != "socks5" || len(res.ProtocolChecks) != 1 || res.ProtocolChecks[0].HTTPS.OK {
-		t.Fatal("HTTP health lost or HTTPS incorrectly passed", res)
-	}
-	s.m.proxyPool.mu.Lock()
-	confirmed, err := s.m.applyProxyProbeBatchLocked([]proxyBatchProbe{{entry: stored, result: res, complete: true}}, 1)
-	automatic := s.m.selectHealthyLocked("")
-	s.m.proxyPool.mu.Unlock()
-	if err != nil || confirmed || automatic != "" || s.m.proxyPoolEntries()[0].Health != "http-only" {
-		t.Fatal("limited route promoted to general HTTPS health", confirmed, automatic, err)
-	}
-	if s.reconcileProxyPoolAfterProbe(false) || s.m.GlobalProxy() != stored.RawURL {
-		t.Fatal("HTTP health check discarded manually selected route")
-	}
-	persisted, _ := json.Marshal(proxyPoolPersist{Entries: s.m.proxyPoolEntries(), Active: entry.ID})
-	pool, global, _, err := decodeProxyPoolStartup(map[string]string{settingProxyPool: string(persisted)})
-	if err != nil || global != stored.RawURL || !pool.Entries[0].HTTPOnly {
-		t.Fatal("manual HTTP route lost on restart", err)
-	}
-	// Losing HTTP connectivity must still cool the route; this is not an
-	// override that keeps a dead proxy healthy indefinitely.
-	s.m.proxyPool.mu.Lock()
-	_, err = s.m.applyProxyProbeBatchLocked([]proxyBatchProbe{{entry: s.m.proxyPool.entries[0], result: egressProbeResult{Error: "timeout", ErrorCode: "timeout"}, complete: true}}, 1)
-	s.m.proxyPool.mu.Unlock()
-	if err != nil || s.m.proxyPoolEntries()[0].Health != "unhealthy-cooling" {
-		t.Fatal("dead HTTP route stayed healthy", err)
+func TestProxyProtocolAutoSelectsCompleteProtocolWithoutCandidateVeto(t *testing.T) {
+	for _, selected := range []string{"http", "https", "socks5"} {
+		t.Run(selected, func(t *testing.T) {
+			entry := proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ID: "complete", ProtocolAuto: true, Enabled: true}, RawURL: "http://proxy.invalid:8080"}
+			s := &Server{
+				m:                &Manager{proxyPool: &proxyPoolState{entries: []proxyPoolEntry{entry}, disabled: true}},
+				proxySOCKS4Probe: func(context.Context, string) (bool, string) { return false, "fixture" },
+				proxyProbe: func(_ context.Context, raw, _ string, _ []string, _ time.Duration) egressProbeResult {
+					if raw == selected+"://proxy.invalid:8080" {
+						return egressProbeResult{OK: true, ExitIP: "192.0.2.10", Probes: []egressAttempt{}}
+					}
+					return egressProbeResult{Error: "fixture failure", ErrorCode: "proxy_transport", Probes: []egressAttempt{}}
+				},
+			}
+			res, raw := s.probePoolEntry(t.Context(), entry)
+			if !res.OK || raw != selected+"://proxy.invalid:8080" {
+				t.Fatal("failed candidates vetoed a complete protocol", res, raw)
+			}
+			s.m.proxyPool.mu.Lock()
+			_, err := s.m.applyProxyProbeBatchLocked([]proxyBatchProbe{{entry: entry, result: res, complete: true, resolvedURL: raw}}, 1)
+			s.m.proxyPool.mu.Unlock()
+			if err != nil || s.m.proxyPoolEntries()[0].DetectedProtocol != selected {
+				t.Fatal("selected protocol was not saved", err)
+			}
+			if s.reconcileProxyPoolAfterProbe(false) || s.m.GlobalProxy() != "" {
+				t.Fatal("automatic detection enabled a disabled global proxy")
+			}
+			s.m.proxyPool.disabled = false
+			if !s.reconcileProxyPoolAfterProbe(false) || s.m.GlobalProxy() != raw {
+				t.Fatal("complete protocol was not automatically activated")
+			}
+		})
 	}
 }
 
-func TestProxyProtocolManualSelectionRejectsStaleAndMalformedRequests(t *testing.T) {
-	entry := proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ID: "stale", ProtocolAuto: true, Enabled: true, LastCheckedAt: time.Now().Add(-6 * time.Minute), ProtocolChecks: []proxyProtocolCheck{{Protocol: "http", Supported: true, HTTP: proxyCapabilityCheck{Checked: true, OK: true, IP: "192.0.2.9"}}}}, RawURL: "http://proxy.invalid:80"}
-	m := &Manager{proxyPool: &proxyPoolState{entries: []proxyPoolEntry{entry}, disabled: true}}
-	if err := m.activateProxyProtocol(entry.ID, proxyProtocolSelection{Protocol: "http", HTTPOnly: true}); err == nil || m.GlobalProxy() != "" || !m.proxyPool.disabled {
-		t.Fatal("stale result changed route")
-	}
-	for _, body := range []string{`{"http_only":true}`, `{"protocol":"http","extra":true}`, `{} {}`, `{`} {
-		r := httptest.NewRequest("POST", "/activate", strings.NewReader(body))
-		if _, err := decodeProxyProtocolSelection(httptest.NewRecorder(), r); err == nil {
-			t.Fatal("invalid selection accepted", body)
+func TestProxyProtocolPartialCapabilityNeverBecomesCompleteRoute(t *testing.T) {
+	for _, available := range []string{"http://", "https://"} {
+		s := &Server{
+			proxySOCKS4Probe: func(context.Context, string) (bool, string) { return false, "fixture" },
+			proxyProbe: func(_ context.Context, raw, _ string, probes []string, _ time.Duration) egressProbeResult {
+				if raw == "http://proxy.invalid:8080" && strings.HasPrefix(probes[0], available) {
+					return egressProbeResult{OK: true, ExitIP: "192.0.2.12", Probes: []egressAttempt{}}
+				}
+				return egressProbeResult{Error: "fixture failure", ErrorCode: "proxy_transport", Probes: []egressAttempt{}}
+			},
 		}
-	}
-}
-
-func TestProxyProtocolAutoSelectsHTTPAndPrefersHTTPSWhenAvailable(t *testing.T) {
-	entry := proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ID: "auto-http", ProtocolAuto: true, Enabled: true}, RawURL: "http://proxy.invalid:8080"}
-	s := capabilityFixtureServer(entry)
-	result, raw := s.probePoolEntry(t.Context(), entry)
-	if !result.OK || !result.HTTPOnly || raw != "socks5://proxy.invalid:8080" || result.ProtocolChecks[2].HTTPS.OK {
-		t.Fatal("HTTP-capable protocol was not selected independently", result, raw)
-	}
-	s.m.proxyPool.mu.Lock()
-	_, err := s.m.applyProxyProbeBatchLocked([]proxyBatchProbe{{entry: entry, result: result, complete: true, resolvedURL: raw}}, 1)
-	automatic := s.m.selectHealthyLocked("")
-	stored := s.m.proxyPool.entries[0]
-	s.m.proxyPool.mu.Unlock()
-	if err != nil || automatic != entry.ID || stored.DetectedProtocol != "socks5" || !stored.HTTPOnly || stored.Health != "http-only" {
-		t.Fatal("HTTP route was left locked", automatic, stored, err)
-	}
-	if s.reconcileProxyPoolAfterProbe(false) || s.m.GlobalProxy() != "" {
-		t.Fatal("automatic detection enabled a disabled global proxy")
-	}
-	s.m.proxyPool.disabled = false
-	if !s.reconcileProxyPoolAfterProbe(false) || s.m.GlobalProxy() != raw {
-		t.Fatal("available HTTP protocol was not activated automatically")
-	}
-	full := proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ID: "full", Enabled: true, Health: "healthy"}, RawURL: "http://full.invalid:80"}
-	s.m.proxyPool.mu.Lock()
-	s.m.proxyPool.entries = append(s.m.proxyPool.entries, full)
-	preferred := s.m.selectHealthyLocked(stored.ID)
-	noDowngrade := s.m.selectHealthyLocked(full.ID)
-	s.m.proxyPool.mu.Unlock()
-	if preferred != full.ID || noDowngrade != full.ID {
-		t.Fatal("rotation preferred HTTP over HTTPS", preferred, noDowngrade)
-	}
-	// A working supported protocol wins even while others fail.
-	probe := s.proxyProbe
-	s.proxyProbe = func(ctx context.Context, raw, ca string, probes []string, timeout time.Duration) egressProbeResult {
-		if strings.HasPrefix(raw, "https://") && strings.HasPrefix(probes[0], "https://") {
-			return egressProbeResult{OK: true, ExitIP: "192.0.2.10", Probes: []egressAttempt{}}
+		res, raw := s.probePoolEntry(t.Context(), proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ProtocolAuto: true}, RawURL: "http://proxy.invalid:8080"})
+		if res.OK || raw != "" {
+			t.Fatal("partial capability became a complete route", available, res, raw)
 		}
-		return probe(ctx, raw, ca, probes, timeout)
-	}
-	result, raw = s.probePoolEntry(t.Context(), entry)
-	if !result.OK || result.HTTPOnly || raw != "https://proxy.invalid:8080" {
-		t.Fatal("one candidate's failure vetoed a good HTTPS route", result, raw)
+		if res.ProtocolChecks[0].HTTP.OK != (available == "http://") || res.ProtocolChecks[0].HTTPS.OK != (available == "https://") {
+			t.Fatal("partial capability was discarded", res)
+		}
 	}
 }
 

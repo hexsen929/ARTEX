@@ -6,8 +6,7 @@ export function proxyLastCheckFailed(entry: { last_checked_at?: string; last_err
     Number.isFinite(Date.parse(entry.last_checked_at)) && !!entry.last_error && entry.consecutive_failures > 0;
 }
 
-export function proxyCleanupEligible(entry: { health: string; last_checked_at?: string; last_error?: string; consecutive_failures: number; protocol_checks?: { http: { ok: boolean }; https: { ok: boolean } }[] }, threshold: number): boolean {
-  if (entry.protocol_checks?.some((check) => check.http.ok || check.https.ok)) return false;
+export function proxyCleanupEligible(entry: { health: string; last_checked_at?: string; last_error?: string; consecutive_failures: number }, threshold: number): boolean {
   return (entry.health === "unhealthy-cooling" || entry.health === "disabled") &&
     proxyLastCheckFailed(entry) &&
     entry.consecutive_failures >= Math.max(1, threshold);

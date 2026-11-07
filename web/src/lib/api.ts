@@ -1117,10 +1117,10 @@ export const api = {
   proxyProbeProgress: (ids: string[], signal?: AbortSignal) =>
     http<import("./types").ProxyProbeProgress>(`/settings/proxy-pool/progress?ids=${encodeURIComponent(ids.slice(0, 50).join(","))}`, { signal }),
   cancelProxyPoolTests: () => post<{ ok: boolean }>(`/settings/proxy-pool/cancel-tests`, {}),
-  activateProxyPool: (id: string, selection?: { protocol: string; http_only: boolean }) =>
+  activateProxyPool: (id: string) =>
     post<{ ok: boolean; active_id: string; active_proxy: string }>(
       `/settings/proxy-pool/${encodeURIComponent(id)}/activate`,
-      selection ?? {},
+      {},
     ),
   testTaskProxy: (taskID: string) => post<{ ok: boolean; error?: string }>(`/tasks/${taskID}/proxy/test`, {}),
 

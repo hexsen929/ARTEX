@@ -1,18 +1,17 @@
 import type { EgressProbeResult, ProxyCapabilityCheck, ProxyPoolDiagnosis, ProxyPoolEntry } from "./types";
 
 export function proxyProtocolStatus(entry: ProxyPoolEntry) {
-  if (entry.http_only) return `${entry.protocol_auto ? "自动选择" : "手动选择"} ${entry.detected_protocol?.toUpperCase() || "代理协议"} · 仅 HTTP 使用`;
   if (!entry.protocol_auto) return "";
   if (entry.detected_protocol) return `已识别 ${entry.detected_protocol.toUpperCase()}`;
   const recognized = entry.protocol_checks?.filter((check) => check.recognized);
-  if (recognized?.length) return `协议响应：${recognized.map((check) => `${check.protocol.toUpperCase()}${check.supported ? "" : "（暂不支持转发）"}`).join("、")}；尚未通过 HTTPS 验证`;
+  if (recognized?.length) return `协议响应：${recognized.map((check) => `${check.protocol.toUpperCase()}${check.supported ? "" : "（暂不支持转发）"}`).join("、")}；尚未通过完整访问验证`;
   if (entry.protocol_checks?.some((check) => check.http.ok)) return "仅 HTTP 回显通过；未确认代理身份";
   return "协议待识别";
 }
 
 export function proxyProbeStatus(entry: ProxyPoolEntry, threshold: number) {
   if (!entry.enabled) return { label: "已停用", tone: "muted" };
-  if (entry.protocol_auto && !entry.detected_protocol && entry.protocol_checks?.some((check) => check.http.ok)) return { label: "HTTP 回显通过 · HTTPS 未通过", tone: "limited" };
+  if (entry.protocol_auto && !entry.detected_protocol && entry.protocol_checks?.some((check) => check.http.ok || check.https.ok)) return { label: "部分检查通过 · 未完整可用", tone: "limited" };
   if (entry.last_error && entry.consecutive_failures > 0) {
     return entry.health === "unhealthy-cooling"
       ? { label: "失效冷却中", tone: "failed" }
@@ -20,7 +19,6 @@ export function proxyProbeStatus(entry: ProxyPoolEntry, threshold: number) {
   }
   if (entry.health === "unhealthy-cooling") return { label: "失效冷却中", tone: "failed" };
   if (entry.last_error) return { label: "最近检测失败", tone: "failed" };
-  if (entry.http_only) return { label: "HTTP 受限可用", tone: "limited" };
   if (entry.health === "healthy") return { label: "健康", tone: "healthy" };
   return { label: "尚未检测", tone: "muted" };
 }

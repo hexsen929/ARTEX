@@ -146,7 +146,6 @@ type egressProbeResult struct {
 	Probes             []egressAttempt      `json:"probes"` // 每个地址的明细，便于排查
 	ProtocolRecognized bool                 `json:"protocol_recognized,omitempty"`
 	ProtocolChecks     []proxyProtocolCheck `json:"protocol_checks,omitempty"`
-	HTTPOnly           bool                 `json:"http_only,omitempty"`
 }
 
 // egressCheck 是报告里的一行，对应一个链路形态。

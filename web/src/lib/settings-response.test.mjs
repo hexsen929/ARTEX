@@ -194,5 +194,5 @@ test("proxy tests do not silently request task resume and mutations reload the p
   assert.doesNotMatch(page, /resume:\s*true/);
   assert.match(page, /apply\(await api\.settings\(\)\)/);
   assert.match(page, /fieldset disabled=\{!loaded \|\| proxyPoolBusy\}/);
-  assert.match(page, /api\.activateProxyPool\(id, selection\)/);
+  assert.match(page, /api\.activateProxyPool\(id\)/);
 });

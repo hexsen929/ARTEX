@@ -34,10 +34,8 @@ test("recognized protocols and HTTP capability remain visible without claiming H
   const partial = { ...entry, protocol_auto: true, protocol_checks: capabilityChecks, last_error: "certificate", consecutive_failures: 3, health: "unhealthy-cooling" };
   assert.match(proxyProtocolStatus(partial), /SOCKS5/);
   assert.match(proxyProtocolStatus(partial), /SOCKS4（暂不支持转发）/);
-  assert.match(proxyProtocolStatus(partial), /尚未通过 HTTPS/);
+  assert.match(proxyProtocolStatus(partial), /尚未通过完整访问/);
   assert.equal(proxyProbeStatus(partial, 3).tone, "limited");
-  assert.equal(proxyProbeStatus({ ...entry, http_only: true, health: "http-only" }, 3).label, "HTTP 受限可用");
-  assert.equal(proxyProbeStatus({ ...entry, http_only: true, health: "unhealthy-cooling", last_error: "timeout", consecutive_failures: 3 }, 3).tone, "failed");
 });
 test("automatic diagnosis validates all protocol capability results", () => {
   const auto = { ...report, https: { ...report.https, protocol_checks: capabilityChecks } };

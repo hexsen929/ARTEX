@@ -153,19 +153,21 @@ func (s *Server) inspectProxyProtocols(parent context.Context, entry proxyPoolEn
 		} else {
 			secure[a.index] = a.result
 			check.HTTPS = capabilityCheck(a.result)
-			if a.result.OK && winner == -1 {
-				winner = a.index
-				if stopOnSuccess {
-					cancel()
-				}
+		}
+		if check.HTTPS.OK && check.HTTP.OK && winner == -1 {
+			winner = a.index
+			if stopOnSuccess {
+				cancel()
 			}
 		}
 	}
 	for i := range 3 {
 		checks[i].AutoSelectionBlocked = !checks[i].HTTPS.OK && !checks[i].Recognized && checks[i].HTTP.OK && control.OK && checks[i].HTTP.IP == control.ExitIP
 		switch {
+		case checks[i].HTTPS.OK && checks[i].HTTP.OK:
+			checks[i].Evidence = "HTTP／HTTPS 访问均通过，证书验证通过，可完整使用"
 		case checks[i].HTTPS.OK:
-			checks[i].Evidence = "HTTPS 出口回显通过，证书验证通过"
+			checks[i].Evidence = "HTTPS 访问通过，HTTP 访问未通过，未达到完整可用条件"
 		case checks[i].Recognized:
 			checks[i].Evidence = "已收到代理协议响应，HTTPS 验证未通过"
 		case checks[i].AutoSelectionBlocked:
@@ -176,29 +178,16 @@ func (s *Server) inspectProxyProtocols(parent context.Context, entry proxyPoolEn
 			checks[i].Evidence = "未确认代理协议，具体原因见 HTTP／HTTPS 结果"
 		}
 	}
-	if winner == -1 && stopOnSuccess {
-		chosen := -1
-		for i := range 3 {
-			if checks[i].HTTP.OK && !checks[i].AutoSelectionBlocked && (chosen == -1 || (!checks[chosen].Recognized && checks[i].Recognized)) {
-				chosen = i
-			}
-		}
-		if chosen != -1 {
-			result := plain[chosen]
-			result.HTTPOnly = true
-			result.Via, result.ViaLabel = schemes[chosen], schemeLabel(schemes[chosen])
-			result.ProtocolRecognized = checks[chosen].Recognized
-			result.ProtocolChecks, result.LatencyMS = checks, time.Since(started).Milliseconds()
-			return result, plain[chosen], raws[chosen]
-		}
-	}
 	selected := winner
 	if selected == -1 {
 		selected, best := 0, -1
 		for i := range 3 {
 			score := 0
+			if checks[i].HTTPS.OK {
+				score += 100
+			}
 			if checks[i].HTTP.OK {
-				score = 10
+				score += 10
 			}
 			if checks[i].Recognized {
 				score += 20
@@ -211,6 +200,14 @@ func (s *Server) inspectProxyProtocols(parent context.Context, entry proxyPoolEn
 			}
 		}
 		result := secure[selected]
+		if !stopOnSuccess {
+			result.ProtocolChecks = checks
+			return result, plain[selected], ""
+		}
+		if result.OK {
+			result = plain[selected]
+			result.Error = "HTTPS 访问通过，但 HTTP 访问验证失败：" + result.Error
+		}
 		result.OK = false
 		result.ProtocolRecognized = checks[selected].Recognized
 		result.Via, result.ViaLabel = schemes[selected], schemeLabel(schemes[selected])
@@ -220,7 +217,7 @@ func (s *Server) inspectProxyProtocols(parent context.Context, entry proxyPoolEn
 		}
 		switch {
 		case checks[selected].Recognized:
-			result.Error = strings.ToUpper(schemes[selected]) + " 协议已识别；HTTPS 验证失败：" + result.Error
+			result.Error = strings.ToUpper(schemes[selected]) + " 协议已识别；未完整可用：" + result.Error
 		case checks[3].Recognized:
 			result.Via, result.ViaLabel = "socks4", "SOCKS4 代理"
 			result.ProtocolRecognized = true

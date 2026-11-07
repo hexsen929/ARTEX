@@ -15,7 +15,6 @@ type proxyProbeItem struct {
 	IP        string `json:"ip,omitempty"`
 	Protocol  string `json:"protocol,omitempty"`
 	LatencyMS int64  `json:"latency_ms,omitempty"`
-	HTTPOnly  bool   `json:"http_only,omitempty"`
 	revision  uint64
 }
 
@@ -162,7 +161,6 @@ func (s *Server) updateProxyProbeProgress(round *proxyProbeRound, e proxyPoolEnt
 		item.IP = res.ExitIP
 		item.Protocol = res.Via
 		item.LatencyMS = res.LatencyMS
-		item.HTTPOnly = e.HTTPOnly || res.HTTPOnly
 		round.Running--
 		round.Completed++
 		if res.OK {
@@ -196,9 +194,6 @@ func (s *Server) finishProxyProbeRound(round *proxyProbeRound, state string) {
 func (s *Server) probePoolEntry(parent context.Context, e proxyPoolEntry) (egressProbeResult, string) {
 	ctx, cancel := context.WithTimeout(parent, proxyPoolProbeTimeout)
 	defer cancel()
-	if e.HTTPOnly {
-		return s.probeHTTPOnlyEntry(ctx, e), ""
-	}
 	if !e.ProtocolAuto || e.DetectedProtocol != "" {
 		return s.runProxyProbe(ctx, e.RawURL, "", defaultEgressProbes, 5*time.Second), ""
 	}
