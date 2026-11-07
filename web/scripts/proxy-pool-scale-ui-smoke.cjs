@@ -474,7 +474,7 @@ async function main() {
     await list().getByRole("button", {name:"停止本轮测试", exact:true}).click();
     await page.getByTestId("proxy-probe-progress").filter({hasText:"本轮已停止"}).waitFor();
     console.log("PASS live progress, independent single test and cancellation during batch");
-    const batchToast = page.locator("[data-sonner-toast]").filter({ hasText: /代理测试已排队/ }).first();
+    const batchToast = page.locator("[data-sonner-toast]").filter({ hasText: /全部代理探测已排队/ }).first();
     await batchToast.waitFor();
     assert.equal(await page.locator("[data-sonner-toast]").filter({ hasText: "已完成全部代理探测" }).count(), 0, "Queued batch was mislabeled complete");
     assert.equal(requests.find((r) => r.endpoint === "/api/settings/proxy-pool/test-all").query, "?summary=1", "Batch probe retrieved a redundant full pool");

@@ -166,6 +166,7 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
   const { items, page, pages } = proxyPoolPage(filtered, requestedPage);
   const visibleIDs = items.map((entry) => entry.id).join(",");
   React.useEffect(() => {
+    if (parentBusy) return;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
@@ -192,7 +193,7 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
     };
     void poll();
     return () => { controller.abort(); clearTimeout(timer); };
-  }, [visibleIDs, pollVersion]);
+  }, [visibleIDs, pollVersion, parentBusy, entries]);
   const startBatch = async () => {
     if (starting) return;
     setStarting(true);

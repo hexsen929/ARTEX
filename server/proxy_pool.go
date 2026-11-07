@@ -1087,10 +1087,13 @@ func (s *Server) importProxyPool(w http.ResponseWriter, r *http.Request) {
 	seen := map[string]bool{}
 	for _, e := range entries {
 		key := proxyURLKeyRaw(e.RawURL)
-		if e.ProtocolAuto && e.DetectedProtocol == "" {
-			key = "auto:" + key
-		}
 		seen[key] = true
+		if e.ProtocolAuto {
+			if u, err := url.Parse(e.RawURL); err == nil {
+				u.Scheme = "http"
+				seen["auto:"+proxyURLKey(u)] = true
+			}
+		}
 	}
 	imported := 0
 	for _, p := range parsed {
@@ -1109,7 +1112,7 @@ func (s *Server) importProxyPool(w http.ResponseWriter, r *http.Request) {
 		}
 		entries = append(entries, proxyPoolEntry{ProxyPoolEntry: p, RawURL: u.String()})
 		imported++
-		seen[proxyURLKey(u)] = true
+		seen[key] = true
 	}
 	duplicates, invalid := 0, 0
 	for _, item := range errs {
@@ -1320,7 +1323,7 @@ func (s *Server) updateProxyPool(w http.ResponseWriter, r *http.Request) {
 		}
 		if s.m.proxyPool.active == id {
 			if req.URL != nil || req.Enabled != nil {
-				if proxyEntryUsable(e) {
+				if proxyEntryUsable(*e) {
 					if err := s.m.applyActiveProxyLockedWithHealth(id, "manual", req.URL != nil); err != nil {
 						*e = oldEntry
 						unlock()

@@ -259,3 +259,45 @@ func TestProxyPoolAutoProtocolPersistsOnlyVerifiedCandidate(t *testing.T) {
 		t.Fatal("explicit protocol was changed", seen)
 	}
 }
+
+func TestProxyPoolAutoImportWaitsForResolution(t *testing.T) {
+	m := &Manager{proxyPool: &proxyPoolState{}}
+	s := &Server{m: m, proxyPoolWake: make(chan struct{}, 1)}
+	importBody := `{"text":"192.0.2.1:4145\nhttp://192.0.2.2:8080"}`
+	w := httptest.NewRecorder()
+	s.importProxyPool(w, httptest.NewRequest("POST", "/import?summary=1", strings.NewReader(importBody)))
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	entries := m.proxyPoolEntries()
+	if len(entries) != 2 || !entries[0].ProtocolAuto || m.GlobalProxy() != entries[1].RawURL {
+		t.Fatal("pending protocol became active", entries, m.GlobalProxy())
+	}
+	if err := m.activateProxyID(entries[0].ID, "manual"); err == nil {
+		t.Fatal("unresolved proxy selected")
+	}
+	// Explicit selection remains available for users who know the protocol.
+	parsed, issues := parseProxyBatchWithProtocol("192.0.2.3:1080", "socks5")
+	if len(issues) != 0 || len(parsed) != 1 || parsed[0].ProtocolAuto || parsed[0].URL != "socks5://192.0.2.3:1080" {
+		t.Fatal(parsed, issues)
+	}
+	// Saved detection must survive restart and bare re-import must remain a no-op.
+	entry := entries[0]
+	res := egressProbeResult{OK: true, Via: "socks5", ExitIP: "192.0.2.6"}
+	m.proxyPool.mu.Lock()
+	_, err := m.applyProxyProbeBatchLocked([]proxyBatchProbe{{entry: entry, result: res, resolvedURL: "socks5://192.0.2.1:4145", complete: true}}, 3)
+	m.proxyPool.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(proxyPoolPersist{Entries: m.proxyPoolEntries(), Active: entries[1].ID})
+	pool, _, _, err := decodeProxyPoolStartup(map[string]string{settingProxyPool: string(raw)})
+	if err != nil || pool.Entries[0].DetectedProtocol != "socks5" {
+		t.Fatal("detected protocol lost on restart", err)
+	}
+	w = httptest.NewRecorder()
+	s.importProxyPool(w, httptest.NewRequest("POST", "/import?summary=1", strings.NewReader(`{"text":"192.0.2.1:4145"}`)))
+	if w.Code != 200 || len(m.proxyPoolEntries()) != 2 {
+		t.Fatal("bare reimport duplicated resolved proxy", w.Body.String())
+	}
+}

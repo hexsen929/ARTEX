@@ -73,6 +73,7 @@ export default function SystemSettingsPage() {
   const [proxyPoolActiveId, setProxyPoolActiveId] = React.useState("");
   const proxyPoolDraft = React.useRef("");
   const proxyPoolOperationPending = React.useRef(false);
+  const proxyPoolMutationEpoch = React.useRef(0);
   const [proxyPoolTimed, setProxyPoolTimed] = React.useState(false);
   const [proxyPoolInterval, setProxyPoolInterval] = React.useState("30");
   const [proxyPoolFailure, setProxyPoolFailure] = React.useState(false);
@@ -512,6 +513,7 @@ export default function SystemSettingsPage() {
   const runProxyPoolOperation = async (operation: () => Promise<unknown>, success?: string) => {
     if (!loaded || proxyPoolOperationPending.current) return false;
     proxyPoolOperationPending.current = true;
+    proxyPoolMutationEpoch.current += 1;
     setProxyPoolBusy(true);
     try {
       await operation();
@@ -572,7 +574,7 @@ export default function SystemSettingsPage() {
     try {
       const response = await api.testAllProxyPool();
       if (!response.ok || !response.probe_queued) throw new Error("服务未确认测试排队");
-      toast.success("代理测试已排队，进度会自动更新");
+      toast.success("全部代理探测已排队，进度会自动更新");
     } catch (error) { toast.error("测试未启动：" + (error as Error).message); }
   };
   const applyPoolSnapshot = (snapshot: Awaited<ReturnType<typeof api.proxyPool>>) => {
@@ -580,7 +582,8 @@ export default function SystemSettingsPage() {
   };
   const refreshProxyPool = () => void runProxyPoolOperation(async () => undefined, "已刷新代理状态");
   const testOneProxyPool = async (id: string) => {
-    try { await api.testProxyPoolEntry(id); applyPoolSnapshot(await api.proxyPool()); }
+    const epoch = proxyPoolMutationEpoch.current;
+    try { await api.testProxyPoolEntry(id); const snapshot = await api.proxyPool(); if (epoch === proxyPoolMutationEpoch.current) applyPoolSnapshot(snapshot); }
     catch (error) { toast.error("单条测试未完成：" + (error as Error).message); }
   };
   const toggleProxyPoolEntry = (entry: ProxyPoolEntry) =>
