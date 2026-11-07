@@ -97,8 +97,17 @@ func decodeProxyProtocolSelection(w http.ResponseWriter, r *http.Request) (proxy
 func (s *Server) probeHTTPOnlyEntry(ctx context.Context, entry proxyPoolEntry) egressProbeResult {
 	secure := make(chan egressProbeResult, 1)
 	go func() { secure <- s.runProxyProbe(ctx, entry.RawURL, "", defaultEgressProbes, 5*time.Second) }()
+	controlResult := make(chan egressProbeResult, 1)
+	if entry.ProtocolAuto {
+		go func() {
+			controlResult <- s.runProxyProbe(ctx, "http://203.0.113.1:80", "", []string{"http://api.ipify.org?format=json"}, 2*time.Second)
+		}()
+	} else {
+		controlResult <- egressProbeResult{}
+	}
 	plain := s.runProxyProbe(ctx, entry.RawURL, "", []string{"http://api.ipify.org?format=json"}, 5*time.Second)
 	https := <-secure
+	control := <-controlResult
 	u, _ := url.Parse(entry.RawURL)
 	check := proxyProtocolCheck{Protocol: u.Scheme, Supported: true, Recognized: https.ProtocolRecognized || https.OK || plain.ProtocolRecognized,
 		HTTP: capabilityCheck(plain), HTTPS: capabilityCheck(https), Evidence: "按 HTTP 受限能力检测；HTTPS 仍执行证书校验"}
@@ -110,7 +119,6 @@ func (s *Server) probeHTTPOnlyEntry(ctx context.Context, entry proxyPoolEntry) e
 		return https
 	}
 	if entry.ProtocolAuto && plain.OK && !check.Recognized {
-		control := s.runProxyProbe(ctx, "http://203.0.113.1:80", "", []string{"http://api.ipify.org?format=json"}, 2*time.Second)
 		if control.OK && control.ExitIP == plain.ExitIP {
 			plain.ProtocolChecks[0].AutoSelectionBlocked = true
 			plain.OK, plain.ErrorCode, plain.Error = false, "network_interception", "无效对照地址返回相同 HTTP 出口，无法确认代理仍可用"

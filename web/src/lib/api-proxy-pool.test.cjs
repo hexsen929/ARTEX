@@ -113,3 +113,14 @@ test("single proxy diagnostics binds the stable member ID and forwards cancellat
   assert.equal(calls[0].init.signal, controller.signal);
   assert.equal(calls[0].init.body, "{}");
 });
+
+test("proxy activation sends only the selected protocol and capability scope", async () => {
+  for (const selection of [undefined, { protocol: "socks5", http_only: true }]) {
+    const calls = [];
+    await client({ ok: true }, calls).activateProxyPool("proxy/a", selection);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "/api/settings/proxy-pool/proxy%2Fa/activate");
+    assert.deepEqual(JSON.parse(calls[0].init.body), selection ?? {});
+    assert.equal(JSON.parse(calls[0].init.body).resume, undefined);
+  }
+});
