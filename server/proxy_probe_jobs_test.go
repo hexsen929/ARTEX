@@ -209,6 +209,14 @@ func TestProxyPoolProgressCancelLeavesHealthUnchanged(t *testing.T) {
 	if m.proxyPool.probeRound.State != "cancelled" || m.proxyPool.probeRound.Running != 0 {
 		t.Fatal(m.proxyPool.probeRound.State)
 	}
+	// A pending start that captured eligibility before cancellation must not
+	// revive the round or overwrite the cancellation shown to the user.
+	previous := m.proxyPool.probeRound
+	ctx, round, queued := s.startProxyProbeRound(t.Context(), m.proxyPoolEntries(), m.proxyPool.generation, 0)
+	defer s.finishProxyProbeRound(round, "superseded")
+	if ctx.Err() == nil || len(queued) != 0 || m.proxyPool.probeRound != previous {
+		t.Fatal("cancelled snapshot restarted the batch")
+	}
 }
 
 func TestProxyPoolAutoProtocolPersistsOnlyVerifiedCandidate(t *testing.T) {

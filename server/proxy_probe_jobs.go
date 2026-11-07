@@ -99,6 +99,7 @@ func (s *Server) cancelProxyPoolTests(w http.ResponseWriter, r *http.Request) {
 		pool := s.m.proxyPool
 		pool.mu.Lock()
 		pool.forceHealth = false
+		pool.probeCancelGeneration++
 		pool.lastHealth = time.Now()
 		if round := pool.probeRound; round != nil && (round.State == "queued" || round.State == "running") {
 			round.State = "cancelled"
@@ -112,11 +113,17 @@ func (s *Server) cancelProxyPoolTests(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-func (s *Server) startProxyProbeRound(ctx context.Context, entries []proxyPoolEntry, generation uint64) (context.Context, *proxyProbeRound, []proxyPoolEntry) {
+func (s *Server) startProxyProbeRound(ctx context.Context, entries []proxyPoolEntry, generation, cancelGeneration uint64) (context.Context, *proxyProbeRound, []proxyPoolEntry) {
 	ctx, cancel := context.WithCancel(ctx)
 	pool := s.m.proxyPool
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
+	// Cancellation can arrive after eligibility was captured but before workers
+	// start. That earlier snapshot cannot replace the cancelled round.
+	if pool.generation != generation || pool.probeCancelGeneration != cancelGeneration {
+		cancel()
+		return ctx, &proxyProbeRound{State: "cancelled", cancel: cancel}, nil
+	}
 	pool.roundSequence++
 	round := &proxyProbeRound{ID: pool.roundSequence, State: "running", Total: len(entries), Concurrency: proxyPoolMaxProbeConcurrency, StartedAt: time.Now(), Items: map[string]proxyProbeItem{}, generation: generation, cancel: cancel}
 	index := map[string]int{}

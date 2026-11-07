@@ -107,11 +107,12 @@ type proxyPoolState struct {
 	lastHealth time.Time
 	// Configuration changes invalidate a whole in-flight probe round. A result
 	// for an old endpoint must not bless a newly edited/re-enabled member.
-	generation    uint64
-	forceHealth   bool
-	probeSequence uint64
-	roundSequence uint64
-	probeRound    *proxyProbeRound
+	generation            uint64
+	forceHealth           bool
+	probeSequence         uint64
+	roundSequence         uint64
+	probeCancelGeneration uint64
+	probeRound            *proxyProbeRound
 }
 
 func proxyEntryUsable(e proxyPoolEntry) bool {
@@ -723,6 +724,7 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 	// Eligibility, force intent and configuration provenance share one snapshot.
 	var entries []proxyPoolEntry
 	generation, activeID := s.m.proxyPool.generation, s.m.proxyPool.active
+	cancelGeneration := s.m.proxyPool.probeCancelGeneration
 	if healthDue || forceHealth {
 		entries = append([]proxyPoolEntry(nil), s.m.proxyPool.entries...)
 	}
@@ -748,7 +750,7 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 				break
 			}
 		}
-		ctx, round, eligible := s.startProxyProbeRound(ctx, eligible, generation)
+		ctx, round, eligible := s.startProxyProbeRound(ctx, eligible, generation, cancelGeneration)
 		finalState := "superseded"
 		defer func() { s.finishProxyProbeRound(round, finalState) }()
 		sem := s.proxyPoolProbeSem
