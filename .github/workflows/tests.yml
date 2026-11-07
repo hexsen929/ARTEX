@@ -120,9 +120,12 @@ jobs:
       - name: Proxy progress and protocol detection regressions
         run: |
           set -euo pipefail
-          go test -race -v ./server -run '^TestProxyPool(Progress|AutoProtocol|AutoImport)' -count=1 -timeout=3m | tee "$RUNNER_TEMP/proxy-progress.log"
+          go test -race -v ./server -run '^TestProxy(Pool(Progress|AutoProtocol|AutoImport)|Protocol)' -count=1 -timeout=3m | tee "$RUNNER_TEMP/proxy-progress.log"
           for name in ProgressAndInteractiveResultWinsBatch ProgressCancelLeavesHealthUnchanged AutoProtocolPersistsOnlyVerifiedCandidate AutoProtocolWithRealSOCKS5Handshake AutoImportWaitsForResolution; do
             grep -q -- "^--- PASS: TestProxyPool${name} " "$RUNNER_TEMP/proxy-progress.log"
+          done
+          for name in HTTPResponsesDoNotProveHTTPSOrProxyIdentity SOCKS4ResponseRecognizedButNotRoutable RecognitionAndFailureDetailsPersistWithoutRouteActivation AutoDiagnosisUsesAllCandidatesAndDoesNotMutate CancellationJoinsEveryCandidate ManualHTTPUseSurvivesChecksAndRestart ManualSelectionRejectsStaleAndMalformedRequests AutoSelectsHTTPAndPrefersHTTPSWhenAvailable NegativeControlBlocksTransparentHTTPFalsePositive; do
+            grep -q -- "^--- PASS: TestProxyProtocol${name} " "$RUNNER_TEMP/proxy-progress.log"
           done
       - name: MCP lifecycle concurrency regressions
         run: |

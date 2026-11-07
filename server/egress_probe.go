@@ -16,10 +16,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -134,14 +136,17 @@ type egressAttempt struct {
 
 // egressProbeResult 是一个链路形态的探测汇总。
 type egressProbeResult struct {
-	OK        bool            `json:"ok"`
-	ExitIP    string          `json:"exit_ip,omitempty"` // 外界看到的出口 IP
-	Via       string          `json:"via,omitempty"`     // direct / http / https / socks5
-	ViaLabel  string          `json:"via_label,omitempty"`
-	LatencyMS int64           `json:"latency_ms"`
-	Error     string          `json:"error,omitempty"`
-	ErrorCode string          `json:"error_code,omitempty"`
-	Probes    []egressAttempt `json:"probes"` // 每个地址的明细，便于排查
+	OK                 bool                 `json:"ok"`
+	ExitIP             string               `json:"exit_ip,omitempty"` // 外界看到的出口 IP
+	Via                string               `json:"via,omitempty"`     // direct / http / https / socks5
+	ViaLabel           string               `json:"via_label,omitempty"`
+	LatencyMS          int64                `json:"latency_ms"`
+	Error              string               `json:"error,omitempty"`
+	ErrorCode          string               `json:"error_code,omitempty"`
+	Probes             []egressAttempt      `json:"probes"` // 每个地址的明细，便于排查
+	ProtocolRecognized bool                 `json:"protocol_recognized,omitempty"`
+	ProtocolChecks     []proxyProtocolCheck `json:"protocol_checks,omitempty"`
+	HTTPOnly           bool                 `json:"http_only,omitempty"`
 }
 
 // egressCheck 是报告里的一行，对应一个链路形态。
@@ -187,6 +192,20 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 
 	tr, caErr := buildProbeTransport(proxyURL, caPEMPath)
 	defer tr.CloseIdleConnections()
+	var recognized atomic.Bool
+	tr.OnProxyConnectResponse = func(_ context.Context, _ *url.URL, _ *http.Request, response *http.Response) error {
+		if response.StatusCode == http.StatusOK || response.StatusCode == http.StatusProxyAuthRequired {
+			recognized.Store(true)
+		}
+		if response.StatusCode != http.StatusOK {
+			return proxyConnectStatusError{Status: response.StatusCode}
+		}
+		return nil
+	}
+	via, viaLabel := "direct", "直连"
+	if proxyURL != nil {
+		via, viaLabel = proxyURL.Scheme, schemeLabel(proxyURL.Scheme)
+	}
 
 	client := &http.Client{
 		Transport: tr,
@@ -198,6 +217,14 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 	attempts := make([]egressAttempt, 0, len(probes))
 	for _, target := range probes {
 		reqCtx, cancel := context.WithTimeout(ctx, timeout)
+		if via == "socks5" || via == "socks5h" {
+			// Both callbacks occur after the SOCKS CONNECT reply. In particular,
+			// a later target TLS failure must not erase the successful handshake.
+			reqCtx = httptrace.WithClientTrace(reqCtx, &httptrace.ClientTrace{
+				GotConn:           func(httptrace.GotConnInfo) { recognized.Store(true) },
+				TLSHandshakeStart: func() { recognized.Store(true) },
+			})
+		}
 		t0 := time.Now()
 		ip, err := probeOne(reqCtx, client, target)
 		cancel()
@@ -205,6 +232,9 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 		a := egressAttempt{URL: maskSecrets(target), LatencyMS: time.Since(t0).Milliseconds()}
 		if err != nil {
 			a.ErrorCode, a.Error = classifyEgressProbeError(err)
+			if a.ErrorCode == "proxy_authentication" {
+				recognized.Store(true)
+			}
 			// 只在证书类错误上补一句，否则连不上代理也会挂上不相干的 CA 说明。
 			// 必须写进 probes[].error——界面渲染的是它，不是 result.error。
 			if caErr != nil && strings.HasPrefix(a.ErrorCode, "certificate_") {
@@ -217,17 +247,14 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 
 		if a.OK {
 			// via 说的是代理协议，不是出口的网络类型。
-			via, viaLabel := "direct", "直连"
-			if proxyURL != nil {
-				via, viaLabel = proxyURL.Scheme, schemeLabel(proxyURL.Scheme)
-			}
 			return egressProbeResult{
-				OK:        true,
-				ExitIP:    ip,
-				Via:       via,
-				ViaLabel:  viaLabel,
-				LatencyMS: time.Since(start).Milliseconds(),
-				Probes:    attempts,
+				OK:                 true,
+				ExitIP:             ip,
+				Via:                via,
+				ViaLabel:           viaLabel,
+				LatencyMS:          time.Since(start).Milliseconds(),
+				Probes:             attempts,
+				ProtocolRecognized: recognized.Load(),
 			}
 		}
 	}
@@ -239,6 +266,7 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 		ErrorCode: errorCode,
 		LatencyMS: time.Since(start).Milliseconds(),
 		Probes:    attempts,
+		Via:       via, ViaLabel: viaLabel, ProtocolRecognized: recognized.Load(),
 	}
 }
 

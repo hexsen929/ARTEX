@@ -165,10 +165,11 @@ type Server struct {
 	proxyInteractiveSem  chan struct{}
 	// proxyProbe is injectable for deterministic reconnect race tests. Production
 	// servers leave it nil and use probeEgress directly.
-	proxyProbe func(context.Context, string, string, []string, time.Duration) egressProbeResult
-	side       *sideQuestionState
-	memoryWake chan struct{}
-	memoryWG   sync.WaitGroup
+	proxyProbe       func(context.Context, string, string, []string, time.Duration) egressProbeResult
+	proxySOCKS4Probe func(context.Context, string) (bool, string)
+	side             *sideQuestionState
+	memoryWake       chan struct{}
+	memoryWG         sync.WaitGroup
 }
 
 // provEntry is a cached provider + its config for one LLM profile id.

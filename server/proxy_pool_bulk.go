@@ -21,6 +21,11 @@ type proxyPoolBulkRequest struct {
 }
 
 func proxyCleanupEligible(entry ProxyPoolEntry, threshold int) bool {
+	for _, check := range entry.ProtocolChecks {
+		if check.HTTP.OK || check.HTTPS.OK {
+			return false
+		}
+	}
 	return (entry.Health == "unhealthy-cooling" || entry.Health == "disabled") && !entry.LastCheckedAt.IsZero() && entry.LastError != "" && entry.ConsecutiveFailures >= threshold
 }
 

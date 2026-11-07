@@ -195,10 +195,16 @@ async function serveAPI(request, response, url) {
           probes: [{ url: "https://echo.fixture.invalid/ip", ok: false, error: "TLS 证书已过期或尚未生效", error_code: "certificate_time_invalid", latency_ms: 12 }] },
         http: { ok: true, exit_ip: "192.0.2.5", latency_ms: 9, probes: [{ url: "http://echo.fixture.invalid/ip", ok: true, ip: "192.0.2.5", latency_ms: 9 }] },
       };
+      if (found.protocol_auto && !found.detected_protocol) report.https.protocol_checks = found.protocol_checks;
       if (state.holdDiagnosis) { heldDiagnoses.push({ release: () => json(response, 200, report) }); return; }
       return json(response, 200, report);
     }
     if (entry[2] === "activate" && method === "POST") {
+      if (body.protocol) {
+        assert.equal(body.protocol, "socks5"); assert.equal(body.http_only, true);
+        assert.equal(found.protocol_checks.find((check) => check.protocol === body.protocol).http.ok, true);
+        Object.assign(found, { url: found.url.replace(/^\w+:/, "socks5:"), protocol_auto: false, http_only: true, health: "http-only", consecutive_failures: 0, last_error: "", last_error_code: "", egress_ip: "192.0.2.5" });
+      }
       settings.proxy_pool_active_id = id; settings.global_proxy = found.url;
       return json(response, 200, { ok: true, active_id: id, active_proxy: found.url });
     }
@@ -391,7 +397,7 @@ async function main() {
     const diagnosisDialog = () => page.getByRole("dialog", { name: "代理 HTTP／HTTPS 诊断", exact: true });
     await diagnosisDialog().getByText("HTTPS（验证证书）：失败", { exact: true }).waitFor();
     await diagnosisDialog().getByText("HTTP（明文回显）：回显成功", { exact: true }).waitFor();
-    await diagnosisDialog().getByText("HTTP 可用，HTTPS 检测失败。该代理尚未达到 HTTPS 健康条件。", { exact: true }).waitFor();
+    await diagnosisDialog().getByText("HTTP 回显通过，HTTPS 检测失败。该代理尚未达到 HTTPS 健康条件。", { exact: true }).waitFor();
     assert.match(await diagnosisDialog().innerText(), /证书已过期或尚未生效/);
     assert.equal(JSON.stringify(settings), beforeDiagnosis, "HTTP-only diagnostic published healthy state or changed the exit");
     assert.equal(callCount("/api/settings"), settingsReadsBeforeDiagnosis, "Read-only diagnosis reloaded mutable settings");
@@ -409,6 +415,34 @@ async function main() {
     await list().getByRole("button", { name: "刷新状态", exact: true }).click();
     await selectedRow.getByText("全部探测地址均失败：TLS 证书链不受信任", { exact: false }).waitFor();
     console.log("PASS single failures have accurate labels; HTTP/HTTPS diagnosis shows TLS reasons without publishing health or replaying after close");
+
+    const originalProtocolEntry = { ...diagnosedEntry };
+    const originalProtocolRoute = settings.global_proxy;
+    const unavailable = { checked: true, ok: false, error: "代理拒绝 HTTPS CONNECT（HTTP 405）", error_code: "proxy_connect_rejected", latency_ms: 8 };
+    const capabilityChecks = ["http", "https", "socks5", "socks4"].map((protocol) => ({
+      protocol, supported: protocol !== "socks4", recognized: ["socks5", "socks4"].includes(protocol), evidence: "FIXTURE_PROTOCOL_EVIDENCE",
+      https: protocol === "socks4" ? { checked: false, ok: false, latency_ms: 0 } : unavailable,
+      http: protocol === "socks4" ? { checked: false, ok: false, latency_ms: 0 } : { checked: true, ok: true, ip: "192.0.2.5", latency_ms: 9 },
+    }));
+    Object.assign(diagnosedEntry, { protocol_auto: true, protocol_checks: capabilityChecks, health: "unhealthy-cooling", consecutive_failures: 5 });
+    await list().getByRole("button", { name: "刷新状态", exact: true }).click();
+    await selectedRow.getByText("HTTP 回显通过 · HTTPS 未通过", { exact: true }).waitFor();
+    await selectedRow.getByRole("button", { name: "诊断", exact: true }).click();
+    await diagnosisDialog().getByText("SOCKS5：协议已识别", { exact: true }).waitFor();
+    await diagnosisDialog().getByText("SOCKS4：协议已识别 · 暂不支持转发", { exact: true }).waitFor();
+    assert.match(await diagnosisDialog().innerText(), /代理拒绝 HTTPS CONNECT/);
+    await diagnosisDialog().getByRole("button", { name: "关闭诊断", exact: true }).click();
+    await selectedRow.getByText("协议详情与使用", { exact: true }).click();
+    assert.equal(await selectedRow.getByRole("button", { name: /使用 SOCKS4/ }).count(), 0);
+    await selectedRow.getByRole("button", { name: "使用 SOCKS5（仅 HTTP）", exact: true }).click();
+    await selectedRow.getByText("HTTP 受限可用", { exact: true }).waitFor();
+    await selectedRow.getByText("HTTP 测试出口 IP", { exact: true }).waitFor();
+    assert.equal(diagnosedEntry.http_only, true);
+    assert.equal(settings.global_proxy.startsWith("socks5://"), true);
+    for (const key of Object.keys(diagnosedEntry)) delete diagnosedEntry[key];
+    Object.assign(diagnosedEntry, originalProtocolEntry); settings.global_proxy = originalProtocolRoute;
+    await list().getByRole("button", { name: "刷新状态", exact: true }).click();
+    console.log("PASS independent protocol results, SOCKS4 limitation and explicit HTTP-only protocol selection");
 
     await list().getByRole("button", { name: "批量导入代理", exact: true }).click();
     const importText = () => page.locator('textarea[aria-label="批量代理文本"]');

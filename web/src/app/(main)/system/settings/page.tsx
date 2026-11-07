@@ -608,8 +608,8 @@ export default function SystemSettingsPage() {
     if (confirmed && result) toast.success(`已${request.action === "delete" ? "删除" : "禁用"} ${result.changed} 条代理${result.skipped ? `，跳过 ${result.skipped} 条` : ""}`);
     return confirmed;
   };
-  const activateProxyPoolEntry = (id: string) =>
-    void runProxyPoolOperation(() => api.activateProxyPool(id), "已切换全局代理");
+  const activateProxyPoolEntry = (id: string, selection?: { protocol: string; http_only: boolean }) =>
+    void runProxyPoolOperation(() => api.activateProxyPool(id, selection), selection?.http_only ? "已切换代理：仅 HTTP 使用" : "已切换全局代理");
 
   const saveProxyReconnect = () => {
     api

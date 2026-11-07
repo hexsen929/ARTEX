@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -12,6 +13,12 @@ import (
 	"syscall"
 	"time"
 )
+
+type proxyConnectStatusError struct{ Status int }
+
+func (e proxyConnectStatusError) Error() string {
+	return fmt.Sprintf("proxy CONNECT status %d", e.Status)
+}
 
 // Public errors are closed host-selected categories, not raw proxy/server
 // messages. Keep certificate verification enabled and do not trust peer roots.
@@ -21,7 +28,13 @@ func classifyEgressProbeError(err error) (string, string) {
 	var hostname x509.HostnameError
 	var certificate *tls.CertificateVerificationError
 	var network net.Error
+	var connectStatus proxyConnectStatusError
 	switch {
+	case errors.As(err, &connectStatus):
+		if connectStatus.Status == http.StatusProxyAuthRequired {
+			return "proxy_authentication", "代理认证失败或需要账号密码"
+		}
+		return "proxy_connect_rejected", fmt.Sprintf("代理拒绝 HTTPS CONNECT（HTTP %d）", connectStatus.Status)
 	case errors.Is(err, context.Canceled):
 		return "cancelled", "探测已取消"
 	case errors.As(err, &invalid):
@@ -127,12 +140,21 @@ func (s *Server) diagnoseProxyPoolEntry(w http.ResponseWriter, r *http.Request) 
 	defer cancel()
 	stopCancellation := context.AfterFunc(serverContext(s), cancel)
 	defer stopCancellation()
-	https := s.runProxyProbe(ctx, selected.RawURL, "", defaultEgressProbes, proxyPoolProbeTimeout)
+	var https, httpResult egressProbeResult
+	if selected.ProtocolAuto && selected.DetectedProtocol == "" {
+		// RawURL is only a storage placeholder until an HTTPS-verified candidate
+		// is selected. Diagnose all candidates, not that placeholder's scheme.
+		https, httpResult, _ = s.inspectProxyProtocols(ctx, *selected, false)
+	} else {
+		https = s.runProxyProbe(ctx, selected.RawURL, "", defaultEgressProbes, proxyPoolProbeTimeout)
+	}
 	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) {
 		writeErr(w, http.StatusConflict, "请求已取消或代理配置已变更，诊断结果已作废")
 		return
 	}
-	httpResult := s.runProxyProbe(ctx, selected.RawURL, "", []string{"http://api.ipify.org?format=json"}, proxyPoolProbeTimeout)
+	if !selected.ProtocolAuto || selected.DetectedProtocol != "" {
+		httpResult = s.runProxyProbe(ctx, selected.RawURL, "", []string{"http://api.ipify.org?format=json"}, proxyPoolProbeTimeout)
+	}
 	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) {
 		writeErr(w, http.StatusConflict, "请求已取消或代理配置已变更，诊断结果已作废")
 		return
@@ -140,6 +162,6 @@ func (s *Server) diagnoseProxyPoolEntry(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": selected.ID, "https": https, "http": httpResult,
 		"checked_at": time.Now(), "health_updated": false,
-		"scope": "仅诊断这条代理；HTTP 回显不证明 HTTPS 可信，不改健康状态、出口或任务暂停状态",
+		"scope": "仅诊断这条代理；HTTP 回显可能受网络转发影响，不证明代理身份或 HTTPS 可信，不改健康状态、出口或任务暂停状态",
 	})
 }
