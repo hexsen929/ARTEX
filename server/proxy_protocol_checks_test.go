@@ -56,7 +56,7 @@ func TestProxyProtocolSOCKS4RemainsUnsupportedWithoutExternalProbe(t *testing.T)
 	}}
 	result, raw := s.probePoolEntry(t.Context(), proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ProtocolAuto: true}, RawURL: "http://proxy.invalid:8080"})
 	if result.OK || raw != "" || len(result.ProtocolChecks) != 4 || result.ProtocolChecks[3].Supported || result.ProtocolChecks[3].Recognized || calls.Load() != 3 {
-		t.Fatal(result, raw, calls)
+		t.Fatal(result, raw, calls.Load())
 	}
 }
 
