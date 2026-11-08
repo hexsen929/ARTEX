@@ -2033,9 +2033,10 @@ type createTaskReq struct {
 	TimeoutSeconds       int              `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
 	PlanHeartbeatSeconds int              `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
 	SeedFirstIntent      *bool            `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
-	CoverageEnabled      *bool            `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
-	Remark               string           `json:"remark,omitempty"`            // 任务备注(最多2000字);空=无
-	WorkerCount          int              `json:"worker_count,omitempty"`      // 本任务 Worker 数;0/省略=用全局默认;上限50
+	ShareGlobalAssets    bool             `json:"share_global_assets"`
+	CoverageEnabled      *bool            `json:"coverage_enabled,omitempty"` // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
+	Remark               string           `json:"remark,omitempty"`           // 任务备注(最多2000字);空=无
+	WorkerCount          int              `json:"worker_count,omitempty"`     // 本任务 Worker 数;0/省略=用全局默认;上限50
 	// InterceptRules 任务级资产拦截/允许规则(创建时录入,存 task_intercept_rules,不进全局表)。
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
 }
@@ -2117,10 +2118,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		Name:     strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
-		CoverageEnabled: req.CoverageEnabled,
-		Remark:          remark,
-		WorkerCount:     req.WorkerCount,
-		InterceptRules:  interceptRules,
+		CoverageEnabled:   req.CoverageEnabled,
+		ShareGlobalAssets: req.ShareGlobalAssets,
+		Remark:            remark,
+		WorkerCount:       req.WorkerCount,
+		InterceptRules:    interceptRules,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrTaskCategoryInvalid) || errors.Is(err, db.ErrTaskCategoryNotFound) {
@@ -4039,6 +4041,7 @@ func (s *Server) settingsPayload() map[string]any {
 		"proxy_reconnect_max_attempts":        func() int { n, _ := s.proxyReconnectConfig(); return n }(),
 		"proxy_reconnect_interval_seconds":    func() int { _, d := s.proxyReconnectConfig(); return int(d / time.Second) }(),
 		"show_egress_ip":                      s.m.pg.GetBool(settingShowEgressIP, false),
+		"egress_probe_url":                    "",                          // Filled by writeSettingsPayload after a checked read.
 		"python_interpreter":                  strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
 		"workers":                             s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
 		"worker_pools":                        s.m.WorkerPools(),           // 非空时按池顺序绑定 worker 会话
@@ -4136,6 +4139,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		ProxyReconnectMax      *int          `json:"proxy_reconnect_max_attempts"`
 		ProxyReconnectInterval *int          `json:"proxy_reconnect_interval_seconds"`
 		ShowEgressIP           *bool         `json:"show_egress_ip"`     // 在顶栏显示直连/全局代理出口 IP；默认关
+		EgressProbeURL         *string       `json:"egress_probe_url"`   // null=不改；空串=默认公共探测服务
 		PythonInterp           *string       `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
 		Workers                *int          `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
 		WorkerPools            *[]WorkerPool `json:"worker_pools"`
@@ -4249,6 +4253,25 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "Worker 模型池读取失败；未修改并发或其它设置")
 			return
 		}
+	}
+	// Validate an explicit probe service before writing any unrelated setting.
+	var previousProbeURL string
+	if req.EgressProbeURL != nil {
+		previousProbeURL, err = s.m.EgressProbeURLChecked()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "出口探测服务读取失败；未修改设置")
+			return
+		}
+		value := strings.TrimSpace(*req.EgressProbeURL)
+		if value != "" {
+			checked, err := validateProbeURL(value)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			value = checked
+		}
+		req.EgressProbeURL = &value
 	}
 	if req.CallbackAddr != nil {
 		if err := s.m.pg.SetSettingContext(r.Context(), config.CallbackAddrSetting, callbackValue); err != nil {
@@ -4512,6 +4535,15 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		select {
 		case s.proxyPoolWake <- struct{}{}:
 		default:
+		}
+	}
+	if req.EgressProbeURL != nil {
+		if err := s.m.pg.SetSettingContext(r.Context(), settingEgressProbeURL, *req.EgressProbeURL); err != nil {
+			writeErr(w, http.StatusInternalServerError, "出口探测服务保存失败")
+			return
+		}
+		if previousProbeURL != *req.EgressProbeURL {
+			s.invalidateEgressProbeSelection()
 		}
 	}
 	if req.ShowEgressIP != nil {

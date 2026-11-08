@@ -3374,6 +3374,7 @@ export const settings: Settings = {
   proxy_health_fail_threshold: 3,
   proxy_health_cooldown_seconds: 60,
   proxy_health_check_interval_seconds: 30,
+  egress_probe_url: "",
   python_interpreter: "/usr/bin/python3",
   workers: 3,
   worker_pools: [],

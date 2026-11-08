@@ -36,6 +36,11 @@ func (s *Server) callbackHostForTunnel(adapter string) (string, error) {
 }
 
 func (s *Server) writeSettingsPayload(w http.ResponseWriter) {
+	probeURL, probeErr := s.m.EgressProbeURLChecked()
+	if probeErr != nil {
+		writeErr(w, http.StatusInternalServerError, "出口探测服务读取失败，保留已有配置")
+		return
+	}
 	roeMode, roeErr := readRoEEnforcementSetting(s.m.pg)
 	if roeErr != nil {
 		writeErr(w, http.StatusInternalServerError, roeErr.Error())
@@ -79,6 +84,7 @@ func (s *Server) writeSettingsPayload(w http.ResponseWriter) {
 		return
 	}
 	payload := s.settingsPayload()
+	payload["egress_probe_url"] = probeURL
 	payload["roe_enforcement"] = roeMode
 	payload["finding_verify_mode"] = verifyMode
 	payload["llm_records_retention_days"] = retentionDays

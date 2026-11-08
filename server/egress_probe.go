@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -28,10 +29,71 @@ import (
 	"github.com/Autumn-27/artex/traffic"
 )
 
-// defaultEgressProbes 按顺序尝试，第一个成功即停；probe_url 可覆盖，供隔离网使用。
+const settingEgressProbeURL = "egress_probe_url"
+
+// defaultEgressProbes 按顺序尝试，第一个成功即停；自定义地址为空时使用。
 var defaultEgressProbes = []string{
 	"https://api.ipify.org?format=json", // 返回 {"ip":"1.2.3.4"}
 	"https://ifconfig.me/ip",            // 返回纯文本 1.2.3.4
+}
+
+func (m *Manager) EgressProbeURL() string {
+	raw, _ := m.EgressProbeURLChecked()
+	return raw
+}
+
+// EgressProbeURLChecked distinguishes an explicitly empty setting from a
+// storage read failure. Returning the raw draft lets operators repair an old
+// invalid value without turning it into an accidental request to public echoes.
+func (m *Manager) EgressProbeURLChecked() (string, error) {
+	if m == nil || m.pg == nil {
+		return "", nil
+	}
+	raw, _, err := m.pg.GetSetting(settingEgressProbeURL)
+	if err != nil {
+		return "", errors.New("读取出口探测服务设置失败")
+	}
+	return strings.TrimSpace(raw), nil
+}
+
+// egressProbes remains a source-compatible reader for metadata/tests. Actual
+// network callers use the checked form and never replace read errors with defaults.
+func (m *Manager) egressProbes() []string {
+	probes, _ := m.egressProbesChecked()
+	return probes
+}
+
+func (m *Manager) egressProbesChecked() ([]string, error) {
+	raw, err := m.EgressProbeURLChecked()
+	if err != nil {
+		return nil, err
+	}
+	if raw != "" {
+		checked, err := validateProbeURL(raw)
+		if err != nil {
+			return nil, errors.New("已保存的出口探测服务地址无效，请在系统设置修正")
+		}
+		return []string{checked}, nil
+	}
+	return append([]string(nil), defaultEgressProbes...), nil
+}
+
+func (m *Manager) egressProbesMatch(probes []string) bool {
+	current, err := m.egressProbesChecked()
+	return err == nil && slices.Equal(probes, current)
+}
+
+// invalidateEgressProbeSelection discards evidence collected for an old echo
+// service. Existing workers stop on generation mismatch; manual force intent
+// remains queued by the normal round cleanup. It never probes synchronously.
+func (s *Server) invalidateEgressProbeSelection() {
+	if s == nil || s.m == nil || s.m.proxyPool == nil {
+		return
+	}
+	s.m.proxyPool.mu.Lock()
+	s.m.proxyPool.generation++
+	s.m.proxyPool.mu.Unlock()
+	s.queueProxyPoolHealth(false)
 }
 
 // validateProbeURL 只放行指向"非本机、非链路本地"的绝对 http(s) 地址。
@@ -372,9 +434,9 @@ func egressTarget(cfg string, capture, pending bool, agentProxy, agentCA string)
 // 空 = 测直连、永远返回 200 用 ok 表达结果。
 func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		GlobalProxy string `json:"global_proxy"`
-		ProbeURL    string `json:"probe_url"` // 可选：覆盖默认探测地址
-		Resume      bool   `json:"resume"`    // manual settings probe may release paused_by_proxy tasks
+		GlobalProxy string  `json:"global_proxy"`
+		ProbeURL    *string `json:"probe_url"` // 省略=已保存地址；空串=默认；非空=临时覆盖
+		Resume      bool    `json:"resume"`    // manual settings probe may release paused_by_proxy tasks
 	}
 	// 请求体只有一个地址，给个上限，免得被塞大 payload。
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
@@ -384,14 +446,24 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	probes := defaultEgressProbes
-	if u := strings.TrimSpace(req.ProbeURL); u != "" {
-		checked, err := validateProbeURL(u)
+	var probes []string
+	if req.ProbeURL != nil {
+		probes = append([]string(nil), defaultEgressProbes...)
+		if u := strings.TrimSpace(*req.ProbeURL); u != "" {
+			checked, err := validateProbeURL(u)
+			if err != nil {
+				writeErr(w, 400, err.Error())
+				return
+			}
+			probes = []string{checked}
+		}
+	} else {
+		var err error
+		probes, err = s.m.egressProbesChecked()
 		if err != nil {
-			writeErr(w, 400, err.Error())
+			writeErr(w, http.StatusServiceUnavailable, err.Error())
 			return
 		}
-		probes = []string{checked}
 	}
 
 	// 这三个调用决定 agent 到底会走哪条路。
@@ -424,7 +496,7 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 	rep.Checks = append(rep.Checks, egressCheck{
 		Key:    "direct",
 		Label:  "① 直连 IP（不经过代理）",
-		Result: probeEgress(ctx, "", "", probes, 10*time.Second),
+		Result: s.runProxyProbe(ctx, "", "", probes, 10*time.Second),
 	})
 
 	if configuredProxy != "" {
@@ -438,7 +510,7 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 			Label: "② 经全局代理的出口 IP",
 			// Path 是实际探测地址（经 MITM 时是 8788），排查时看这个。
 			Path:   maskSecrets(probeAddr),
-			Result: probeEgress(ctx, probeAddr, probeCA, probes, timeout),
+			Result: s.runProxyProbe(ctx, probeAddr, probeCA, probes, timeout),
 		})
 	} else {
 		skipReason := "输入框为空，未配置代理"
@@ -457,7 +529,7 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 
 	rep.OK = judgeEgress(rep)
 	rep.Warnings = egressWarnings(rep, pending, savedProxy)
-	if req.Resume && rep.OK && !pending {
+	if req.Resume && rep.OK && !pending && s.m.egressProbesMatch(probes) {
 		// The navbar uses the same probe endpoint for display-only polling but
 		// omits resume. Only an explicit settings-page test can release the
 		// guarded paused_by_proxy tasks.

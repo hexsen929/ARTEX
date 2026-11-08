@@ -189,14 +189,18 @@ func (s *Server) finishProxyProbeRound(round *proxyProbeRound, state string) {
 	}
 }
 
-// Protocol observations are independent of HTTPS health. Only a verified HTTPS
-// echo can resolve a routable URL; explicit protocols are never changed.
-func (s *Server) probePoolEntry(parent context.Context, e proxyPoolEntry) (egressProbeResult, string) {
+// Protocol observations are independent of route eligibility. Automatic
+// selection requires both HTTP and verified HTTPS; explicit schemes stay fixed.
+func (s *Server) probePoolEntry(parent context.Context, e proxyPoolEntry, selectedProbes ...[]string) (egressProbeResult, string) {
 	ctx, cancel := context.WithTimeout(parent, proxyPoolProbeTimeout)
 	defer cancel()
-	if !e.ProtocolAuto || e.DetectedProtocol != "" {
-		return s.runProxyProbe(ctx, e.RawURL, "", defaultEgressProbes, 5*time.Second), ""
+	probes := defaultEgressProbes
+	if len(selectedProbes) > 0 {
+		probes = selectedProbes[0]
 	}
-	result, _, raw := s.inspectProxyProtocols(ctx, e, true)
+	if !e.ProtocolAuto || e.DetectedProtocol != "" {
+		return s.runProxyProbe(ctx, e.RawURL, "", probes, 5*time.Second), ""
+	}
+	result, _, raw := s.inspectProxyProtocols(ctx, e, true, probes)
 	return result, raw
 }

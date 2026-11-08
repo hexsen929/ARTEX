@@ -9,7 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
-import { assertProxyDiagnosis, proxyProbeStatus, proxyProtocolStatus } from "@/lib/proxy-probe-status";
+import { assertProxyDiagnosis, proxyDiagnosisPrimaryLabel, proxyProbeStatus, proxyProtocolStatus } from "@/lib/proxy-probe-status";
 import { filterProxyPool, PROXY_POOL_PAGE_SIZE, proxyCleanupEligible, proxyLastCheckFailed, proxyPoolPage } from "@/lib/proxy-pool-pagination";
 import type { EgressProbeResult, ProxyCapabilityCheck, ProxyProtocolCheck, ProxyPoolBulkRequest, ProxyPoolDiagnosis, ProxyPoolEntry, ProxyProbeProgress } from "@/lib/types";
 
@@ -331,7 +331,7 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
                   {entry.protocol_checks?.length ? <details className="mt-1"><summary className="cursor-pointer">各代理协议检测详情</summary><ProtocolChecks checks={entry.protocol_checks} /></details> : null}
                 </div>
                 <div>
-                  <p className="text-muted-foreground">HTTPS 测试出口 IP</p>
+                  <p className="text-muted-foreground">探测出口 IP</p>
                   <p className="break-all font-mono">{entry.last_error ? "最近检测失败" : entry.egress_ip || "尚未测试"}</p>
                   {entry.last_error && entry.egress_ip ? <p className="text-muted-foreground">上次成功出口：{entry.egress_ip}</p> : null}
                 </div>
@@ -363,7 +363,7 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>代理 HTTP／HTTPS 诊断</DialogTitle>
-            <DialogDescription>分别检查代理协议和出口回显。HTTP 回显可能受网络转发影响，不能单独证明代理身份或 HTTPS 可信。诊断保留证书校验，结果不修改健康状态、当前出口或任务暂停状态。</DialogDescription>
+            <DialogDescription>分别检查代理连接协议和访问网站的 HTTP／HTTPS 能力。已保存自定义探测服务时仅访问该服务。HTTP 回显不能单独证明代理身份或 HTTPS 可信；诊断保留证书校验，不修改健康状态、当前出口或任务暂停状态。</DialogDescription>
           </DialogHeader>
           <p className="break-all font-mono text-xs">{diagnosis?.url}</p>
           {diagnosing ? <p role="status">正在诊断，请稍候…</p> : null}
@@ -371,10 +371,12 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
           {diagnosis?.result ? <div className="space-y-3">
             {diagnosis.result.https.protocol_checks?.length ? <ProtocolChecks checks={diagnosis.result.https.protocol_checks} /> : <>
             <p className="text-sm">代理连接协议：{diagnosis.result.https.via?.toUpperCase() || "按已配置协议"}</p>
-            <DiagnosisResult label="访问 HTTPS 网站（校验证书）" result={diagnosis.result.https} />
-            <DiagnosisResult label="访问 HTTP 网站（明文回显）" result={diagnosis.result.http} />
+            <DiagnosisResult label={proxyDiagnosisPrimaryLabel(diagnosis.result)} result={diagnosis.result.https} />
+            {!diagnosis.result.http_skipped ? <DiagnosisResult label="访问 HTTP 网站（明文回显）" result={diagnosis.result.http} /> : null}
             </>}
-            {diagnosis.result.http.ok && !diagnosis.result.https.ok ? <p className="text-amber-600 text-sm">仅访问 HTTP 网站回显通过，HTTPS 未通过；这不代表已找到可完整使用的代理协议。</p> : null}
+            {diagnosis.result.http_skipped ? <p className="text-muted-foreground text-sm">已使用保存的探测服务，未额外访问公共 HTTP 回显地址。</p> : null}
+            {!diagnosis.result.http_skipped && diagnosis.result.http.ok && !diagnosis.result.https.ok ? <p className="text-amber-600 text-sm">仅访问 HTTP 网站回显通过，HTTPS 未通过；这不代表已找到可完整使用的代理协议。</p> : null}
+            {diagnosis.result.probe_mode === "configured" ? <p className="break-all font-mono text-xs">探测服务：{diagnosis.result.probe_url}</p> : null}
             <p className="text-muted-foreground text-xs">本次诊断：{new Date(diagnosis.result.checked_at).toLocaleString()}</p>
           </div> : null}
           <Button type="button" variant="outline" onClick={closeDiagnosis}>关闭诊断</Button>

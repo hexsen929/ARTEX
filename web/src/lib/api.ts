@@ -410,6 +410,7 @@ export const api = {
     timeoutSeconds?: number;
     seedFirstIntent?: boolean;
     planHeartbeatSeconds?: number;
+    shareGlobalAssets?: boolean;
     coverageEnabled?: boolean;
     workerCount?: number;
     interceptRules?: AssetInterceptRuleInput[];
@@ -427,6 +428,7 @@ export const api = {
       timeout_seconds: input.timeoutSeconds ?? 0,
       seed_first_intent: input.seedFirstIntent ?? false,
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
+      share_global_assets: input.shareGlobalAssets ?? false,
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
       worker_count: input.workerCount ?? 0, // 0 = 用全局默认 workers
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
@@ -444,7 +446,7 @@ export const api = {
   runScheduleNow: (id: number) =>
     post<{ ok: boolean; started: number; errors?: string[] }>(`/schedules/${id}/run-now`, {}),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
-  updateTask: (id: string, input: { name?: string; pinned?: boolean; remark?: string }) =>
+  updateTask: (id: string, input: { name?: string; pinned?: boolean; remark?: string; share_global_assets?: boolean }) =>
     patch<Task>(`/tasks/${id}`, input),
   renameTask: (id: string, name: string) => patch<Task>(`/tasks/${id}`, { name }),
   pinTask: (id: string, pinned: boolean) => patch<Task>(`/tasks/${id}`, { pinned }),
@@ -1077,7 +1079,7 @@ export const api = {
     deepseek_search_api_key?: string;
   }) => post<{ ok: boolean; error?: string; count?: number; backend?: string }>(`/settings/web-search/test`, patch),
 
-  // global_proxy 传空 = 测直连；probe_url 可覆盖默认探测地址（隔离网用）。
+  // global_proxy 传空=测直连；probe_url 省略=已保存地址，空串=默认，非空=临时覆盖。
   testEgressProxy: (patch: { global_proxy?: string; probe_url?: string; resume?: boolean }) =>
     post<EgressReport>(`/settings/proxy/test`, patch),
   proxyPool: () =>

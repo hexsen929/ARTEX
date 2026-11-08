@@ -44,7 +44,7 @@ const settings = {
   proxy_reconnect_interval_seconds: 30,
   web_search_enabled: false, web_search_backend: "ddgs", web_search_proxy: "",
   brave_key_set: false, tavily_key_set: false, global_proxy: proxyEntry(10000).url,
-  show_egress_ip: false, python_interpreter: "", workers: 3, worker_pools: [],
+  show_egress_ip: false, python_interpreter: "", workers: 3, egress_probe_url: "", worker_pools: [],
   callback_addr: "", callback_addr_source: "unset", callback_addr_locked: false,
   task_concurrency_enabled: false, task_concurrency_limit: 5,
   llm_pool_enabled: false, llm_pool_bind_fallback: false,

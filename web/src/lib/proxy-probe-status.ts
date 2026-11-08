@@ -43,5 +43,21 @@ export function assertProxyDiagnosis(result: ProxyPoolDiagnosis, id: string): Pr
   if (checks !== undefined && (!Array.isArray(checks) || checks.length !== 4 || new Set(checks.map((check) => check.protocol)).size !== 4 || checks.some((check) =>
     !["http", "https", "socks5", "socks4"].includes(check.protocol) || typeof check.recognized !== "boolean" ||
     typeof check.supported !== "boolean" || !validCapability(check.http) || !validCapability(check.https)))) throw new Error("协议诊断结果不完整，请重试");
+
+  if (result.probe_mode !== undefined) {
+    if (!["configured", "default"].includes(result.probe_mode) || typeof result.probe_url !== "string" || typeof result.http_skipped !== "boolean") {
+      throw new Error("诊断探测服务未能核对，请重试");
+    }
+    if (result.probe_mode === "configured") {
+      if (!/^https?:\/\//i.test(result.probe_url) || result.http_skipped !== true) throw new Error("诊断探测服务未能核对，请重试");
+    } else if (result.probe_url !== "" || result.http_skipped !== false) throw new Error("诊断探测服务未能核对，请重试");
+  } else if (result.probe_url !== undefined || result.http_skipped !== undefined) {
+    throw new Error("诊断探测服务未能核对，请重试");
+  }
   return result;
+}
+
+export function proxyDiagnosisPrimaryLabel(result: ProxyPoolDiagnosis): string {
+  if (result.probe_mode !== "configured") return "访问 HTTPS 网站（校验证书）";
+  return /^https:\/\//i.test(result.probe_url ?? "") ? "已保存回显服务（HTTPS，验证证书）" : "已保存回显服务（HTTP，明文回显）";
 }

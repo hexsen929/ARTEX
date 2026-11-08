@@ -473,12 +473,18 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 			byKey[t.Key] = t
 		}
 		runInfo := agent.RunInfoFrom(ctx)
-		resolve := func(t actool.CoreTool, row *db.Tool) actool.CoreTool {
+		assetScope := &taskAssetToolScope{pg: pg, owner: runInfo, role: agentKey}
+		resolve := func(t actool.CoreTool, row *db.Tool, prototype bool) (actool.CoreTool, error) {
+			var err error
+			t, err = assetScope.resolve(ctx, t, row, prototype)
+			if err != nil {
+				return nil, err
+			}
 			var schema map[string]any
 			if len(row.Schema) > 0 {
 				_ = json.Unmarshal(row.Schema, &schema)
 			}
-			return meterTool(agent.DecorateTool(t, row.Description, schema), pg, row.Key, agentKey, runInfo)
+			return meterTool(agent.DecorateTool(t, row.Description, schema), pg, row.Key, agentKey, runInfo), nil
 		}
 		if agentKey == "asset_mapper" {
 			// The mapper is a read-only database view, not an execution role.
@@ -496,7 +502,11 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 				if reader == nil {
 					return agent.ToolAssemblyFailure(fmt.Errorf("资产梳理只读工具不可用，未装配工具"))
 				}
-				out = append(out, resolve(reader, row))
+				reader, err = resolve(reader, row, true)
+				if err != nil {
+					return agent.ToolAssemblyFailure(err)
+				}
+				out = append(out, reader)
 			}
 			return out
 		}
@@ -513,7 +523,11 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 			if !row.Enabled || !contains(row.Agents, agentKey) {
 				continue // disabled globally or not bound to this agent → drop
 			}
-			out = append(out, resolve(t, row))
+			resolved, err := resolve(t, row, false)
+			if err != nil {
+				return agent.ToolAssemblyFailure(err)
+			}
+			out = append(out, resolved)
 		}
 		// inject: domain tools bound to this agent in the DB but absent from the
 		// incoming list. Covers agents (Auto, custom) whose base only has DefaultTools
@@ -545,12 +559,19 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 						return agent.ToolAssemblyFailure(err)
 					}
 					if local == nil {
-						agent.AddToolAssemblyWarning(ctx, "工具 "+row.Key+" 需要原生任务探索图；当前会话已省略，不改用其它任务。")
-						continue
+						if !isTaskAssetStoreTool(row.Key) {
+							agent.AddToolAssemblyWarning(ctx, "工具 "+row.Key+" 需要原生任务探索图；当前会话已省略，不改用其它任务。")
+							continue
+						}
+					} else {
+						inst = local
 					}
-					inst = local
 				}
-				out = append(out, resolve(inst, row))
+				resolved, err := resolve(inst, row, true)
+				if err != nil {
+					return agent.ToolAssemblyFailure(err)
+				}
+				out = append(out, resolved)
 			}
 		}
 		// shell hints: user-defined kind="shell" tools are not callable — they are
@@ -622,8 +643,9 @@ func contains(ss []string, v string) bool {
 // domain tools into agents (Auto, custom) that don't own a per-task ToolSet.
 // nil as → returns nil (no injection, graceful degradation).
 //
-// The nil ExplorationStore is deliberate. Asset/company handlers can use this
-// registry directly, but optional exploration readers are resolved from the
+// The nil ExplorationStore is deliberate. Taskless asset/company handlers use
+// this registry directly; attributed runs use a private asset-only ToolSet.
+// Optional exploration readers are resolved from the
 // native run's ToolSet. A taskless Chat omits those readers with a bounded
 // assembly warning. The prototype nil-store guard remains defense in depth;
 // the shared registry is never rebound to an active or inferred task.
@@ -654,4 +676,82 @@ func jsonStrMap(raw json.RawMessage) map[string]string {
 		_ = json.Unmarshal(raw, &out)
 	}
 	return out
+}
+
+// Only these AssetStore tools have a useful task-scoped implementation without
+// an ExplorationStore. Never rebind the shared domain registry or use a parent
+// task as permission to inject exploration writers/readers into a Chat.
+func isTaskAssetStoreTool(name string) bool {
+	return name == "list_assets" || name == "list_companies" || name == "insert_assets"
+}
+
+type taskAssetToolScope struct {
+	pg    *db.DB
+	owner agent.RunInfo
+	role  string
+	tools map[string]actool.CoreTool
+}
+
+func (s *taskAssetToolScope) validate(ctx context.Context) error {
+	if ctx.Err() != nil || s.pg == nil || s.owner.TaskID <= 0 || s.owner.ExplorationID <= 0 || agent.RunInfoFrom(ctx) != s.owner {
+		return fmt.Errorf("本轮资产工具任务归属无效，未读取或写入资产")
+	}
+	var explorationID int64
+	if err := s.pg.QueryRowContext(ctx, `SELECT exploration_id FROM tasks WHERE id=$1 AND deleted_at IS NULL`, s.owner.TaskID).Scan(&explorationID); err != nil || explorationID != s.owner.ExplorationID {
+		return fmt.Errorf("本轮资产工具任务不存在或归属已变化，未读取或写入资产")
+	}
+	return nil
+}
+
+func (s *taskAssetToolScope) resolve(ctx context.Context, tool actool.CoreTool, row *db.Tool, prototype bool) (actool.CoreTool, error) {
+	if !isTaskAssetStoreTool(tool.Name()) {
+		return tool, nil
+	}
+	if s.owner.TaskID == 0 && s.owner.ExplorationID == 0 {
+		// An explicitly taskless administration conversation retains its global
+		// asset view; a task title or prompt never supplies identity here.
+		return tool, nil
+	}
+	if !row.System || row.Kind != "builtin" {
+		return nil, fmt.Errorf("任务资产工具定义类型不一致，未替换为全局实例")
+	}
+	if err := s.validate(ctx); err != nil {
+		return nil, err
+	}
+	// A native run's exact ToolSet wins, including its run-token boundary.
+	// Native insert_assets already carries owner/enrichment callbacks in base.
+	local, managed, err := agent.TaskDomainTool(ctx, s.role, tool.Name())
+	if err != nil {
+		return nil, err
+	}
+	if managed && local != nil {
+		tool = local
+	} else if prototype || managed {
+		if s.tools == nil {
+			ts := agent.NewToolSet(nil, "")
+			ts.SetAssetStore(s.pg.Assets(), s.pg.Companies())
+			ts.SetTaskID(s.owner.TaskID)
+			s.tools = make(map[string]actool.CoreTool)
+			for _, candidate := range ts.AssetDomainTools() {
+				s.tools[candidate.Name()] = candidate
+			}
+		}
+		tool = s.tools[tool.Name()]
+		if tool == nil {
+			return nil, fmt.Errorf("本轮任务资产工具未就绪，未使用全局实例")
+		}
+	}
+	return &taskScopedAssetTool{CoreTool: tool, scope: s}, nil
+}
+
+type taskScopedAssetTool struct {
+	actool.CoreTool
+	scope *taskAssetToolScope
+}
+
+func (t *taskScopedAssetTool) Call(ctx context.Context, input json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
+	if err := t.scope.validate(ctx); err != nil {
+		return actool.Errorf(err.Error()), nil
+	}
+	return t.CoreTool.Call(ctx, input, tc)
 }

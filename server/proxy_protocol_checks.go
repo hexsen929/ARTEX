@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -32,7 +33,34 @@ type proxyProtocolCheck struct {
 }
 
 func capabilityCheck(r egressProbeResult) proxyCapabilityCheck {
-	return proxyCapabilityCheck{Checked: true, OK: r.OK, IP: r.ExitIP, Error: r.Error, ErrorCode: r.ErrorCode, LatencyMS: r.LatencyMS}
+	return proxyCapabilityCheck{Checked: r.ErrorCode != "not_requested", OK: r.OK, IP: r.ExitIP, Error: r.Error, ErrorCode: r.ErrorCode, LatencyMS: r.LatencyMS}
+}
+
+// A configured echo is an explicit network boundary. Do not derive a second
+// URL scheme, send a public SOCKS4 CONNECT, or run a public negative control.
+// One configured scheme can identify a protocol but cannot prove both kinds
+// of website access required by automatic route selection.
+func proxyProtocolTargets(probes []string) (secure, plain []string, defaults bool) {
+	if slices.Equal(probes, defaultEgressProbes) {
+		return probes, []string{"http://api.ipify.org?format=json"}, true
+	}
+	for _, target := range probes {
+		u, err := url.Parse(target)
+		if err != nil {
+			continue
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http":
+			plain = append(plain, target)
+		case "https":
+			secure = append(secure, target)
+		}
+	}
+	return secure, plain, false
+}
+
+func skippedProtocolCheck() egressProbeResult {
+	return egressProbeResult{ErrorCode: "not_requested", Error: "自定义服务未覆盖此类访问，未执行检查", Probes: []egressAttempt{}}
 }
 
 // SOCKS4 is detection-only. The capture and task forwarding transports do not
@@ -80,10 +108,15 @@ func probeSOCKS4Response(parent context.Context, raw string) (bool, string) {
 // At most eight bounded checks per unknown entry: HTTPS + HTTP for each of
 // three routable protocols, SOCKS4 recognition, and an HTTP negative control. All share the
 // same ten-second budget. Join all workers before returning/cancelling the round.
-func (s *Server) inspectProxyProtocols(parent context.Context, entry proxyPoolEntry, stopOnSuccess bool) (egressProbeResult, egressProbeResult, string) {
+func (s *Server) inspectProxyProtocols(parent context.Context, entry proxyPoolEntry, stopOnSuccess bool, selectedProbes ...[]string) (egressProbeResult, egressProbeResult, string) {
 	ctx, cancel := context.WithTimeout(parent, proxyPoolProbeTimeout)
 	defer cancel()
 	started := time.Now()
+	probes := defaultEgressProbes
+	if len(selectedProbes) > 0 {
+		probes = selectedProbes[0]
+	}
+	secureTargets, plainTargets, useDefaults := proxyProtocolTargets(probes)
 	u, err := url.Parse(entry.RawURL)
 	if err != nil || u.Host == "" {
 		invalid := egressProbeResult{Error: "代理地址格式无效", ErrorCode: "invalid_proxy_url", Probes: []egressAttempt{}}
@@ -105,16 +138,23 @@ func (s *Server) inspectProxyProtocols(parent context.Context, entry proxyPoolEn
 		raws[i] = candidate.String()
 		for _, plain := range []bool{false, true} {
 			go func(index int, raw string, plain bool) {
-				probes := defaultEgressProbes
+				probes := secureTargets
 				if plain {
-					probes = []string{"http://api.ipify.org?format=json"}
+					probes = plainTargets
 				}
-				result := s.runProxyProbe(ctx, raw, "", probes, 5*time.Second)
+				result := skippedProtocolCheck()
+				if len(probes) > 0 {
+					result = s.runProxyProbe(ctx, raw, "", probes, 5*time.Second)
+				}
 				answers <- answer{index: index, plain: plain, result: result}
 			}(i, raws[i], plain)
 		}
 	}
 	go func() {
+		if !useDefaults {
+			answers <- answer{index: 3, evidence: "仅使用已保存回显服务，未执行公网 SOCKS4 识别"}
+			return
+		}
 		probe := probeSOCKS4Response
 		if s != nil && s.proxySOCKS4Probe != nil {
 			probe = s.proxySOCKS4Probe
@@ -125,7 +165,10 @@ func (s *Server) inspectProxyProtocols(parent context.Context, entry proxyPoolEn
 	// TEST-NET cannot be a public proxy. A valid IP echo through it exposes
 	// transparent interception; equal HTTP echoes must not become auto routes.
 	go func() {
-		result := s.runProxyProbe(ctx, "http://203.0.113.1:80", "", []string{"http://api.ipify.org?format=json"}, 2*time.Second)
+		result := skippedProtocolCheck()
+		if useDefaults {
+			result = s.runProxyProbe(ctx, "http://203.0.113.1:80", "", []string{"http://api.ipify.org?format=json"}, 2*time.Second)
+		}
 		answers <- answer{index: 4, result: result}
 	}()
 	checks := make([]proxyProtocolCheck, 4)
@@ -166,6 +209,8 @@ func (s *Server) inspectProxyProtocols(parent context.Context, entry proxyPoolEn
 		switch {
 		case checks[i].HTTPS.OK && checks[i].HTTP.OK:
 			checks[i].Evidence = "HTTP／HTTPS 访问均通过，证书验证通过，可完整使用"
+		case !useDefaults && (checks[i].HTTPS.OK || checks[i].HTTP.OK):
+			checks[i].Evidence = "自定义服务回显通过，另一类网站访问未验证；尚未完整可用"
 		case checks[i].HTTPS.OK:
 			checks[i].Evidence = "HTTPS 访问通过，HTTP 访问未通过，未达到完整可用条件"
 		case checks[i].Recognized:

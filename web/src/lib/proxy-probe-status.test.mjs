@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertProxyDiagnosis, proxyProbeStatus, proxyProtocolStatus } from "./proxy-probe-status.ts";
+import { assertProxyDiagnosis, proxyDiagnosisPrimaryLabel, proxyProbeStatus, proxyProtocolStatus } from "./proxy-probe-status.ts";
 
 const entry = { id: "fixture", url: "socks5://proxy.invalid:1080", enabled: true, health: "unknown", consecutive_failures: 0 };
 
@@ -43,4 +43,19 @@ test("automatic diagnosis validates all protocol capability results", () => {
   for (const checks of [[], capabilityChecks.slice(0, 3), [...capabilityChecks.slice(0, 3), capabilityChecks[0]], capabilityChecks.map((check) => ({ ...check, http: null }))]) {
     assert.throws(() => assertProxyDiagnosis({ ...auto, https: { ...auto.https, protocol_checks: checks } }, "fixture"));
   }
+});
+
+test("configured HTTP services are not mislabeled HTTPS and do not invent an extra public probe", () => {
+  const configured = { ...report, probe_mode: "configured", probe_url: "http://echo.fixture.invalid/ip", http_skipped: true,
+    https: { ok: true, exit_ip: "192.0.2.8", latency_ms: 10, probes: [] },
+    http: { ok: false, error: "not requested", latency_ms: 0, probes: [] } };
+  assert.equal(assertProxyDiagnosis(configured, "fixture"), configured);
+  assert.equal(proxyDiagnosisPrimaryLabel(configured), "已保存回显服务（HTTP，明文回显）");
+  assert.equal(proxyDiagnosisPrimaryLabel({ ...configured, probe_url: "https://echo.fixture.invalid/ip" }), "已保存回显服务（HTTPS，验证证书）");
+  assert.equal(proxyDiagnosisPrimaryLabel(report), "访问 HTTPS 网站（校验证书）");
+  assert.equal(assertProxyDiagnosis({ ...report, probe_mode: "default", probe_url: "", http_skipped: false }, "fixture").http.ok, true);
+  for (const patch of [{ probe_url: "" }, { http_skipped: false }, { probe_url: undefined }, { probe_mode: "unknown" }, { probe_url: "file:///fixture" }]) {
+    assert.throws(() => assertProxyDiagnosis({ ...configured, ...patch }, "fixture"), /未能核对/);
+  }
+  for (const patch of [{ http_skipped: true }, { probe_url: "http://echo.fixture.invalid/ip" }]) assert.throws(() => assertProxyDiagnosis({ ...report, ...patch }, "fixture"));
 });

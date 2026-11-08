@@ -227,13 +227,12 @@ func (t *ToolSet) AddHintTool() actool.CoreTool            { return t.addHint() 
 func (t *ToolSet) SetEnrich(e EnrichTrigger) { t.enrich = e }
 
 // SetOwnerNode sets the exploration node that writes anchor to (worker: its
-// intent node; planner/main: the begin root). Assets created/referenced while
-// ownerNode is set are anchored to it as lineage (not visibility).
+// intent node; planner/main: the begin root). Anchors preserve explicit asset
+// references and make them available in this task context.
 func (t *ToolSet) SetOwnerNode(id int64) { t.ownerNode = id }
 
 // anchorOwner records a lineage edge from this run's owner node to an asset
-// (no-op if unset). Provenance only — the asset graph is global and shared, so
-// this no longer affects which assets a task can read.
+// (no-op if unset). These explicit references also contribute to task visibility.
 func (t *ToolSet) anchorOwner(assetID int64) {
 	if t.ts != nil && t.ownerNode > 0 && assetID > 0 {
 		_ = t.ts.Anchor(t.ownerNode, assetID)
@@ -1081,6 +1080,36 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 		})
 }
 
+// visibleAssetIDs validates model-supplied references before they become anchors.
+// An anchor contributes to future task visibility, so merely recording an ID
+// must never grant access to a previously invisible asset. Non-task contexts
+// retain the existing global asset behavior.
+func (t *ToolSet) visibleAssetIDs(raw []json.RawMessage) ([]int64, error) {
+	ids := pidList(raw)
+	seen := make(map[int64]bool, len(ids))
+	unique := ids[:0]
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			unique = append(unique, id)
+		}
+	}
+	if t.taskID <= 0 || len(unique) == 0 {
+		return unique, nil
+	}
+	if t.as == nil {
+		return nil, fmt.Errorf("资产可见范围校验不可用；未建立新的资产引用")
+	}
+	visible, err := t.as.GetByIDsInScope(t.taskID, unique)
+	if err != nil {
+		return nil, fmt.Errorf("资产可见范围校验失败：%w", err)
+	}
+	if len(visible) != len(unique) {
+		return nil, fmt.Errorf("目标资产不属于本任务或直接关联任务；如需使用全局资产，请由用户开启「共享全局资产」或明确关联资产")
+	}
+	return unique, nil
+}
+
 // --- planner write tools ---
 
 // intentItem 是 add_intent 批量/单条的一条探索方向。
@@ -1136,7 +1165,10 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if priority == 0 {
 		priority = 5
 	}
-	anchors := pidList(it.AssetIDs)
+	anchors, err := t.visibleAssetIDs(it.AssetIDs)
+	if err != nil {
+		return 0, err
+	}
 	// 资产拦截：意图绑定的资产若命中系统资产拦截规则，则禁止下发该意图。
 	if t.as != nil && len(anchors) > 0 {
 		hits, err := t.as.CheckAssetsIntercept(t.taskID, anchors)
@@ -1429,22 +1461,36 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			a.VerificationStatus = db.VerificationUnverified
 			a.VerificationNote = "排除依据尚未提供，保留待验证，不视为漏洞不存在。"
 		}
-		input := db.RecordFindingInput{VerificationStatus: a.VerificationStatus, VerificationNote: a.VerificationNote, TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs)}
+		assetIDs, assetErr := t.visibleAssetIDs(a.AssetIDs)
+		assetNote := ""
+		if assetErr != nil {
+			assetIDs = nil
+			assetNote = "发现内容已保留；提供的资产引用未通过当前任务可见性校验，未关联资产。请在页面明确关联资产后补充引用，不要重复上报。"
+		}
+		input := db.RecordFindingInput{VerificationStatus: a.VerificationStatus, VerificationNote: a.VerificationNote, TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: assetIDs}
 		anchorText := strings.Join([]string{input.Name, input.Summary, input.Evidence}, "\n")
 		if strings.TrimSpace(input.Name) == "" {
 			input.Name = fallbackFindingName(input.VulnClass, anchorText)
 		}
-		// asset_ids 为空时自动锚定主资产:档 A 同入口合并(db/finding_merge.go)
-		// 按 (task, 归一化 vulnclass, 主资产=AssetIDs[0]) 判等,空 asset_ids 会让
-		// 合并键整体失效。资产图全局共享,锚定候选为全库资产(QueryByHost 在
-		// SQL 层先按 host 粗筛),不受 task_ids 限制;不强行新建。
+		// Auto-anchor only an already visible candidate. Sharing is a read policy,
+		// not a grant inferred from a URL in model-produced prose. If no visible
+		// candidate exists the finding itself is still saved without an anchor.
 		var anchoredID int64
-		if len(input.AssetIDs) == 0 && t.as != nil {
+		if len(input.AssetIDs) == 0 && assetErr == nil && t.as != nil {
 			if tgt := extractAnchorTarget(anchorText); tgt.host != "" {
-				if assets, aerr := t.as.QueryByHost(tgt.host, 0); aerr == nil {
-					if id, _ := anchorFindingAsset(anchorText, assets); id > 0 {
-						input.AssetIDs = []int64{id}
-						anchoredID = id
+				if candidates, aerr := t.as.QueryByHost(tgt.host, 0); aerr == nil {
+					if t.taskID > 0 && len(candidates) > 0 {
+						ids := make([]int64, 0, len(candidates))
+						for _, candidate := range candidates {
+							ids = append(ids, candidate.ID)
+						}
+						candidates, aerr = t.as.GetByIDsInScope(t.taskID, ids)
+					}
+					if aerr == nil {
+						if id, _ := anchorFindingAsset(anchorText, candidates); id > 0 {
+							input.AssetIDs = []int64{id}
+							anchoredID = id
+						}
 					}
 				}
 			}
@@ -1479,11 +1525,12 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			*db.RecordedFinding
 			VerificationStatus string `json:"verification_status"`
 			VerificationNote   string `json:"verification_note"`
+			AssetNote          string `json:"asset_note,omitempty"`
 			AutoAnchored       bool   `json:"auto_anchored,omitempty"`
 			AssetID            int64  `json:"asset_id,omitempty"`
 			EvidenceStatus     string `json:"evidence_status"`
 			EvidenceNote       string `json:"evidence_note,omitempty"`
-		}{RecordedFinding: recorded, VerificationStatus: a.VerificationStatus, VerificationNote: a.VerificationNote, EvidenceStatus: "bound"}
+		}{RecordedFinding: recorded, VerificationStatus: a.VerificationStatus, VerificationNote: a.VerificationNote, EvidenceStatus: "bound", AssetNote: assetNote}
 		if recorded.Merged {
 			// 同入口合并保留同验证状态的记录与证据，合并本身不提升验证状态。
 			result.EvidenceNote = "该上报与既有同验证状态的记录同入口，已合并并保留证据与血缘；merged_into 为聚合目标。合并本身不等于确认漏洞，后续复核结果以独立验证状态为准。"
@@ -1606,8 +1653,12 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, string
 			return 0, "", fmt.Errorf("intent_id 必须是本任务的意图（关联任务意图只读）")
 		}
 	}
+	anchors, err := t.visibleAssetIDs(it.AssetIDs)
+	if err != nil {
+		return 0, "", err
+	}
 	// a fact is its OWN node kind (distinct from a vuln finding).
-	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, pidList(it.AssetIDs))
+	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, anchors)
 	if err != nil {
 		return 0, "", err
 	}
@@ -1765,11 +1816,9 @@ func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
 	if strings.TrimSpace(it.Text) == "" {
 		return 0, fmt.Errorf("text 不能为空")
 	}
-	var anchors []int64
-	for _, raw := range it.AssetIDs {
-		if tid := pid(raw); tid > 0 {
-			anchors = append(anchors, tid)
-		}
+	anchors, err := t.visibleAssetIDs(it.AssetIDs)
+	if err != nil {
+		return 0, err
 	}
 	refs, err := db.NormalizeTrafficRefs(it.TrafficRefs)
 	if err != nil {

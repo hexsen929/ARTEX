@@ -127,6 +127,10 @@ jobs:
           for name in HTTPResponsesDoNotProveHTTPSOrProxyIdentity SOCKS4ResponseRecognizedButNotRoutable RecognitionAndFailureDetailsPersistWithoutRouteActivation AutoDiagnosisUsesAllCandidatesAndDoesNotMutate CancellationJoinsEveryCandidate AutoSelectsCompleteProtocolWithoutCandidateVeto PartialCapabilityNeverBecomesCompleteRoute NegativeControlBlocksTransparentHTTPFalsePositive; do
             grep -q -- "^--- PASS: TestProxyProtocol${name} " "$RUNNER_TEMP/proxy-progress.log"
           done
+
+      - name: Upstream asset visibility and saved probe concurrency regressions
+        run: |
+          go test -race -p=1 ./agent ./db ./server -run 'Test(TaskAssetSharing|TaskAssetToolScope|TaskMetadataPatchGlobalAsset|EgressProbe|MergeSavedProbe|MergeProtocolProbe|GlobalAsset|AssetQuery)' -count=1 -timeout=5m
       - name: MCP lifecycle concurrency regressions
         run: |
           go test -race ./server -run 'Test(LazyMCP|MCPSlotQueue|LeasedMCP|ManagerClose)' -count=1 -timeout=3m
@@ -191,6 +195,21 @@ jobs:
           grep -q -- '^--- PASS: TestMemoryExplicitOutcomesAreDistinctFromLegacyAndUnknown ' "$memory_log"
           grep -q -- '^--- PASS: TestMemoryBudgetReleaseWaitsForBothWindowsAndLoweredLimit ' "$memory_log"
           grep -q -- '^--- PASS: TestMemoryThirdExpiredLeaseTerminatesWithoutFourthAttempt ' "$memory_log"
+
+      - name: PostgreSQL 18 upstream task visibility and probe settings
+        run: |
+          set -euo pipefail
+          asset_log="$RUNNER_TEMP/upstream-assets-pg18.log"
+          probe_log="$RUNNER_TEMP/upstream-probes-pg18.log"
+          go test -race -p=1 -v ./db ./agent -run '^TestTaskAssetSharing' -count=1 -timeout=5m | tee "$asset_log"
+          go test -race -v ./server -run '^Test(EgressProbe|MergeSavedProbe|TaskAssetToolScope|ProxyPoolHealthUsesSavedEgressProbe|TaskMetadataPatchGlobalAssetSharing)' -count=1 -timeout=5m | tee "$probe_log"
+          grep -q -- '^--- PASS: TestTaskAssetSharingOffAllowsManualAssociations ' "$asset_log"
+          grep -q -- '^--- PASS: TestTaskAssetSharingLiveToolPolicy ' "$asset_log"
+          grep -q -- '^--- PASS: TestEgressProbeSettingsPersistence ' "$probe_log"
+          grep -q -- '^--- PASS: TestMergeSavedProbeChangeDiscardsWholeRoundAndKeepsForce ' "$probe_log"
+          grep -q -- '^--- PASS: TestTaskMetadataPatchGlobalAssetSharing ' "$probe_log"
+          grep -q -- '^--- PASS: TestTaskAssetToolScopeAssociatedReadersAndTasklessAdmin ' "$probe_log"
+          grep -q -- '^--- PASS: TestTaskAssetToolScopeInsertedAssetsKeepAssociatedOwner ' "$probe_log"
 
       - name: PostgreSQL 18 task tool binding and retest archive history
         run: |
@@ -270,6 +289,12 @@ jobs:
           ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
         run: node scripts/proxy-pool-scale-ui-smoke.cjs
+        working-directory: web
+      - name: Saved probe service and task asset sharing browser regressions
+        env:
+          ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
+        run: node scripts/upstream-20261106-ui-smoke.cjs
         working-directory: web
       - name: Notification and tool editor browser regressions
         env:

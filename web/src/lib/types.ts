@@ -62,6 +62,7 @@ export interface Task {
   source_task_ids?: string[]; // directly related tasks inherited as read-only context
   archive_blocked_by_task_id?: string; // live direct dependent that must be archived first
   company_ids?: number[]; // associated company scopes; current company assets join the task at creation
+  share_global_assets?: boolean; // opt-in global asset visibility; default false
   coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
 }
 
@@ -1069,6 +1070,7 @@ export interface Settings {
   proxy_reconnect_max_attempts?: number;
   proxy_reconnect_interval_seconds?: number;
   show_egress_ip?: boolean; // 在顶栏显示直连 / 全局代理出口 IP；默认关闭
+  egress_probe_url?: string; // 自定义 IP 探测服务；空=默认公共回显服务
   python_interpreter?: string; // 自定义脚本工具的 python 解释器路径(空=运行时检测)
   workers?: number; // 并发工作 agent 数(默认3)；对之后启动的任务生效
   worker_pools: WorkerPool[];
@@ -2290,6 +2292,11 @@ export interface ProxyPoolDiagnosis {
   checked_at: string;
   health_updated: false;
   scope: string;
+  // The legacy https result slot is the primary configured service result
+  // when probe_mode=configured; an HTTP service does not prove TLS trust.
+  probe_mode?: "configured" | "default";
+  probe_url?: string;
+  http_skipped?: boolean;
 }
 
 // 报告里的一行：① 直连 / ② 经全局代理。

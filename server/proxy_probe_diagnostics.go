@@ -136,31 +136,54 @@ func (s *Server) diagnoseProxyPoolEntry(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusNotFound, "代理不存在或已禁用")
 		return
 	}
+	probes, err := s.m.egressProbesChecked()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	custom, err := s.m.EgressProbeURLChecked()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	stopCancellation := context.AfterFunc(serverContext(s), cancel)
 	defer stopCancellation()
-	var https, httpResult egressProbeResult
-	if selected.ProtocolAuto && selected.DetectedProtocol == "" {
-		// RawURL is only a storage placeholder until an HTTPS-verified candidate
-		// is selected. Diagnose all candidates, not that placeholder's scheme.
-		https, httpResult, _ = s.inspectProxyProtocols(ctx, *selected, false)
+	mode := "default"
+	var primary, httpResult egressProbeResult
+	auto := selected.ProtocolAuto && selected.DetectedProtocol == ""
+	if auto {
+		primary, httpResult, _ = s.inspectProxyProtocols(ctx, *selected, false, probes)
 	} else {
-		https = s.runProxyProbe(ctx, selected.RawURL, "", defaultEgressProbes, proxyPoolProbeTimeout)
+		primary = s.runProxyProbe(ctx, selected.RawURL, "", probes, proxyPoolProbeTimeout)
 	}
-	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) {
+	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) || !s.m.egressProbesMatch(probes) {
 		writeErr(w, http.StatusConflict, "请求已取消或代理配置已变更，诊断结果已作废")
 		return
 	}
-	if !selected.ProtocolAuto || selected.DetectedProtocol != "" {
-		httpResult = s.runProxyProbe(ctx, selected.RawURL, "", []string{"http://api.ipify.org?format=json"}, proxyPoolProbeTimeout)
+	if custom == "" {
+		if !auto {
+			httpResult = s.runProxyProbe(ctx, selected.RawURL, "", []string{"http://api.ipify.org?format=json"}, proxyPoolProbeTimeout)
+		}
+	} else {
+		mode = "configured"
+		if auto && strings.HasPrefix(strings.ToLower(custom), "http://") {
+			checks := primary.ProtocolChecks
+			primary = httpResult
+			primary.ProtocolChecks = checks
+		}
+		httpResult = egressProbeResult{ErrorCode: "not_requested", Error: "已配置自定义回显服务，未请求默认公网 HTTP 服务", Probes: []egressAttempt{}}
 	}
-	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) {
+	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) || !s.m.egressProbesMatch(probes) {
 		writeErr(w, http.StatusConflict, "请求已取消或代理配置已变更，诊断结果已作废")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": selected.ID, "https": https, "http": httpResult,
+		// Keep the old primary slot, but explicitly label configured HTTP so
+		// clients never infer HTTPS certificate trust from its success.
+		"id": selected.ID, "https": primary, "http": httpResult,
+		"probe_mode": mode, "probe_url": maskSecrets(custom), "http_skipped": custom != "",
 		"checked_at": time.Now(), "health_updated": false,
 		"scope": "仅诊断这条代理；HTTP 回显可能受网络转发影响，不证明代理身份或 HTTPS 可信，不改健康状态、出口或任务暂停状态",
 	})
