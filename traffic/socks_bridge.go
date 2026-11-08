@@ -4,32 +4,35 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"time"
 
 	"golang.org/x/net/proxy"
 )
 
-// go-mitmproxy's CONNECT helper always offers password authentication for
-// SOCKS5, even without URL credentials. Use the same nil-auth semantics as
-// net/http probes through a private HTTP bridge. It never falls back to direct.
+// go-mitmproxy always offers SOCKS5 password authentication, including when no
+// credentials are configured. This private SOCKS5 bridge authenticates the
+// library locally, then uses the same nil-auth upstream semantics as net/http.
+// SOCKS framing reads exact lengths so even server-first tunnel data is kept.
 type socksBridge struct {
-	url           *url.URL
-	authorization string
-	server        *http.Server
-	route         func() *url.URL
-	failure       func(error)
-	cancel        context.CancelFunc
-	mu            sync.Mutex
-	closed        bool
-	connections   map[net.Conn]bool
-	workers       sync.WaitGroup
+	url         *url.URL
+	password    string
+	listener    net.Listener
+	route       func() *url.URL
+	failure     func(error)
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	closed      bool
+	connections map[net.Conn]bool
+	workers     sync.WaitGroup
 }
 
 func newSOCKSBridge(route func() *url.URL, failure func(error)) (*socksBridge, error) {
@@ -39,12 +42,28 @@ func newSOCKSBridge(route func() *url.URL, failure func(error)) (*socksBridge, e
 	}
 	password := rand.Text()
 	ctx, cancel := context.WithCancel(context.Background())
-	b := &socksBridge{url: &url.URL{Scheme: "http", Host: listener.Addr().String(), User: url.UserPassword("artex", password)},
-		authorization: "Basic " + base64.StdEncoding.EncodeToString([]byte("artex:"+password)), route: route, failure: failure, cancel: cancel, connections: map[net.Conn]bool{}}
-	b.server = &http.Server{Handler: b, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 64 << 10,
-		BaseContext: func(net.Listener) context.Context { return ctx }}
-	go func() { _ = b.server.Serve(listener) }()
+	b := &socksBridge{url: &url.URL{Scheme: "socks5", Host: listener.Addr().String(), User: url.UserPassword("artex", password)}, password: password, listener: listener, route: route, failure: failure, ctx: ctx, cancel: cancel, connections: map[net.Conn]bool{}}
+	go b.accept()
 	return b, nil
+}
+
+func (b *socksBridge) accept() {
+	for {
+		client, err := b.listener.Accept()
+		if err != nil {
+			return
+		}
+		b.mu.Lock()
+		if b.closed {
+			b.mu.Unlock()
+			_ = client.Close()
+			return
+		}
+		b.connections[client] = true
+		b.workers.Add(1)
+		b.mu.Unlock()
+		go func() { defer b.workers.Done(); defer b.release(client); b.serve(client) }()
+	}
 }
 
 func (b *socksBridge) track(conn net.Conn) bool {
@@ -73,32 +92,113 @@ func (b *socksBridge) Close() error {
 	}
 	b.mu.Unlock()
 	b.cancel()
-	err := b.server.Close()
+	err := b.listener.Close()
 	b.workers.Wait()
 	return err
 }
 
-func (b *socksBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Proxy-Authorization")), []byte(b.authorization)) != 1 {
-		w.WriteHeader(http.StatusProxyAuthRequired)
+func socksReadField(conn net.Conn) ([]byte, error) {
+	length := []byte{0}
+	if _, err := io.ReadFull(conn, length); err != nil {
+		return nil, err
+	}
+	value := make([]byte, int(length[0]))
+	_, err := io.ReadFull(conn, value)
+	return value, err
+}
+
+func (b *socksBridge) authenticate(client net.Conn) bool {
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(client, header); err != nil || header[0] != 5 {
+		return false
+	}
+	methods := make([]byte, int(header[1]))
+	if _, err := io.ReadFull(client, methods); err != nil {
+		return false
+	}
+	passwordMethod := false
+	for _, method := range methods {
+		passwordMethod = passwordMethod || method == 2
+	}
+	if !passwordMethod {
+		_, _ = client.Write([]byte{5, 255})
+		return false
+	}
+	if _, err := client.Write([]byte{5, 2}); err != nil {
+		return false
+	}
+	if _, err := io.ReadFull(client, header[:1]); err != nil || header[0] != 1 {
+		return false
+	}
+	username, err := socksReadField(client)
+	if err != nil {
+		return false
+	}
+	password, err := socksReadField(client)
+	if err != nil {
+		return false
+	}
+	valid := subtle.ConstantTimeCompare(username, []byte("artex")) & subtle.ConstantTimeCompare(password, []byte(b.password))
+	if valid != 1 {
+		_, _ = client.Write([]byte{1, 1})
+		return false
+	}
+	_, err = client.Write([]byte{1, 0})
+	return err == nil
+}
+
+func socksConnectTarget(client net.Conn) (string, error) {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(client, header); err != nil {
+		return "", err
+	}
+	if header[0] != 5 || header[1] != 1 || header[2] != 0 {
+		return "", errors.New("unsupported SOCKS request")
+	}
+	var host string
+	switch header[3] {
+	case 1, 4:
+		length := 4
+		if header[3] == 4 {
+			length = 16
+		}
+		address := make([]byte, length)
+		if _, err := io.ReadFull(client, address); err != nil {
+			return "", err
+		}
+		host = net.IP(address).String()
+	case 3:
+		name, err := socksReadField(client)
+		if err != nil {
+			return "", err
+		}
+		host = string(name)
+	default:
+		return "", errors.New("unsupported SOCKS address")
+	}
+	port := make([]byte, 2)
+	if _, err := io.ReadFull(client, port); err != nil {
+		return "", err
+	}
+	if host == "" || binary.BigEndian.Uint16(port) == 0 {
+		return "", errors.New("empty SOCKS destination")
+	}
+	return net.JoinHostPort(host, strconv.Itoa(int(binary.BigEndian.Uint16(port)))), nil
+}
+
+func (b *socksBridge) serve(client net.Conn) {
+	_ = client.SetDeadline(time.Now().Add(10 * time.Second))
+	if !b.authenticate(client) {
 		return
 	}
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		w.WriteHeader(http.StatusServiceUnavailable)
+	target, err := socksConnectTarget(client)
+	if err != nil {
+		_, _ = client.Write([]byte{5, 7, 0, 1, 0, 0, 0, 0, 0, 0})
 		return
 	}
-	b.workers.Add(1)
-	b.mu.Unlock()
-	defer b.workers.Done()
 	upstream := b.route()
 	if upstream == nil || upstream.Scheme != "socks5" {
-		w.WriteHeader(http.StatusBadGateway)
-		return
-	}
-	if r.Method != http.MethodConnect {
-		b.forwardHTTP(w, r, upstream)
+		_, _ = client.Write([]byte{5, 1, 0, 1, 0, 0, 0, 0, 0, 0})
 		return
 	}
 	var auth *proxy.Auth
@@ -112,73 +212,37 @@ func (b *socksBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	dialer, err := proxy.SOCKS5("tcp", address, auth, &net.Dialer{Timeout: 10 * time.Second})
 	if err != nil {
-		b.fail(w, err)
+		b.fail(client, err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	remote, err := dialer.(proxy.ContextDialer).DialContext(ctx, "tcp", r.Host)
+	ctx, cancel := context.WithTimeout(b.ctx, 10*time.Second)
+	remote, err := dialer.(proxy.ContextDialer).DialContext(ctx, "tcp", target)
 	cancel()
 	if err != nil {
-		b.fail(w, err)
+		b.fail(client, err)
 		return
 	}
 	if !b.track(remote) {
 		return
 	}
 	defer b.release(remote)
-	client, buffered, err := http.NewResponseController(w).Hijack()
-	if err != nil {
+	if _, err := client.Write([]byte{5, 0, 0, 1, 127, 0, 0, 1, 0, 0}); err != nil {
 		return
 	}
-	if !b.track(client) {
-		return
-	}
-	defer b.release(client)
-	if _, err := buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
-		return
-	}
-	if err := buffered.Flush(); err != nil {
-		return
-	}
+	_ = client.SetDeadline(time.Time{})
 	done := make(chan struct{})
-	go func() { defer close(done); _, _ = io.Copy(remote, buffered.Reader); _ = remote.Close() }()
+	go func() { defer close(done); _, _ = io.Copy(remote, client); _ = remote.Close() }()
 	_, _ = io.Copy(client, remote)
 	_ = client.Close()
 	_ = remote.Close()
 	<-done
 }
 
-func (b *socksBridge) fail(w http.ResponseWriter, err error) {
+func (b *socksBridge) fail(client net.Conn, err error) {
 	if b.failure != nil {
 		b.failure(err)
 	}
-	http.Error(w, "SOCKS5 upstream unavailable", http.StatusBadGateway)
-}
-
-func (b *socksBridge) forwardHTTP(w http.ResponseWriter, r *http.Request, upstream *url.URL) {
-	if r.URL.Scheme != "http" || r.URL.Host == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	request := r.Clone(r.Context())
-	request.RequestURI = ""
-	request.Header.Del("Proxy-Authorization")
-	request.Header.Del("Proxy-Connection")
-	transport := &http.Transport{Proxy: http.ProxyURL(upstream), DisableKeepAlives: true, ResponseHeaderTimeout: 10 * time.Second}
-	defer transport.CloseIdleConnections()
-	response, err := transport.RoundTrip(request)
-	if err != nil {
-		b.fail(w, err)
-		return
-	}
-	defer response.Body.Close()
-	for name, values := range response.Header {
-		for _, value := range values {
-			w.Header().Add(name, value)
-		}
-	}
-	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(w, response.Body)
+	_, _ = client.Write([]byte{5, 1, 0, 1, 0, 0, 0, 0, 0, 0})
 }
 
 func (t *Traffic) captureUpstream(_ *http.Request) (*url.URL, error) {

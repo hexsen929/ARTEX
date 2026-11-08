@@ -182,18 +182,17 @@ func TestSOCKS5BridgeIsAuthenticatedAndClosesWithCapture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unauthenticated := *bridge
-	unauthenticated.User = nil
-	transport := &http.Transport{Proxy: http.ProxyURL(&unauthenticated)}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: time.Second}
-	response, err := client.Get("http://fixture.invalid/ip")
+	unauthenticated, err := net.DialTimeout("tcp", bridge.Host, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = response.Body.Close()
-	if response.StatusCode != http.StatusProxyAuthRequired {
-		t.Fatal("private bridge accepted unauthenticated request", response.StatusCode)
+	_ = unauthenticated.SetDeadline(time.Now().Add(time.Second))
+	_, _ = unauthenticated.Write([]byte{5, 1, 0})
+	reply := make([]byte, 2)
+	_, err = io.ReadFull(unauthenticated, reply)
+	_ = unauthenticated.Close()
+	if err != nil || reply[0] != 5 || reply[1] != 255 {
+		t.Fatal("private bridge accepted unauthenticated request", reply, err)
 	}
 	capture.proxy.SetShouldInterceptRule(func(*http.Request) bool { return false })
 	startSharedProxy(t, capture)
