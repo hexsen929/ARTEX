@@ -2491,7 +2491,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     throw new Error("演示模式不支持修改 HTTP Basic Auth，请在实际部署中配置");
   if (path === "/settings/web-search/test") return { ok: true, count: 5, backend: D.settings.web_search_backend };
   if (path === "/settings/proxy/health-test") return { ok: true, capture: false, configured: b.global_proxy ?? "", agent_proxy: "", checks: [{ key: "global", label: "代理连通性", result: {kind:"connectivity", ok:true, status_code:204, latency_ms:12,probes:[]} }],warnings:[] };
-  if (path === "/settings/proxy/test" && !(b.probe_url ?? D.settings.egress_probe_url ?? "").trim()) throw new Error("未配置出口 IP 回显服务");
+  if (path === "/settings/proxy/test") {
+    const echoURL = b.probe_url ?? D.settings.egress_probe_url ?? "";
+    if (typeof echoURL !== "string" || !echoURL.trim()) throw new Error("未配置出口 IP 回显服务");
+  }
   if (path === "/settings/proxy/test")
     return {
       ok: true,

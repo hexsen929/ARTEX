@@ -42,6 +42,10 @@ func TestProxyConnectivityUsesHTTPSWithoutIPBody(t *testing.T) {
 	var status atomic.Int32
 	status.Store(http.StatusNoContent)
 	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			<-r.Context().Done()
+			return
+		}
 		methodsMu.Lock()
 		methods = append(methods, r.Method)
 		methodsMu.Unlock()
@@ -94,6 +98,10 @@ func TestProxyConnectivityUsesHTTPSWithoutIPBody(t *testing.T) {
 		t.Fatal("health fetched IP/body instead of lightweight request", methods)
 	}
 	methodsMu.Unlock()
+	fallback := probeHTTP(t.Context(), proxy.URL, ca, []string{target.URL + "/slow", target.URL}, 250*time.Millisecond, true)
+	if !fallback.OK || len(fallback.Probes) != 2 || fallback.Probes[0].ErrorCode != "timeout" {
+		t.Fatal("first timeout consumed the fallback budget", fallback)
+	}
 	res := probeHTTP(t.Context(), proxy.URL, "", []string{target.URL}, time.Second, true)
 	if res.OK || res.ErrorCode != "certificate_untrusted" {
 		t.Fatal("untrusted TLS became healthy", res)

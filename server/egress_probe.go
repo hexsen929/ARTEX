@@ -232,7 +232,13 @@ func probeHTTP(ctx context.Context, proxyRaw, caPEMPath string, probes []string,
 	if connectivity {
 		kind = "connectivity"
 	}
-	ctx, cancelAll := context.WithTimeout(ctx, timeout)
+	budget, attemptTimeout := timeout, timeout
+	if connectivity {
+		count := max(1, len(probes))
+		budget = min(proxyPoolProbeTimeout, timeout*time.Duration(count))
+		attemptTimeout = budget / time.Duration(count)
+	}
+	ctx, cancelAll := context.WithTimeout(ctx, budget)
 	defer cancelAll()
 
 	// 复用 traffic 包的校验，保证"什么算合法代理"全项目只有一处定义。
@@ -272,7 +278,7 @@ func probeHTTP(ctx context.Context, proxyRaw, caPEMPath string, probes []string,
 	client := &http.Client{
 		Transport: tr,
 		// 比 ctx 宽 2 秒，让 ctx 先到期，错误里才是 "context deadline exceeded"。
-		Timeout:       timeout + 2*time.Second,
+		Timeout:       attemptTimeout + 2*time.Second,
 		CheckRedirect: probeCheckRedirect,
 	}
 	if connectivity {
@@ -281,7 +287,7 @@ func probeHTTP(ctx context.Context, proxyRaw, caPEMPath string, probes []string,
 
 	attempts := make([]egressAttempt, 0, len(probes))
 	for _, target := range probes {
-		reqCtx, cancel := context.WithTimeout(ctx, timeout)
+		reqCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 		if via == "socks5" || via == "socks5h" {
 			// Both callbacks occur after the SOCKS CONNECT reply. In particular,
 			// a later target TLS failure must not erase the successful handshake.
