@@ -94,9 +94,9 @@ func TestMergeSavedProbeInvalidValueRemainsRepairableWithoutNetwork(t *testing.T
 
 func TestMergeSavedProbeChangeDiscardsWholeRoundAndKeepsForce(t *testing.T) {
 	m := proxyTestManager(t)
-	preserveEgressProbeSetting(t, m)
-	const previous, next = "http://10.0.0.5/ip", "https://probe.fixture.invalid/ip"
-	if err := m.pg.SetSetting(settingEgressProbeURL, previous); err != nil {
+	preserveHealthProbeSetting(t, m)
+	const previous, next = "https://10.0.0.5/health", "https://probe.fixture.invalid/ip"
+	if err := m.pg.SetSetting(settingProxyHealthURL, previous); err != nil {
 		t.Fatal(err)
 	}
 	entries := proxyScaleEntries(1)
@@ -109,7 +109,7 @@ func TestMergeSavedProbeChangeDiscardsWholeRoundAndKeepsForce(t *testing.T) {
 		if !reflect.DeepEqual(probes, []string{previous}) {
 			t.Error("round did not use its configured probe service")
 		}
-		if err := m.pg.SetSetting(settingEgressProbeURL, next); err != nil {
+		if err := m.pg.SetSetting(settingProxyHealthURL, next); err != nil {
 			t.Error(err)
 		}
 		s.invalidateEgressProbeSelection()
@@ -122,11 +122,11 @@ func TestMergeSavedProbeChangeDiscardsWholeRoundAndKeepsForce(t *testing.T) {
 }
 
 func TestMergeSavedProbeDiagnosticAvoidsPublicFallbackAndTrustClaims(t *testing.T) {
-	for _, custom := range []string{"http://10.0.0.5/ip", "https://probe.fixture.invalid/ip"} {
+	for _, custom := range []string{"https://10.0.0.5/health", "https://probe.fixture.invalid/ip"} {
 		t.Run(strings.Split(custom, ":")[0], func(t *testing.T) {
 			m := proxyTestManager(t)
-			preserveEgressProbeSetting(t, m)
-			if err := m.pg.SetSetting(settingEgressProbeURL, custom); err != nil {
+			preserveHealthProbeSetting(t, m)
+			if err := m.pg.SetSetting(settingProxyHealthURL, custom); err != nil {
 				t.Fatal(err)
 			}
 			entries := proxyScaleEntries(1)

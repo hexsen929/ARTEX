@@ -203,7 +203,7 @@ func TestProxyPoolFailureSwitchRecoversOnlyEligibleTasks(t *testing.T) {
 	}
 	m.globalProxy = "http://a"
 	m.proxyPool = &proxyPoolState{active: "a", entries: []proxyPoolEntry{
-		{ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true, Health: "healthy"}, RawURL: "http://a"},
+		{ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true, Health: "healthy", ConsecutiveFailures: 2}, RawURL: "http://a"},
 		{ProxyPoolEntry: ProxyPoolEntry{ID: "b", Enabled: true, Health: "healthy"}, RawURL: "http://b"},
 	}}
 	eligible, err := m.CreateTask("eligible", "goal", nil, 0, 0)

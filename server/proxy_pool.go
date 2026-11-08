@@ -49,6 +49,8 @@ type ProxyPoolEntry struct {
 	LatencyMS           int64                `json:"latency_ms,omitempty"`
 	LastError           string               `json:"last_error,omitempty"`
 	LastErrorCode       string               `json:"last_error_code,omitempty"`
+	LastProbeKind       string               `json:"last_probe_kind,omitempty"`
+	LastHTTPStatus      int                  `json:"last_http_status,omitempty"`
 	LastCheckedAt       time.Time            `json:"last_checked_at,omitempty"`
 	ConsecutiveFailures int                  `json:"consecutive_failures"`
 	Health              string               `json:"health"`
@@ -490,6 +492,7 @@ func (m *Manager) markProxyProbeLocked(id string, res egressProbeResult) {
 		e.probeRevision = m.proxyPool.probeSequence
 		e.LastCheckedAt, e.LatencyMS, e.EgressIP = time.Now(), res.LatencyMS, res.ExitIP
 		e.ProtocolChecks = res.ProtocolChecks
+		e.LastProbeKind, e.LastHTTPStatus = res.Kind, res.StatusCode
 		if res.OK {
 			e.ConsecutiveFailures, e.LastError, e.Health = 0, "", "healthy"
 			e.LastErrorCode = ""
@@ -552,6 +555,7 @@ func (m *Manager) applyProxyProbeBatchLocked(results []proxyBatchProbe, threshol
 		}
 		e.LastCheckedAt, e.LatencyMS, e.EgressIP = now, res.LatencyMS, res.ExitIP
 		e.ProtocolChecks = res.ProtocolChecks
+		e.LastProbeKind, e.LastHTTPStatus = res.Kind, res.StatusCode
 		if res.OK {
 			e.ConsecutiveFailures, e.LastError, e.Health = 0, "", "healthy"
 			e.LastErrorCode = ""
@@ -716,7 +720,7 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 	if s.m == nil || s.m.proxyPool == nil || s.proxyShuttingDown() {
 		return outcome
 	}
-	probes, err := s.m.egressProbesChecked()
+	probes, err := s.m.healthProbesChecked()
 	if err != nil {
 		// An unreadable/invalid service setting is not proxy-health evidence.
 		return outcome
@@ -822,7 +826,7 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 		if ctx.Err() != nil || s.proxyShuttingDown() {
 			return proxyPoolTickOutcome{}
 		}
-		if !s.m.egressProbesMatch(probes) {
+		if !s.m.healthProbesMatch(probes) {
 			if forceHealth {
 				s.queueProxyPoolHealth(true)
 			}
@@ -1010,7 +1014,7 @@ func (s *Server) handleProxyPoolFailure(cause error) bool {
 		return true
 	}
 	defer s.proxyFailureMu.Unlock()
-	probes, err := s.m.egressProbesChecked()
+	probes, err := s.m.healthProbesChecked()
 	if err != nil {
 		return true
 	}
@@ -1041,8 +1045,8 @@ func (s *Server) handleProxyPoolFailure(cause error) bool {
 	if entry == nil {
 		return true
 	}
-	res := s.runProxyProbe(serverContext(s), cur, "", probes, proxyPoolProbeTimeout)
-	if s.proxyShuttingDown() || !s.m.egressProbesMatch(probes) {
+	res := s.runProxyHealthProbe(serverContext(s), cur, "", probes, proxyPoolProbeTimeout)
+	if s.proxyShuttingDown() || !s.m.healthProbesMatch(probes) {
 		return true
 	}
 	threshold, _, _ := s.m.proxyHealthConfig()
@@ -1082,7 +1086,7 @@ func (s *Server) handleProxyPoolFailure(cause error) bool {
 			exhausted = current.ConsecutiveFailures >= threshold
 		}
 	}
-	if onFailure {
+	if onFailure && exhausted {
 		if id := s.m.selectHealthyLocked(active); id != "" && id != active {
 			for _, next := range pool.entries {
 				if next.ID == id && next.RawURL != cur {
@@ -1636,7 +1640,7 @@ func (s *Server) testProxyPoolEntry(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "代理不存在")
 		return
 	}
-	probes, err := s.m.egressProbesChecked()
+	probes, err := s.m.healthProbesChecked()
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -1661,7 +1665,7 @@ func (s *Server) testProxyPoolEntry(w http.ResponseWriter, r *http.Request) {
 	for _, e := range entries {
 		if e.ID == id && e.Enabled && strings.TrimSpace(e.RawURL) != "" {
 			res, resolved := s.probePoolEntry(r.Context(), e, probes)
-			if r.Context().Err() != nil || s.proxyShuttingDown() || !s.m.egressProbesMatch(probes) {
+			if r.Context().Err() != nil || s.proxyShuttingDown() || !s.m.healthProbesMatch(probes) {
 				writeErr(w, http.StatusServiceUnavailable, "请求已取消或服务正在停止，结果未保存")
 				return
 			}

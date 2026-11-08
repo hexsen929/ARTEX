@@ -33,7 +33,7 @@ const settings = {
   proxy_rotate_on_failure: false, proxy_rotate_strategy: "sequential",
   proxy_health_fail_threshold: 3, proxy_health_cooldown_seconds: 60,
   proxy_health_check_interval_seconds: 30, proxy_reconnect_max_attempts: 5,
-  proxy_reconnect_interval_seconds: 30, egress_probe_url: savedURL,
+  proxy_reconnect_interval_seconds: 30, egress_probe_url: savedURL, proxy_health_check_url: "",
   web_search_enabled: false, web_search_backend: "ddgs", web_search_proxy: "",
   brave_key_set: false, tavily_key_set: false, global_proxy: proxies[0].url, show_egress_ip: false,
   python_interpreter: "", workers: 3, worker_pools: [],
@@ -86,17 +86,22 @@ async function serveAPI(request, response, url) {
   if (diagnostic && method === "POST") {
     const entry = settings.proxy_pool.find((item) => item.id === diagnostic[1]);
     assert.ok(entry); assert.deepEqual(body, {});
-    const scheme = new URL(settings.egress_probe_url).protocol;
+    const scheme = "https:";
     const missing = { checked: false, ok: false, latency_ms: 0 };
-    const observed = (protocol) => ({ checked: true, ok: protocol === "http", ip: protocol === "http" ? "192.0.2.9" : undefined, error: protocol === "http" ? undefined : "协议请求失败", latency_ms: 1 });
+    const observed = (protocol) => ({ checked: true, ok: protocol === "http", status_code: protocol === "http" ? 204 : undefined, error: protocol === "http" ? undefined : "协议请求失败", latency_ms: 1 });
     const checks = ["http", "https", "socks5", "socks4"].map((protocol) => ({ protocol, recognized: protocol === "http" && scheme === "https:", supported: protocol !== "socks4",
       evidence: "仅检查已保存回显服务", https: scheme === "https:" && protocol !== "socks4" ? observed(protocol) : missing,
       http: scheme === "http:" && protocol !== "socks4" ? observed(protocol) : missing }));
-    return json(response, 200, { id: entry.id, probe_mode: "configured", probe_url: settings.egress_probe_url, http_skipped: true, health_updated: false, checked_at: "2026-11-08T00:00:00Z", scope: "fixture",
-      https: { ok: true, via: "http", exit_ip: "192.0.2.9", latency_ms: 1, probes: [], ...(entry.protocol_auto ? { protocol_checks: checks } : {}) },
+    return json(response, 200, { id: entry.id, probe_kind:"connectivity", probe_mode: settings.proxy_health_check_url ? "configured" : "default", probe_url: settings.proxy_health_check_url, http_skipped: true, health_updated: false, checked_at: "2026-11-08T00:00:00Z", scope: "fixture",
+      https: { kind:"connectivity", ok: true, via: "http", status_code:204, latency_ms: 1, probes: [], ...(entry.protocol_auto ? { protocol_checks: checks } : {}) },
       http: { ok: false, error: "未请求额外公共回显", latency_ms: 0, probes: [] } });
   }
   if (endpoint === "/api/settings" && method === "PUT") {
+    if (Object.hasOwn(body,"proxy_health_check_url")) {
+      assert.deepEqual(Object.keys(body),["proxy_health_check_url"]);
+      settings.proxy_health_check_url=body.proxy_health_check_url;
+      return json(response,200,settings);
+    }
     assert.deepEqual(Object.keys(body), ["egress_probe_url"], "Probe service save changed unrelated settings");
     assert.equal(typeof body.egress_probe_url, "string");
     if (state.failProbeSave) { state.failProbeSave = false; return json(response, 503, { error: "FIXTURE_PROBE_SAVE_FAILED" }); }
@@ -109,7 +114,7 @@ async function serveAPI(request, response, url) {
     settings.egress_probe_url = body.egress_probe_url;
     return json(response, 200, settings);
   }
-  if (endpoint === "/api/settings/proxy/test" && method === "POST") {
+  if ((endpoint === "/api/settings/proxy/test" || endpoint === "/api/settings/proxy/health-test") && method === "POST") {
     assert.equal(body.resume, undefined, "An IP service test silently resumed tasks");
     assert.equal(typeof body.probe_url, "string", "Temporary test lost explicit empty/default semantics");
     return json(response, 200, probeReport());
@@ -165,7 +170,7 @@ const server = http.createServer(async (request, response) => {
 const writes = () => requests.filter((r) => ["PATCH", "POST", "PUT", "DELETE"].includes(r.method));
 const probeWrites = () => requests.filter((r) => r.endpoint === "/api/settings" && r.method === "PUT");
 const taskWrites = () => requests.filter((r) => /^\/api\/tasks\/\d+$/.test(r.endpoint) && r.method === "PATCH");
-const probes = () => requests.filter((r) => r.endpoint === "/api/settings/proxy/test");
+const probes = () => requests.filter((r) => ["/api/settings/proxy/test","/api/settings/proxy/health-test"].includes(r.endpoint));
 async function eventually(check, label) {
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) { if (await check()) return; await new Promise((resolve) => setTimeout(resolve, 40)); }
@@ -218,33 +223,44 @@ async function main() {
     const diagnosisDialog = () => page.getByRole("dialog", { name: "代理 HTTP／HTTPS 诊断", exact: true });
     const explicitRow = page.getByTestId("proxy-pool-row").filter({ hasText: "FIXTURE_PROXY_0 ·" });
     await explicitRow.getByRole("button", { name: "诊断", exact: true }).click();
-    await diagnosisDialog().getByText("已保存回显服务（HTTP，明文回显）：回显成功", { exact: true }).waitFor();
-    await diagnosisDialog().getByText("已使用保存的探测服务，未额外访问公共 HTTP 回显地址。", { exact: true }).waitFor();
+    await diagnosisDialog().getByText("HTTPS 连通性（校验证书）：通过", { exact: true }).waitFor();
+    await diagnosisDialog().getByText("仅检查 HTTPS 连通性，未查询出口 IP。", { exact: true }).waitFor();
     assert.equal(await diagnosisDialog().getByText("访问 HTTPS 网站（校验证书）：回显成功", { exact: true }).count(), 0);
     await diagnosisDialog().getByRole("button", { name: "关闭诊断", exact: true }).click();
     const automaticRow = page.getByTestId("proxy-pool-row").filter({ hasText: "FIXTURE_PROXY_1 ·" });
     await automaticRow.getByRole("button", { name: "诊断", exact: true }).click();
     await diagnosisDialog().getByTestId("proxy-protocol-checks").waitFor();
-    assert.equal(await diagnosisDialog().getByText("访问 HTTPS 网站（校验证书）：未执行", { exact: true }).count(), 3);
-    await diagnosisDialog().getByText("访问 HTTP 网站（明文回显）：回显通过 · 192.0.2.9", { exact: true }).waitFor();
+    assert.equal(await diagnosisDialog().getByText("访问 HTTP 网站（明文回显）：未执行", { exact: true }).count(), 3);
+    await diagnosisDialog().getByText("访问 HTTPS 网站（校验证书）：连通性通过 · HTTP 204", { exact: true }).waitFor();
     await diagnosisDialog().getByRole("button", { name: "关闭诊断", exact: true }).click();
     assert.equal(JSON.stringify(settings.proxy_pool), initialProxies, "Configured diagnostics published protocol/health state");
     console.log("PASS configured diagnostics distinguish website schemes for explicit and automatic proxy protocols");
 
-    await input().fill(temporaryURL);
+    const healthInput = () => page.getByRole("textbox", { name: "连通性检测网址", exact: true });
+    await healthInput().fill(temporaryURL);
     const beforeTemporary = probeWrites().length;
     await page.getByRole("button", { name: "测试代理", exact: true }).click();
-    await eventually(() => probes().length === 1, "Temporary probe request missing");
-    await eventually(async () => await page.getByRole("button", { name: "测试代理", exact: true }).isEnabled(), "Temporary test remained busy");
-    assert.deepEqual(probes()[0].body, { global_proxy: settings.global_proxy, probe_url: temporaryURL });
-    assert.equal(settings.egress_probe_url, nextURL); assert.equal(probeWrites().length, beforeTemporary);
-    await input().fill("");
+    await eventually(() => probes().length === 1, "Temporary health check missing");
+    await eventually(async () => await page.getByRole("button", { name: "测试代理", exact: true }).isEnabled(), "Health test remained busy");
+    assert.equal(probes()[0].endpoint, "/api/settings/proxy/health-test");
+    assert.deepEqual(probes()[0].body, {global_proxy:settings.global_proxy,probe_url:temporaryURL});
+    assert.equal(settings.egress_probe_url,nextURL); assert.equal(probeWrites().length,beforeTemporary);
+    await page.getByRole("button",{name:"保存检测网址",exact:true}).click();
+    await eventually(()=>settings.proxy_health_check_url===temporaryURL,"Health setting was not saved");
+    await eventually(async()=>await page.getByRole("button",{name:"保存检测网址",exact:true}).isEnabled(),"Health save remained busy");
+    await healthInput().fill("");
     await page.getByRole("button", { name: "测试代理", exact: true }).click();
-    await eventually(() => probes().length === 2, "Explicit default-service test missing");
-    await eventually(async () => await page.getByRole("button", { name: "测试代理", exact: true }).isEnabled(), "Explicit-default test remained busy");
-    assert.equal(probes()[1].body.probe_url, "");
-    assert.equal(settings.egress_probe_url, nextURL);
-    console.log("PASS temporary and explicit-default tests never save the probe URL or request task resume");
+    await eventually(()=>probes().length===2,"Default health request missing");
+    await eventually(async()=>await page.getByRole("button",{name:"测试代理",exact:true}).isEnabled(),"Health request remained busy");
+    assert.equal(probes()[1].body.probe_url,"");
+    assert.equal(settings.egress_probe_url,nextURL);
+    await input().fill(temporaryURL);
+    await page.getByRole("button",{name:"查询出口 IP",exact:true}).click();
+    await eventually(()=>probes().length===3,"Explicit IP query missing");
+    await eventually(async()=>await page.getByRole("button",{name:"查询出口 IP",exact:true}).isEnabled(),"IP query remained busy");
+    assert.equal(probes()[2].endpoint,"/api/settings/proxy/test");
+    assert.equal(settings.proxy_health_check_url,temporaryURL);
+    console.log("PASS independent health and optional IP query settings, requests and defaults");
 
     state.failProbeSave = true;
     await input().fill(temporaryURL); await save().click();

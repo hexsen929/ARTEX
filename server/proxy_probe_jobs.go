@@ -194,12 +194,12 @@ func (s *Server) finishProxyProbeRound(round *proxyProbeRound, state string) {
 func (s *Server) probePoolEntry(parent context.Context, e proxyPoolEntry, selectedProbes ...[]string) (egressProbeResult, string) {
 	ctx, cancel := context.WithTimeout(parent, proxyPoolProbeTimeout)
 	defer cancel()
-	probes := defaultEgressProbes
+	probes := defaultHealthProbes
 	if len(selectedProbes) > 0 {
 		probes = selectedProbes[0]
 	}
 	if !e.ProtocolAuto || e.DetectedProtocol != "" {
-		return s.runProxyProbe(ctx, e.RawURL, "", probes, 5*time.Second), ""
+		return s.runProxyHealthProbe(ctx, e.RawURL, "", probes, 5*time.Second), ""
 	}
 	result, _, raw := s.inspectProxyProtocols(ctx, e, true, probes)
 	return result, raw

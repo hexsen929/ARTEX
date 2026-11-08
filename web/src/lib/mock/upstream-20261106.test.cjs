@@ -17,8 +17,8 @@ test("mock saved egress service preserves omitted/null values and explicit clear
     await assert.rejects(mockHandle("PUT", "/settings", JSON.stringify({ egress_probe_url: 12, opsec_enabled: true })));
     assert.deepEqual(data.settings, before);
     const diagnosis = await mockHandle("POST", "/settings/proxy-pool/fixture/diagnose");
-    assert.equal(diagnosis.probe_mode, "configured");
-    assert.equal(diagnosis.probe_url, value);
+    assert.equal(diagnosis.probe_mode, "default");
+    assert.equal(diagnosis.probe_url, "");
     assert.equal(diagnosis.http_skipped, true);
     assert.equal((await mockHandle("PUT", "/settings", JSON.stringify({ egress_probe_url: "" }))).egress_probe_url, "");
   } finally { Object.assign(data.settings, original); }

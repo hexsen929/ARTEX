@@ -28,9 +28,9 @@ func TestEgressProbeMergeInvalidUpdatePrecedesUnrelatedWrites(t *testing.T) {
 
 func TestEgressProbeMergeSameAddressKeepsPoolGeneration(t *testing.T) {
 	s, request, _ := callbackSettingsFixture(t)
-	preserveEgressProbeSetting(t, s.m)
-	const custom = "http://10.0.0.5/ip"
-	if err := s.m.pg.SetSetting(settingEgressProbeURL, custom); err != nil {
+	preserveHealthProbeSetting(t, s.m)
+	const custom = "https://10.0.0.5/health"
+	if err := s.m.pg.SetSetting(settingProxyHealthURL, custom); err != nil {
 		t.Fatal(err)
 	}
 	if s.m.proxyPool == nil {
@@ -39,7 +39,7 @@ func TestEgressProbeMergeSameAddressKeepsPoolGeneration(t *testing.T) {
 	s.m.proxyPool.mu.Lock()
 	s.m.proxyPool.generation = 7
 	s.m.proxyPool.mu.Unlock()
-	response := request(http.MethodPut, `{"egress_probe_url":"`+custom+`"}`, true)
+	response := request(http.MethodPut, `{"proxy_health_check_url":"`+custom+`"}`, true)
 	if response.Code != http.StatusOK {
 		t.Fatalf("unchanged probe save HTTP %d", response.Code)
 	}

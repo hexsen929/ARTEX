@@ -12,11 +12,11 @@ import (
 )
 
 func TestMergeProtocolProbeConfiguredServiceNeverContactsDefaults(t *testing.T) {
-	for _, custom := range []string{"http://10.0.0.5/ip", "https://probe.fixture.invalid/ip"} {
+	for _, custom := range []string{"https://10.0.0.5/health", "https://probe.fixture.invalid/ip"} {
 		t.Run(custom, func(t *testing.T) {
 			m := proxyTestManager(t)
-			preserveEgressProbeSetting(t, m)
-			if err := m.pg.SetSetting(settingEgressProbeURL, custom); err != nil {
+			preserveHealthProbeSetting(t, m)
+			if err := m.pg.SetSetting(settingProxyHealthURL, custom); err != nil {
 				t.Fatal(err)
 			}
 			entry := proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ID: "auto-custom", Enabled: true, ProtocolAuto: true}, RawURL: "http://proxy.fixture.invalid:8080"}
@@ -38,11 +38,11 @@ func TestMergeProtocolProbeConfiguredServiceNeverContactsDefaults(t *testing.T) 
 				return egressProbeResult{OK: true, ExitIP: "192.0.2.9", Probes: []egressAttempt{}}
 			}
 			result, resolved := s.probePoolEntry(t.Context(), entry, []string{custom})
-			if result.OK || resolved != "" || calls != 3 || len(result.ProtocolChecks) != 4 {
+			if !result.OK || resolved == "" || calls != 3 || len(result.ProtocolChecks) != 4 {
 				t.Fatal("one configured website scheme became a complete proxy", result, resolved, calls)
 			}
 			for _, check := range result.ProtocolChecks[:3] {
-				if check.HTTP.Checked != strings.HasPrefix(custom, "http://") || check.HTTPS.Checked != strings.HasPrefix(custom, "https://") {
+				if check.HTTP.Checked || check.HTTPS.Checked != strings.HasPrefix(custom, "https://") {
 					t.Fatal("unrequested scheme was checked", check)
 				}
 			}
@@ -72,9 +72,9 @@ func TestMergeProtocolProbeConfiguredServiceNeverContactsDefaults(t *testing.T) 
 
 func TestMergeProtocolProbeServiceChangeDiscardsInFlightAutoRound(t *testing.T) {
 	m := proxyTestManager(t)
-	preserveEgressProbeSetting(t, m)
+	preserveHealthProbeSetting(t, m)
 	const previous = "https://first.fixture.invalid/ip"
-	if err := m.pg.SetSetting(settingEgressProbeURL, previous); err != nil {
+	if err := m.pg.SetSetting(settingProxyHealthURL, previous); err != nil {
 		t.Fatal(err)
 	}
 	entry := proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ID: "auto-race", Enabled: true, ProtocolAuto: true}, RawURL: "http://proxy.fixture.invalid:8080"}
@@ -116,7 +116,7 @@ func TestMergeProtocolProbeServiceChangeDiscardsInFlightAutoRound(t *testing.T) 
 	m.proxyPool.mu.Lock()
 	previousRound := m.proxyPool.probeRound
 	m.proxyPool.mu.Unlock()
-	if err := m.pg.SetSetting(settingEgressProbeURL, "https://second.fixture.invalid/ip"); err != nil {
+	if err := m.pg.SetSetting(settingProxyHealthURL, "https://second.fixture.invalid/ip"); err != nil {
 		t.Fatal(err)
 	}
 	s.invalidateEgressProbeSelection()

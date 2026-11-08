@@ -103,6 +103,10 @@ export default function SystemSettingsPage() {
   };
   // 探测地址：留空用公网回显；隔离网填内网回显服务。
   const [egressProbeUrl, setEgressProbeUrl] = React.useState("");
+  const [healthProbeUrl, setHealthProbeUrl] = React.useState("");
+  const [savingHealthProbe, setSavingHealthProbe] = React.useState(false);
+  const healthDraftVersion = React.useRef(0);
+  const healthSaving = React.useRef(false);
   const [savingEgressProbeUrl, setSavingEgressProbeUrl] = React.useState(false);
   const egressProbeHydrated = React.useRef(false);
   const egressProbeSaving = React.useRef(false);
@@ -178,6 +182,7 @@ export default function SystemSettingsPage() {
     // return an older full snapshot and must not erase a draft or a newer save.
     if (!egressProbeHydrated.current) {
       setEgressProbeUrl(readEgressProbeURL(s));
+      setHealthProbeUrl(s.proxy_health_check_url ?? "");
       egressProbeHydrated.current = true;
     }
     if (typeof s.python_interpreter === "string") setPyInterp(s.python_interpreter);
@@ -648,7 +653,7 @@ export default function SystemSettingsPage() {
       if (version !== egressProbeDraftVersion.current) return;
       setEgressProbeUrl(confirmed);
       clearEgressReport();
-      toast.success(confirmed ? "已保存 IP 探测服务" : "已恢复默认 IP 探测服务");
+      toast.success(confirmed ? "已保存 IP 探测服务" : "已关闭出口 IP 查询");
       if (showEgressIp) void probeEgress().catch(() => undefined);
     } catch (e) {
       toast.error(`保存 IP 探测服务失败：${(e as Error).message}`);
@@ -658,15 +663,29 @@ export default function SystemSettingsPage() {
     }
   };
 
+  const saveHealthProbe = async () => {
+    if (healthSaving.current || !settingsLoaded) return;
+    const submitted = healthProbeUrl.trim();
+    const version = healthDraftVersion.current;
+    healthSaving.current = true; setSavingHealthProbe(true);
+    try {
+      const next = await api.setSettings({ proxy_health_check_url: submitted });
+      if (next.proxy_health_check_url !== submitted) throw new Error("服务未确认检测网址保存");
+      if (version === healthDraftVersion.current) { setHealthProbeUrl(submitted); clearEgressReport(); }
+      toast.success(submitted ? "已保存连通性检测网址" : "已恢复默认 HTTPS 检测页");
+    } catch (error) { toast.error((error as Error).message); }
+    finally { healthSaving.current = false; setSavingHealthProbe(false); }
+  };
+
   // 测表单里当前的值，不要求先保存；后端返回直连 / 经代理两条。
-  const testEgress = () => {
+  const testEgress = (connectivity = true) => {
     const seq = ++egressSeq.current;
     setEgressTesting(true);
     setEgressReport(null);
-    api
-      .testEgressProxy({
+    const run = connectivity ? api.testProxyHealth : api.testEgressProxy;
+    run({
         global_proxy: globalProxyInput.trim(),
-        probe_url: egressProbeUrl.trim(),
+        probe_url: connectivity ? healthProbeUrl.trim() : egressProbeUrl.trim(),
       })
       .then((rep) => {
         if (seq !== egressSeq.current) return; // 期间改过配置，这份结果已经过期
@@ -1034,7 +1053,7 @@ export default function SystemSettingsPage() {
                       保存
                     </Button>
                     {/* 测表单里当前的值，不要求先保存。 */}
-                    <Button type="button" variant="outline" onClick={testEgress} disabled={!loaded || egressTesting}>
+                    <Button type="button" variant="outline" onClick={() => testEgress()} disabled={!loaded || egressTesting}>
                       {egressTesting ? "测试中…" : "测试代理"}
                     </Button>
                   </div>
@@ -1049,6 +1068,14 @@ export default function SystemSettingsPage() {
                       ALL_PROXY；Python urllib 等工具可能不支持，开启流量捕获可避免此限制。
                     </p>
                   </details>
+                </section>
+                <section className="space-y-2 rounded-md border p-3">
+                  <Label htmlFor="proxy-health-url">连通性检测网址</Label>
+                  <div className="flex flex-wrap gap-2">
+                    <Input id="proxy-health-url" className="min-w-0 flex-1" value={healthProbeUrl} placeholder="留空使用默认 HTTPS 检测页" disabled={!settingsLoaded || savingHealthProbe} onChange={(event) => { healthDraftVersion.current += 1; setHealthProbeUrl(event.target.value); clearEgressReport(); }} />
+                    <Button type="button" variant="outline" disabled={!settingsLoaded || savingHealthProbe} onClick={() => void saveHealthProbe()}>{savingHealthProbe ? "保存中…" : "保存检测网址"}</Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">用于代理测试、健康检查与恢复。默认访问 Google／Cloudflare 的轻量 HTTPS 检测页，要求 204；自定义 HTTPS 页面接受 2xx。保留证书校验，不查询出口 IP。</p>
                 </section>
                 <details className="text-xs">
                   <summary className="text-muted-foreground cursor-pointer select-none">异常重连策略</summary>
@@ -1089,7 +1116,7 @@ export default function SystemSettingsPage() {
                       在顶栏显示出口 IP
                     </Label>
                     <p className="text-muted-foreground text-xs">
-                      默认关闭。开启后，页面载入、前台定时刷新及手动刷新会访问已保存的探测服务；未配置时使用公共 IP 回显服务，使用已保存的全局代理探测。
+                      默认关闭。开启后，页面载入、前台定时刷新及手动刷新会访问已保存的探测服务；未配置时不查询 IP。查询结果不参与代理健康判断。
                     </p>
                   </div>
                   <Switch
@@ -1103,8 +1130,8 @@ export default function SystemSettingsPage() {
                 <details className="text-xs">
                   <summary className="text-muted-foreground cursor-pointer select-none">出口 IP 测试说明</summary>
                   <p className="text-muted-foreground mt-2 leading-relaxed">
-                    测试会访问 IP 回显服务。未设置自定义地址时，默认访问 api.ipify.org，失败时改用 ifconfig.me。
-                    配置自定义地址后仅使用该服务。结果中的直连 IP 与代理 IP 可用于确认代理是否生效。修改地址后无需保存即可测试。
+                    IP 查询仅访问你配置的回显服务；未配置时不发出查询请求。
+                    配置自定义地址后仅使用该服务。结果中的直连 IP 与代理 IP 仅作参考，不决定代理是否健康。修改地址后无需保存即可测试。
                   </p>
                 </details>
                 {/* 内网里公网回显不可达，两行都会失败——不是代理坏了。 */}
@@ -1118,7 +1145,7 @@ export default function SystemSettingsPage() {
                       <Input
                         id="egress-probe-url"
                         autoComplete="off"
-                        placeholder="留空使用默认服务；内网可填 http://<内网IP>:<端口>/"
+                        placeholder="可选：填写自己的 IP 回显服务；留空不查询"
                         value={egressProbeUrl}
                         disabled={!settingsLoaded || savingEgressProbeUrl}
                         onChange={(e) => {
@@ -1135,14 +1162,14 @@ export default function SystemSettingsPage() {
                       >
                         {savingEgressProbeUrl ? "保存中…" : "保存探测服务"}
                       </Button>
+                      <Button type="button" variant="outline" disabled={!settingsLoaded || egressTesting || !egressProbeUrl.trim()} onClick={() => testEgress(false)}>查询出口 IP</Button>
                     </div>
                     <span className="text-muted-foreground leading-relaxed">
-                      保存后用于顶栏出口 IP、代理测试、健康检查和自动重连，刷新页面或重启后仍生效。清空地址并保存可恢复默认服务。
+                      仅用于顶栏和手动出口 IP 查询，不参与连通性、自动切换或任务恢复。清空并保存会关闭 IP 查询。
                     </span>
                     <span className="text-muted-foreground leading-relaxed">
                       自定义 IP 探测服务需返回纯文本 IP 或 <code>{'{"ip":"1.2.3.4"}'}</code> 格式的 JSON。
-                      若内网环境下无法访问公网，或本机和内网代理共用同一个公网出口， 则可替换为内网 IP 探测服务，此时 ①
-                      和 ② 的 IP 不同，就说明流量走了内网代理。
+                      若内网环境下无法访问公网，或本机和内网代理共用同一个公网出口， 则可替换为内网 IP 探测服务，可通过你可控的回显服务辅助确认请求出口。
                     </span>
                   </div>
                 </details>
@@ -1181,7 +1208,7 @@ export default function SystemSettingsPage() {
                             <span className="text-muted-foreground">{c.skip_reason}</span>
                           ) : c.result.ok ? (
                             <span className="font-mono">
-                              <span title="外界看到的出口 IP（探测站点回显的客户端地址）">{c.result.exit_ip}</span> ·{" "}
+                              <span title="外界看到的出口 IP（探测站点回显的客户端地址）">{c.result.exit_ip || (c.result.kind === "connectivity" ? `HTTP ${c.result.status_code ?? "成功"}` : "") }</span> ·{" "}
                               <span title="从 ARTEX 发出请求到拿到响应的完整往返耗时；经代理时包含代理那一跳">
                                 {c.result.latency_ms}ms
                               </span>

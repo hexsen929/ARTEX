@@ -211,6 +211,6 @@ test("saved egress service requires an explicit string; omitted is never interpr
   assert.match(page, /if \(!egressProbeHydrated\.current\)/);
   assert.match(save, /if \(version !== egressProbeDraftVersion\.current\) return/);
   const probe = page.slice(page.indexOf("const testEgress ="), page.indexOf("const toggleEgressVisibility ="));
-  assert.match(probe, /probe_url: egressProbeUrl\.trim\(\)/);
+  assert.match(probe, /probe_url: connectivity \? healthProbeUrl\.trim\(\) : egressProbeUrl\.trim\(\)/);
   assert.doesNotMatch(probe, /resume:\s*true/);
 });

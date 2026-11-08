@@ -20,7 +20,6 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -30,12 +29,6 @@ import (
 )
 
 const settingEgressProbeURL = "egress_probe_url"
-
-// defaultEgressProbes 按顺序尝试，第一个成功即停；自定义地址为空时使用。
-var defaultEgressProbes = []string{
-	"https://api.ipify.org?format=json", // 返回 {"ip":"1.2.3.4"}
-	"https://ifconfig.me/ip",            // 返回纯文本 1.2.3.4
-}
 
 func (m *Manager) EgressProbeURL() string {
 	raw, _ := m.EgressProbeURLChecked()
@@ -75,12 +68,7 @@ func (m *Manager) egressProbesChecked() ([]string, error) {
 		}
 		return []string{checked}, nil
 	}
-	return append([]string(nil), defaultEgressProbes...), nil
-}
-
-func (m *Manager) egressProbesMatch(probes []string) bool {
-	current, err := m.egressProbesChecked()
-	return err == nil && slices.Equal(probes, current)
+	return nil, errors.New("未配置出口 IP 回显服务；IP 查询不会影响代理健康")
 }
 
 // invalidateEgressProbeSelection discards evidence collected for an old echo
@@ -188,16 +176,19 @@ func maskSecrets(s string) string { return userinfoRe.ReplaceAllString(s, "://**
 
 // egressAttempt 保留每个地址的失败原因，才能区分"连不上代理"和"代理通但出不了网"。
 type egressAttempt struct {
-	URL       string `json:"url"`
-	OK        bool   `json:"ok"`
-	IP        string `json:"ip,omitempty"`
-	LatencyMS int64  `json:"latency_ms"`
-	Error     string `json:"error,omitempty"`
-	ErrorCode string `json:"error_code,omitempty"`
+	StatusCode int    `json:"status_code,omitempty"`
+	URL        string `json:"url"`
+	OK         bool   `json:"ok"`
+	IP         string `json:"ip,omitempty"`
+	LatencyMS  int64  `json:"latency_ms"`
+	Error      string `json:"error,omitempty"`
+	ErrorCode  string `json:"error_code,omitempty"`
 }
 
 // egressProbeResult 是一个链路形态的探测汇总。
 type egressProbeResult struct {
+	Kind               string               `json:"kind,omitempty"`
+	StatusCode         int                  `json:"status_code,omitempty"`
 	OK                 bool                 `json:"ok"`
 	ExitIP             string               `json:"exit_ip,omitempty"` // 外界看到的出口 IP
 	Via                string               `json:"via,omitempty"`     // direct / http / https / socks5
@@ -232,7 +223,17 @@ type egressReport struct {
 
 // probeEgress 不碰数据库、不碰 Server，所以测试里可以直接调、完全离线。
 func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []string, timeout time.Duration) egressProbeResult {
+	return probeHTTP(ctx, proxyRaw, caPEMPath, probes, timeout, false)
+}
+
+func probeHTTP(ctx context.Context, proxyRaw, caPEMPath string, probes []string, timeout time.Duration, connectivity bool) egressProbeResult {
 	start := time.Now()
+	kind := "egress_ip"
+	if connectivity {
+		kind = "connectivity"
+	}
+	ctx, cancelAll := context.WithTimeout(ctx, timeout)
+	defer cancelAll()
 
 	// 复用 traffic 包的校验，保证"什么算合法代理"全项目只有一处定义。
 	var proxyURL *url.URL
@@ -274,6 +275,9 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 		Timeout:       timeout + 2*time.Second,
 		CheckRedirect: probeCheckRedirect,
 	}
+	if connectivity {
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
 
 	attempts := make([]egressAttempt, 0, len(probes))
 	for _, target := range probes {
@@ -287,10 +291,17 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 			})
 		}
 		t0 := time.Now()
-		ip, err := probeOne(reqCtx, client, target)
+		var ip string
+		var status int
+		var err error
+		if connectivity {
+			status, err = probeConnectivityOne(reqCtx, client, target)
+		} else {
+			ip, err = probeOne(reqCtx, client, target)
+		}
 		cancel()
 
-		a := egressAttempt{URL: maskSecrets(target), LatencyMS: time.Since(t0).Milliseconds()}
+		a := egressAttempt{URL: maskSecrets(target), LatencyMS: time.Since(t0).Milliseconds(), StatusCode: status}
 		if err != nil {
 			a.ErrorCode, a.Error = classifyEgressProbeError(err)
 			if a.ErrorCode == "proxy_authentication" {
@@ -309,6 +320,7 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 		if a.OK {
 			// via 说的是代理协议，不是出口的网络类型。
 			return egressProbeResult{
+				Kind: kind, StatusCode: status,
 				OK:                 true,
 				ExitIP:             ip,
 				Via:                via,
@@ -322,6 +334,7 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 
 	errorCode, summary := summarizeEgressProbeFailures(attempts)
 	return egressProbeResult{
+		Kind:      kind,
 		OK:        false,
 		Error:     summary,
 		ErrorCode: errorCode,
@@ -433,10 +446,13 @@ func egressTarget(cfg string, capture, pending bool, agentProxy, agentCA string)
 // testEgressProxy 的语义对齐 testWebSearch：地址取自请求体（未保存也能测）、
 // 空 = 测直连、永远返回 200 用 ok 表达结果。
 func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
+	s.testProxyPaths(w, r, false)
+}
+
+func (s *Server) testProxyPaths(w http.ResponseWriter, r *http.Request, connectivity bool) {
 	var req struct {
 		GlobalProxy string  `json:"global_proxy"`
 		ProbeURL    *string `json:"probe_url"` // 省略=已保存地址；空串=默认；非空=临时覆盖
-		Resume      bool    `json:"resume"`    // manual settings probe may release paused_by_proxy tasks
 	}
 	// 请求体只有一个地址，给个上限，免得被塞大 payload。
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
@@ -447,10 +463,19 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var probes []string
+	run := s.runProxyProbe
+	if connectivity {
+		run = s.runProxyHealthProbe
+	}
 	if req.ProbeURL != nil {
-		probes = append([]string(nil), defaultEgressProbes...)
+		if connectivity {
+			probes = append([]string(nil), defaultHealthProbes...)
+		}
 		if u := strings.TrimSpace(*req.ProbeURL); u != "" {
 			checked, err := validateProbeURL(u)
+			if connectivity {
+				checked, err = validateHealthURL(u)
+			}
 			if err != nil {
 				writeErr(w, 400, err.Error())
 				return
@@ -459,11 +484,19 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		var err error
-		probes, err = s.m.egressProbesChecked()
+		if connectivity {
+			probes, err = s.m.healthProbesChecked()
+		} else {
+			probes, err = s.m.egressProbesChecked()
+		}
 		if err != nil {
 			writeErr(w, http.StatusServiceUnavailable, err.Error())
 			return
 		}
+	}
+	if len(probes) == 0 {
+		writeErr(w, 400, "请先配置自己的出口 IP 回显服务；连通性测试不需要查询 IP")
+		return
 	}
 
 	// 这三个调用决定 agent 到底会走哪条路。
@@ -475,10 +508,6 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 	// 整体上限 40s：单次 Timeout 只兜一次，不兜总量；前端 fetch 没有超时。
 	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
 	defer cancel()
-	var proxyGuards map[string]proxyReconnectGuard
-	if req.Resume {
-		proxyGuards = s.snapshotProxyReconnectGuardsWithExhausted(false, true)
-	}
 
 	configuredProxy := strings.TrimSpace(req.GlobalProxy)
 	if strings.Contains(configuredProxy, "***") || strings.Contains(configuredProxy, "******") {
@@ -496,7 +525,7 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 	rep.Checks = append(rep.Checks, egressCheck{
 		Key:    "direct",
 		Label:  "① 直连 IP（不经过代理）",
-		Result: s.runProxyProbe(ctx, "", "", probes, 10*time.Second),
+		Result: run(ctx, "", "", probes, 10*time.Second),
 	})
 
 	if configuredProxy != "" {
@@ -507,10 +536,10 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 			// Use the same strict upstream check as pool health. A capture CA
 			// only proves the local recording hop and cannot bless upstream TLS.
 			Path:   maskSecrets(configuredProxy),
-			Result: s.runProxyProbe(ctx, configuredProxy, "", probes, 10*time.Second),
+			Result: run(ctx, configuredProxy, "", probes, 10*time.Second),
 		})
 		if viaMITM {
-			rep.Checks = append(rep.Checks, egressCheck{Key: "capture", Label: "③ 实际流量捕获链路", Path: maskSecrets(probeAddr), Result: s.runProxyProbe(ctx, probeAddr, probeCA, probes, 10*time.Second)})
+			rep.Checks = append(rep.Checks, egressCheck{Key: "capture", Label: "③ 实际流量捕获链路", Path: maskSecrets(probeAddr), Result: run(ctx, probeAddr, probeCA, probes, 10*time.Second)})
 		}
 	} else {
 		skipReason := "输入框为空，未配置代理"
@@ -529,11 +558,15 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 
 	rep.OK = judgeEgress(rep)
 	rep.Warnings = egressWarnings(rep, pending, savedProxy)
-	if req.Resume && rep.OK && !pending && s.m.egressProbesMatch(probes) {
-		// The navbar uses the same probe endpoint for display-only polling but
-		// omits resume. Only an explicit settings-page test can release the
-		// guarded paused_by_proxy tasks.
-		s.proxyReconnectSuccessWithGuards(proxyGuards, nil)
+	if connectivity {
+		for i := range rep.Checks {
+			switch rep.Checks[i].Key {
+			case "direct":
+				rep.Checks[i].Label = "① 本机到检测站点"
+			case "global":
+				rep.Checks[i].Label = "② 上游代理连通性（校验证书）"
+			}
+		}
 	}
 	writeJSON(w, 200, rep)
 }

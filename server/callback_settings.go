@@ -41,6 +41,11 @@ func (s *Server) writeSettingsPayload(w http.ResponseWriter) {
 		writeErr(w, http.StatusInternalServerError, "出口探测服务读取失败，保留已有配置")
 		return
 	}
+	healthURL, healthErr := s.m.ProxyHealthURLChecked()
+	if healthErr != nil {
+		writeErr(w, 500, "连通性检测网址读取失败，保留已有配置")
+		return
+	}
 	roeMode, roeErr := readRoEEnforcementSetting(s.m.pg)
 	if roeErr != nil {
 		writeErr(w, http.StatusInternalServerError, roeErr.Error())
@@ -85,6 +90,7 @@ func (s *Server) writeSettingsPayload(w http.ResponseWriter) {
 	}
 	payload := s.settingsPayload()
 	payload["egress_probe_url"] = probeURL
+	payload["proxy_health_check_url"] = healthURL
 	payload["roe_enforcement"] = roeMode
 	payload["finding_verify_mode"] = verifyMode
 	payload["llm_records_retention_days"] = retentionDays

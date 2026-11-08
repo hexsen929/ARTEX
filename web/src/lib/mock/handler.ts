@@ -2461,6 +2461,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (Object.hasOwn(b, "egress_probe_url") && b.egress_probe_url !== null && typeof b.egress_probe_url !== "string") {
       throw new Error("egress_probe_url 必须是字符串");
     }
+    if (Object.hasOwn(b, "proxy_health_check_url") && b.proxy_health_check_url !== null && (typeof b.proxy_health_check_url !== "string" || (b.proxy_health_check_url.trim() && !b.proxy_health_check_url.trim().startsWith("https://")))) throw new Error("连通性检测网址必须使用 HTTPS");
     if (Object.hasOwn(b, "global_proxy_enabled")) {
       if (typeof b.global_proxy_enabled !== "boolean" || Object.hasOwn(b, "global_proxy")) throw new Error("全局代理开关无效");
       const entry = b.global_proxy_enabled ? (D.settings.proxy_pool ?? []).find((item) => item.enabled && item.url && item.health !== "unhealthy-cooling") : undefined;
@@ -2471,6 +2472,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (b.global_proxy === "") b.proxy_pool_active_id = "";
     if (Object.hasOwn(b, "global_proxy")) b.global_proxy_enabled = Boolean(b.global_proxy);
     const next = { ...D.settings, ...b };
+    if (b.proxy_health_check_url === null) next.proxy_health_check_url = D.settings.proxy_health_check_url;
+    else if (typeof b.proxy_health_check_url === "string") next.proxy_health_check_url = b.proxy_health_check_url.trim();
     if (b.egress_probe_url === null) next.egress_probe_url = D.settings.egress_probe_url;
     else if (typeof b.egress_probe_url === "string") next.egress_probe_url = b.egress_probe_url.trim();
     for (const key of ["roe_enforcement", "llm_records_retention_days", "finding_verify_mode"] as const) {
@@ -2487,6 +2490,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/settings/basic-auth" && m === "PUT")
     throw new Error("演示模式不支持修改 HTTP Basic Auth，请在实际部署中配置");
   if (path === "/settings/web-search/test") return { ok: true, count: 5, backend: D.settings.web_search_backend };
+  if (path === "/settings/proxy/health-test") return { ok: true, capture: false, configured: b.global_proxy ?? "", agent_proxy: "", checks: [{ key: "global", label: "代理连通性", result: {kind:"connectivity", ok:true, status_code:204, latency_ms:12,probes:[]} }],warnings:[] };
+  if (path === "/settings/proxy/test" && !(b.probe_url ?? D.settings.egress_probe_url ?? "").trim()) throw new Error("未配置出口 IP 回显服务");
   if (path === "/settings/proxy/test")
     return {
       ok: true,
@@ -2515,13 +2520,12 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/settings/proxy-pool/import" && m === "POST") return { ok: true, probe_queued: true, errors: [] };
   if (path === "/settings/proxy-pool/test-all" && m === "POST") return { ok: true, probe_queued: true };
   if (path.endsWith("/diagnose") && path.startsWith("/settings/proxy-pool/") && m === "POST") {
-    const custom = D.settings.egress_probe_url ?? "";
+    const custom = D.settings.proxy_health_check_url ?? "";
     return {
       id: decodeURIComponent(path.split("/").at(-2) ?? ""), checked_at: new Date().toISOString(), health_updated: false, scope: "示例诊断，不访问网络",
-      probe_mode: custom ? "configured" : "default", probe_url: custom, http_skipped: !!custom,
+      probe_mode: custom ? "configured" : "default", probe_url: custom, http_skipped: true, probe_kind:"connectivity",
       https: { ok: false, error: "示例回显服务未连接；演示模式未发请求", error_code: "not_requested", latency_ms: 0, probes: [] },
-      http: custom ? { ok: false, error: "未额外请求默认公网服务", error_code: "not_requested", latency_ms: 0, probes: [] }
-        : { ok: true, exit_ip: "192.0.2.5", latency_ms: 10, probes: [] },
+      http: { ok: false, error: "未请求 IP 回显", error_code:"not_requested",latency_ms:0,probes:[] },
     };
   }
   if (path === "/settings/proxy-pool/bulk" && m === "POST") {

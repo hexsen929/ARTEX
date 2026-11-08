@@ -1070,7 +1070,8 @@ export interface Settings {
   proxy_reconnect_max_attempts?: number;
   proxy_reconnect_interval_seconds?: number;
   show_egress_ip?: boolean; // 在顶栏显示直连 / 全局代理出口 IP；默认关闭
-  egress_probe_url?: string; // 自定义 IP 探测服务；空=默认公共回显服务
+  egress_probe_url?: string; // 可选 IP 回显服务；空=不查询 IP
+  proxy_health_check_url?: string; // HTTPS 检测页；空=默认轻量检测页
   python_interpreter?: string; // 自定义脚本工具的 python 解释器路径(空=运行时检测)
   workers?: number; // 并发工作 agent 数(默认3)；对之后启动的任务生效
   worker_pools: WorkerPool[];
@@ -1108,6 +1109,8 @@ export interface ProxyPoolEntry {
   latency_ms?: number;
   last_error?: string;
   last_error_code?: string;
+  last_probe_kind?: "connectivity" | "egress_ip";
+  last_http_status?: number;
   last_checked_at?: string;
   consecutive_failures: number;
   health: "healthy" | "unhealthy-cooling" | "disabled" | string;
@@ -2246,6 +2249,8 @@ export interface IntelligencePage {
 
 // ---- 出口代理连通性测试（POST /api/settings/proxy/test）----
 export interface EgressProbeResult {
+  kind?: "connectivity" | "egress_ip";
+  status_code?: number;
   ok: boolean;
   exit_ip?: string;
   via?: "direct" | "http" | "https" | "socks5" | "socks4";
@@ -2257,6 +2262,7 @@ export interface EgressProbeResult {
   error_code?: string;
   // 每个地址的明细：区分"连不上代理"和"代理通但出不了网"。
   probes: {
+    status_code?: number;
     url: string;
     ok: boolean;
     ip?: string;
@@ -2267,6 +2273,7 @@ export interface EgressProbeResult {
 }
 
 export interface ProxyCapabilityCheck {
+  status_code?: number;
   checked: boolean;
   ok: boolean;
   ip?: string;
@@ -2286,6 +2293,7 @@ export interface ProxyProtocolCheck {
 }
 
 export interface ProxyPoolDiagnosis {
+  probe_kind?: "connectivity";
   id: string;
   https: EgressProbeResult;
   http: EgressProbeResult;
