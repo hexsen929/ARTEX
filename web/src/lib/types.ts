@@ -2301,7 +2301,7 @@ export interface ProxyPoolDiagnosis {
 
 // 报告里的一行：① 直连 / ② 经全局代理。
 export interface EgressCheck {
-  key: "direct" | "global";
+  key: "direct" | "global" | "capture";
   label: string;
   path?: string;
   skipped?: boolean;

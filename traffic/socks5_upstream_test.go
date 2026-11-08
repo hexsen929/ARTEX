@@ -167,6 +167,96 @@ func TestSOCKS5CaptureDoesNotOfferAbsentCredentials(t *testing.T) {
 	}
 }
 
+func TestSOCKS5BridgeIsAuthenticatedAndClosesWithCapture(t *testing.T) {
+	t.Setenv("ARTEX_PROXY_AUTH", "capture-fixture:local-secret")
+	capture, err := Open(t.TempDir(), sharedProxyAddress(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = capture.Close() })
+	working := socksFixture(t, "success")
+	if err := capture.SetUpstreamProxy(working); err != nil {
+		t.Fatal(err)
+	}
+	bridge, err := capture.captureUpstream(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unauthenticated := *bridge
+	unauthenticated.User = nil
+	transport := &http.Transport{Proxy: http.ProxyURL(&unauthenticated)}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: time.Second}
+	response, err := client.Get("http://fixture.invalid/ip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusProxyAuthRequired {
+		t.Fatal("private bridge accepted unauthenticated request", response.StatusCode)
+	}
+	capture.proxy.SetShouldInterceptRule(func(*http.Request) bool { return false })
+	startSharedProxy(t, capture)
+	conn, reader, status := captureConnect(t, capture, "echo.fixture.invalid:443")
+	if status != 200 {
+		t.Fatal(status)
+	}
+	if _, err := reader.ReadString('\n'); err != nil {
+		t.Fatal(err)
+	}
+	if err := capture.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := reader.ReadByte(); err == nil {
+		t.Fatal("capture close retained tunnel")
+	}
+	next, err := net.DialTimeout("tcp", bridge.Host, time.Second)
+	if err == nil {
+		_ = next.Close()
+		t.Fatal("capture close retained bridge listener")
+	}
+	if _, err := capture.captureUpstream(nil); err == nil {
+		t.Fatal("closed capture recreated bridge")
+	}
+}
+
+func TestSOCKS5PrivateTaskFailureDoesNotPauseGlobalRoute(t *testing.T) {
+	parent, _ := openTraffic(t)
+	child, err := parent.OpenProxy(t.TempDir(), sharedProxyAddress(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer child.Close()
+	if err := parent.SetUpstreamProxy("socks5://global.fixture.invalid:1080"); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.SetUpstreamProxy("socks5://task.fixture.invalid:1080"); err != nil {
+		t.Fatal(err)
+	}
+	notified := make(chan error, 1)
+	parent.SetUpstreamFailureHandler(func(err error) { notified <- err })
+	// Call the task's handler synchronously to observe routing without sleeps.
+	child.upstreamMu.RLock()
+	handler := child.upstreamFailure
+	child.upstreamMu.RUnlock()
+	handler(fmt.Errorf("socks task tunnel failed"))
+	select {
+	case <-notified:
+		t.Fatal("private task upstream error reached global handler")
+	default:
+	}
+	if err := child.SetUpstreamProxy(parent.UpstreamProxy()); err != nil {
+		t.Fatal(err)
+	}
+	handler(fmt.Errorf("socks global route failed"))
+	select {
+	case <-notified:
+	case <-time.After(time.Second):
+		t.Fatal("shared global upstream lost failure notification")
+	}
+}
+
 func captureConnect(t *testing.T, capture *Traffic, target string) (net.Conn, *bufio.Reader, int) {
 	t.Helper()
 	u, err := url.Parse(capture.ProxyAddr())

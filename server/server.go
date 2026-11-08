@@ -150,19 +150,23 @@ type Server struct {
 
 	// Cold task archives run through one persistent FIFO worker. The buffered wake
 	// channel coalesces enqueue bursts; the database remains the source of truth.
-	archiveWake          chan struct{}
-	archiveWG            sync.WaitGroup
-	credentialWake       chan struct{}
-	proxyReconnect       proxyReconnectSupervisor
-	proxyPoolWake        chan struct{}
-	proxyPoolWG          sync.WaitGroup
-	proxyCallbackWG      sync.WaitGroup
-	proxyCtx             context.Context
-	proxyCancel          context.CancelFunc
-	proxyPoolProbeSem    chan struct{}
-	proxyPoolTickMu      sync.Mutex
-	proxyInteractiveOnce sync.Once
-	proxyInteractiveSem  chan struct{}
+	archiveWake            chan struct{}
+	archiveWG              sync.WaitGroup
+	credentialWake         chan struct{}
+	proxyReconnect         proxyReconnectSupervisor
+	proxyPoolWake          chan struct{}
+	proxyPoolWG            sync.WaitGroup
+	proxyCallbackWG        sync.WaitGroup
+	proxyCtx               context.Context
+	proxyCancel            context.CancelFunc
+	proxyPoolProbeSem      chan struct{}
+	proxyPoolTickMu        sync.Mutex
+	proxyInteractiveOnce   sync.Once
+	proxyInteractiveSem    chan struct{}
+	proxyFailureMu         sync.Mutex
+	proxyFailureCheckedAt  time.Time
+	proxyFailureRoute      string
+	proxyFailureGeneration uint64
 	// proxyProbe is injectable for deterministic reconnect race tests. Production
 	// servers leave it nil and use probeEgress directly.
 	proxyProbe       func(context.Context, string, string, []string, time.Duration) egressProbeResult

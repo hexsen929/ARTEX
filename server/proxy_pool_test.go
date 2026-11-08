@@ -494,7 +494,7 @@ func TestProxyPoolProbeSkipsEnabledEmptyURL(t *testing.T) {
 	}
 }
 
-func TestProxyPoolFailureMarksOriginalMemberAfterConcurrentSwitch(t *testing.T) {
+func TestProxyPoolFailureDiscardsResultAfterConcurrentSwitch(t *testing.T) {
 	m := &Manager{globalProxy: "http://a", proxyPool: &proxyPoolState{active: "a", entries: []proxyPoolEntry{
 		{ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true, Health: "healthy"}, RawURL: "http://a"},
 		{ProxyPoolEntry: ProxyPoolEntry{ID: "b", Enabled: true, Health: "healthy"}, RawURL: "http://b"},
@@ -509,8 +509,8 @@ func TestProxyPoolFailureMarksOriginalMemberAfterConcurrentSwitch(t *testing.T) 
 	if !s.handleProxyPoolFailure(fmt.Errorf("proxyconnect tcp: connection refused")) {
 		t.Fatal("failure after concurrent switch was not consumed")
 	}
-	if got := m.proxyPool.entries[0].ConsecutiveFailures; got != 1 {
-		t.Fatalf("original member failure count=%d", got)
+	if got := m.proxyPool.entries[0].ConsecutiveFailures; got != 0 {
+		t.Fatalf("stale confirmation changed failure count=%d", got)
 	}
 }
 

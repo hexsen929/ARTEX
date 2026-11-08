@@ -407,6 +407,13 @@ func (m *Manager) applyActiveProxyLockedWithHealth(id, reason string, allowUnhea
 }
 
 func (m *Manager) selectHealthyLocked(exclude string) string {
+	excludedURL := ""
+	for _, e := range m.proxyPool.entries {
+		if e.ID == exclude {
+			excludedURL = e.RawURL
+			break
+		}
+	}
 	strategy := "sequential"
 	if m.pg != nil {
 		if v, ok, _ := m.pg.GetSetting(settingProxyRotateStrategy); ok && v == "random" {
@@ -415,14 +422,14 @@ func (m *Manager) selectHealthyLocked(exclude string) string {
 	}
 	pool := make([]string, 0)
 	for _, e := range m.proxyPool.entries {
-		if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" && e.ID != exclude {
+		if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" && e.ID != exclude && e.RawURL != excludedURL {
 			pool = append(pool, e.ID)
 		}
 	}
 	if len(pool) == 0 && exclude != "" {
 		for _, e := range m.proxyPool.entries {
-			if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" {
-				pool = append(pool, e.ID)
+			if e.ID == exclude && proxyEntryUsable(e) && e.Health != "unhealthy-cooling" {
+				return exclude
 			}
 		}
 	}
@@ -441,7 +448,7 @@ func (m *Manager) selectHealthyLocked(exclude string) string {
 	}
 	for n := 0; n < len(m.proxyPool.entries); n++ {
 		e := m.proxyPool.entries[(start+n)%len(m.proxyPool.entries)]
-		if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" && e.ID != exclude {
+		if proxyEntryUsable(e) && e.Health != "unhealthy-cooling" && e.ID != exclude && e.RawURL != excludedURL {
 			return e.ID
 		}
 	}
@@ -487,7 +494,9 @@ func (m *Manager) markProxyProbeLocked(id string, res egressProbeResult) {
 			e.ConsecutiveFailures, e.LastError, e.Health = 0, "", "healthy"
 			e.LastErrorCode = ""
 		} else {
-			e.ConsecutiveFailures++
+			if !egressProbeInconclusive(res) {
+				e.ConsecutiveFailures++
+			}
 			e.LastError = maskSecrets(res.Error)
 			e.LastErrorCode = res.ErrorCode
 			threshold := defaultProxyHealthThreshold
@@ -548,7 +557,9 @@ func (m *Manager) applyProxyProbeBatchLocked(results []proxyBatchProbe, threshol
 			e.LastErrorCode = ""
 			confirmed = confirmed || e.ID == m.proxyPool.active
 		} else {
-			e.ConsecutiveFailures++
+			if !egressProbeInconclusive(res) {
+				e.ConsecutiveFailures++
+			}
 			e.LastError = maskSecrets(res.Error)
 			e.LastErrorCode = res.ErrorCode
 			if e.ConsecutiveFailures >= threshold {
@@ -986,67 +997,115 @@ func (m *Manager) activateProxyID(id, reason string) error {
 	return nil
 }
 
+// A target failure is only a reason to check the global route. One confirmation
+// owns the result; concurrent callbacks and callers must not probe it again.
 func (s *Server) handleProxyPoolFailure(cause error) bool {
 	if s == nil || s.m == nil || s.m.proxyPool == nil || !isGlobalProxyDialFailure(cause) {
 		return false
 	}
-	cur := strings.TrimSpace(s.m.GlobalProxy())
-	if cur == "" {
+	if strings.TrimSpace(s.m.GlobalProxy()) == "" {
 		return false
 	}
+	if !s.proxyFailureMu.TryLock() {
+		return true
+	}
+	defer s.proxyFailureMu.Unlock()
 	probes, err := s.m.egressProbesChecked()
 	if err != nil {
+		return true
+	}
+	pool := s.m.proxyPool
+	pool.mu.Lock()
+	cur, generation, active := s.m.GlobalProxy(), pool.generation, pool.active
+	if pool.disabled || cur == "" {
+		pool.mu.Unlock()
+		return false
+	}
+	if s.proxyFailureRoute == cur && s.proxyFailureGeneration == generation && time.Since(s.proxyFailureCheckedAt) < 2*time.Second {
+		pool.mu.Unlock()
+		return true
+	}
+	var entry *proxyPoolEntry
+	for i := range pool.entries {
+		candidate := &pool.entries[i]
+		if candidate.ID == active && candidate.RawURL == cur && candidate.Enabled {
+			pool.probeSequence++
+			candidate.probeRevision = pool.probeSequence
+			copy := *candidate
+			entry = &copy
+			break
+		}
+	}
+	pool.mu.Unlock()
+	// A pool with no current matching member cannot confirm an unrelated route.
+	if entry == nil {
 		return true
 	}
 	res := s.runProxyProbe(serverContext(s), cur, "", probes, proxyPoolProbeTimeout)
 	if s.proxyShuttingDown() || !s.m.egressProbesMatch(probes) {
 		return true
 	}
-	if res.OK {
-		return false
-	}
+	threshold, _, _ := s.m.proxyHealthConfig()
 	_, _, onFailure, _ := s.m.proxyRotateConfig()
-	s.proxyPoolTickMu.Lock()
-	if s.proxyShuttingDown() {
-		s.proxyPoolTickMu.Unlock()
-		return true
-	}
-	s.m.proxyPool.mu.Lock()
-	if s.proxyShuttingDown() {
-		s.m.proxyPool.mu.Unlock()
-		s.proxyPoolTickMu.Unlock()
-		return true
-	}
-	active := s.m.proxyPool.active
-	currentChanged := s.m.GlobalProxy() != cur
-	for _, e := range s.m.proxyPool.entries {
-		if e.RawURL == cur {
-			s.m.markProxyProbeLocked(e.ID, res)
+	pool.mu.Lock()
+	latest := false
+	for _, current := range pool.entries {
+		if current.ID == active && current.RawURL == cur && current.probeRevision == entry.probeRevision {
+			latest = true
 			break
 		}
 	}
-	if currentChanged {
-		s.m.proxyPool.mu.Unlock()
-		s.proxyPoolTickMu.Unlock()
+	if pool.generation != generation || pool.active != active || s.m.GlobalProxy() != cur || pool.disabled || !latest {
+		pool.mu.Unlock()
 		return true
+	}
+	confirmed, err := s.m.applyProxyProbeBatchLocked([]proxyBatchProbe{{entry: *entry, result: res, complete: true}}, threshold)
+	if err != nil {
+		pool.mu.Unlock()
+		return true
+	}
+	s.proxyFailureRoute, s.proxyFailureGeneration, s.proxyFailureCheckedAt = cur, generation, time.Now()
+	if res.OK {
+		pool.mu.Unlock()
+		if confirmed && s.proxyPoolGenerationMatches(generation) {
+			s.proxyReconnectSuccess()
+		}
+		return true
+	}
+	if egressProbeInconclusive(res) {
+		pool.mu.Unlock()
+		return true
+	}
+	switched, exhausted := false, false
+	for _, current := range pool.entries {
+		if current.ID == active {
+			exhausted = current.ConsecutiveFailures >= threshold
+		}
 	}
 	if onFailure {
 		if id := s.m.selectHealthyLocked(active); id != "" && id != active {
-			if err := s.m.applyActiveProxyLocked(id, "failure"); err == nil {
-				s.m.proxyPool.mu.Unlock()
-				s.proxyPoolTickMu.Unlock()
-				s.proxyReconnectSuccess()
-				return true
+			for _, next := range pool.entries {
+				if next.ID == id && next.RawURL != cur {
+					switched = s.m.applyActiveProxyLocked(id, "failure") == nil
+					break
+				}
 			}
 		}
 	}
-	select {
-	case s.proxyPoolWake <- struct{}{}:
-	default:
+	pool.mu.Unlock()
+	if !s.proxyPoolGenerationMatches(generation) {
+		return true
 	}
-	s.m.proxyPool.mu.Unlock()
-	s.proxyPoolTickMu.Unlock()
-	return false
+	if switched {
+		s.proxyReconnectSuccess()
+		return true
+	}
+	if exhausted {
+		s.pauseAllProxyTasks(errors.New(res.Error))
+	}
+	// Below-threshold samples remain failures in the UI, without bypassing the
+	// configured threshold by running another confirmation and pausing at once.
+	return true
 }
 
 func (s *Server) pauseAllProxyTasks(cause error) {

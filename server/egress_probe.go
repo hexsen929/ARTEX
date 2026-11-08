@@ -501,17 +501,17 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 
 	if configuredProxy != "" {
 		probeAddr, probeCA, viaMITM := egressTarget(configuredProxy, capture, pending, agentProxy, agentCA)
-		timeout := 10 * time.Second
-		if viaMITM {
-			timeout = 15 * time.Second // 多了一跳 TLS 解密 + 重签
-		}
 		rep.Checks = append(rep.Checks, egressCheck{
 			Key:   "global",
 			Label: "② 经全局代理的出口 IP",
-			// Path 是实际探测地址（经 MITM 时是 8788），排查时看这个。
-			Path:   maskSecrets(probeAddr),
-			Result: s.runProxyProbe(ctx, probeAddr, probeCA, probes, timeout),
+			// Use the same strict upstream check as pool health. A capture CA
+			// only proves the local recording hop and cannot bless upstream TLS.
+			Path:   maskSecrets(configuredProxy),
+			Result: s.runProxyProbe(ctx, configuredProxy, "", probes, 10*time.Second),
 		})
+		if viaMITM {
+			rep.Checks = append(rep.Checks, egressCheck{Key: "capture", Label: "③ 实际流量捕获链路", Path: maskSecrets(probeAddr), Result: s.runProxyProbe(ctx, probeAddr, probeCA, probes, 10*time.Second)})
+		}
 	} else {
 		skipReason := "输入框为空，未配置代理"
 		if savedProxy != "" {
@@ -545,10 +545,17 @@ func normalizeProxy(raw string) string {
 
 // judgeEgress 以 ② 为准；② 被跳过才看 ①。不能"任一行成功就算成功"。
 func judgeEgress(rep egressReport) bool {
+	checked := false
 	for _, c := range rep.Checks {
-		if c.Key == "global" && !c.Skipped {
-			return c.Result.OK
+		if (c.Key == "global" || c.Key == "capture") && !c.Skipped {
+			checked = true
+			if !c.Result.OK {
+				return false
+			}
 		}
+	}
+	if checked {
+		return true
 	}
 	for _, c := range rep.Checks {
 		if c.Key == "direct" {
