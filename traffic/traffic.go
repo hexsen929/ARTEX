@@ -185,6 +185,8 @@ type Traffic struct {
 	upstream        atomic.Pointer[url.URL]
 	upstreamMu      sync.RWMutex
 	upstreamFailure func(error)
+	bridgeMu        sync.Mutex
+	socksBridge     *socksBridge
 }
 
 // Open initializes the traffic tree, blob store and SQLite index under dir.
@@ -297,14 +299,23 @@ func (t *Traffic) initializeProxy(caRoot string, recorder *Traffic) error {
 	// a direct dial. When a global egress proxy IS configured (SetUpstreamProxy),
 	// every captured request — intercepted AND transparently tunneled — is
 	// forwarded through it instead, so no host leaks the real source IP.
-	p.SetUpstreamProxy(func(*http.Request) (*url.URL, error) { return t.upstream.Load(), nil })
+	p.SetUpstreamProxy(t.captureUpstream)
+	if recorder != t {
+		t.SetUpstreamFailureHandler(func(err error) {
+			// Private task tunnels must not report their errors against the
+			// global proxy. Shared recording does not imply shared egress.
+			if t.UpstreamProxy() == recorder.UpstreamProxy() {
+				recorder.reportUpstreamFailure(err)
+			}
+		})
+	}
 	// Fail-open: MITM every host by default, EXCEPT ones a prior request proved we
 	// can't intercept without breaking (see maybePassthrough). Those are tunneled
 	// transparently so the request still reaches the target instead of being killed.
 	p.SetShouldInterceptRule(func(req *http.Request) bool {
 		return !recorder.pass.tunneled(hostOnly(req.Host))
 	})
-	p.AddAddon(&sink{t: recorder})
+	p.AddAddon(&sink{t: recorder, source: t})
 	t.proxy = p
 	t.caRoot = caRoot
 	return nil
@@ -652,8 +663,8 @@ func (t *Traffic) ProxyAddrRedacted() string {
 // SetUpstreamProxy points every captured request at a global egress proxy
 // (http/https/socks5, optional user:pass in the URL). An empty raw string clears
 // it, restoring direct dialing. The change is atomic and takes effect on the next
-// connection — no restart, no proxy rebuild. go-mitmproxy dials all three schemes
-// itself, so socks5 works uniformly here regardless of the target tool.
+// connection — no restart, no proxy rebuild. SOCKS5 uses the private bridge so
+// its authentication choices match net/http health probes.
 func (t *Traffic) SetUpstreamProxy(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		t.upstream.Store(nil)
@@ -745,6 +756,12 @@ func (t *Traffic) Close() error {
 			t.reaping.Wait()
 		}
 		var errs []error
+		t.bridgeMu.Lock()
+		bridge := t.socksBridge
+		t.bridgeMu.Unlock()
+		if bridge != nil {
+			errs = append(errs, bridge.Close())
+		}
 		if t.proxy != nil {
 			errs = append(errs, t.proxy.Close())
 		}
@@ -771,7 +788,8 @@ func (t *Traffic) DB() *sql.DB { return t.db }
 // sink is the go-mitmproxy addon that records completed exchanges.
 type sink struct {
 	mproxy.BaseAddon
-	t *Traffic
+	t      *Traffic
+	source *Traffic
 }
 
 func (s *sink) Response(f *mproxy.Flow) {
@@ -786,12 +804,20 @@ func (s *sink) Response(f *mproxy.Flow) {
 // errors) — not a plain target-unreachable error — we flag the host for
 // transparent passthrough so future requests to it succeed instead of dying.
 func (s *sink) RequestError(f *mproxy.Flow, err error) {
-	s.t.reportUpstreamFailure(err)
+	s.reportUpstreamFailure(err)
 	s.t.maybePassthrough(f, err)
 }
 
 func (s *sink) HTTPConnectError(_ *mproxy.Flow, err error) {
-	s.t.reportUpstreamFailure(err)
+	s.reportUpstreamFailure(err)
+}
+
+func (s *sink) reportUpstreamFailure(err error) {
+	source := s.source
+	if source == nil {
+		source = s.t
+	}
+	source.reportUpstreamFailure(err)
 }
 
 // maybePassthrough marks a host to be tunneled transparently on the next

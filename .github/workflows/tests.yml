@@ -19,7 +19,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Real capture SOCKS5 failure and recovery regression
-        run: go test -race -v ./traffic -run '^TestSOCKS5Upstream' -count=1 -timeout=3m
+        run: go test -race -v ./traffic -run '^TestSOCKS5' -count=1 -timeout=3m
 
   # Pin the validated image: ubuntu-latest now selects 26.04, which is not
   # supported by the pinned Playwright browser runtime used below.

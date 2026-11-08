@@ -105,6 +105,26 @@ func summarizeEgressProbeFailures(attempts []egressAttempt) (string, string) {
 	return code, "全部探测地址均失败：" + strings.Join(labels, "；")
 }
 
+// A reachable echo service returning a block/rate-limit/error page does not
+// establish that every task has lost its global network route.
+func egressProbeInconclusive(result egressProbeResult) bool {
+	if result.OK {
+		return false
+	}
+	serviceError := func(code string) bool {
+		return code == "echo_http_error" || code == "invalid_ip_response" || code == "probe_boundary"
+	}
+	if serviceError(result.ErrorCode) {
+		return true
+	}
+	for _, attempt := range result.Probes {
+		if serviceError(attempt.ErrorCode) {
+			return true
+		}
+	}
+	return false
+}
+
 // Diagnostics never publish health, persist settings, switch routes, or release
 // paused tasks. Plain HTTP is a separate explicit check, not a TLS fallback.
 func (s *Server) diagnoseProxyPoolEntry(w http.ResponseWriter, r *http.Request) {
