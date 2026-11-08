@@ -193,7 +193,7 @@ async function main() {
       ["source_changed", "来源已变化", /上次阶段来源已变化/],
       ["settings_changed", "设置已变化", /上次总结期间设置已变化/],
       ["cleared", "受清理操作影响", /上次阶段受清理操作影响/],
-      ["budget_deferred", "等待发送预算", /本轮未发送请求；不是提供方或 API 失败/],
+      ["budget_deferred", "等待发送预算", /已有请求发出仍计入尝试，否则保留重试次数/],
       ["provider_error", "模型调用错误", /上次模型调用发生错误/],
       ["timeout", "总结超时", /上次阶段总结超时/],
       ["storage_error", "存储读取或保存错误", /上次阶段存储读取或保存未完成/],

@@ -1959,6 +1959,16 @@ CREATE INDEX IF NOT EXISTS idx_memory_jobs_pending ON memory_jobs(retry_at,id) W
 CREATE INDEX IF NOT EXISTS idx_memory_jobs_finished ON memory_jobs(updated_at,id) WHERE state IN ('done','skipped');
 ALTER TABLE memory_jobs ADD COLUMN IF NOT EXISTS historical BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE memory_jobs ADD COLUMN IF NOT EXISTS result TEXT NOT NULL DEFAULT '';
+-- Existing in-flight leases lack admission evidence: conservatively retain
+-- their retry charge. Every new claim resets this bit in its own transaction.
+ALTER TABLE memory_jobs ADD COLUMN IF NOT EXISTS lease_admitted BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE memory_jobs ALTER COLUMN lease_admitted SET DEFAULT false;
+ALTER TABLE memory_jobs ADD COLUMN IF NOT EXISTS output_truncations INTEGER NOT NULL DEFAULT 0
+    CHECK (output_truncations BETWEEN 0 AND 2);
+-- Preserve the known last truncation for pending pre-upgrade retries without
+-- reopening terminal jobs or inventing a count for their earlier outcomes.
+UPDATE memory_jobs SET output_truncations=1
+    WHERE state='failed' AND attempts<3 AND result='output_truncated' AND output_truncations=0;
 
 CREATE TABLE IF NOT EXISTS memory_audit (
     id BIGSERIAL PRIMARY KEY,

@@ -195,7 +195,8 @@ func (d *DB) QueueMemoryExtraction(ctx context.Context, source MemorySource) (bo
 	}
 	res, err := tx.ExecContext(ctx, `INSERT INTO memory_jobs(source_ref,source_version,source_fingerprint,settings_epoch,historical)
 		VALUES($1,$2,$3,$4,$5) ON CONFLICT(source_ref,source_fingerprint,settings_epoch,extractor_version)
-		DO UPDATE SET state='queued',attempts=0,lease_token='',lease_until=NULL,retry_at=now(),historical=true,result='',updated_at=now()
+		DO UPDATE SET state='queued',attempts=0,output_truncations=0,lease_admitted=false,
+		lease_token='',lease_until=NULL,retry_at=now(),historical=true,result='',updated_at=now()
 		WHERE $5 AND memory_jobs.state IN ('done','failed','skipped')`, refID, current.Version, current.Fingerprint, settings.Epoch, source.Historical)
 	if err != nil {
 		return false, err
@@ -242,7 +243,7 @@ func (d *DB) ClaimMemoryJob(ctx context.Context, leaseDuration time.Duration) (*
 	var job MemoryJob
 	var kind, id string
 	err = tx.QueryRowContext(ctx, `SELECT job.id,source.source_kind,source.source_id,job.source_version,
-		job.source_fingerprint,job.settings_epoch,job.attempts,job.created_at,job.historical
+		job.source_fingerprint,job.settings_epoch,job.attempts,job.created_at,job.historical,job.output_truncations
 		FROM memory_jobs job JOIN memory_sources source ON source.id=job.source_ref
 		WHERE job.settings_epoch=$1 AND job.attempts<3 AND source.suppressed_at IS NULL AND source.valid
 		AND source.source_kind IN ('intent_stage','task_stage')
@@ -250,7 +251,7 @@ func (d *DB) ClaimMemoryJob(ctx context.Context, leaseDuration time.Duration) (*
 		AND (job.historical OR source.last_attempted_version IS DISTINCT FROM job.source_version OR source.last_attempted_job_id=job.id)
 		AND ((job.state IN ('queued','failed') AND job.retry_at<=now()) OR (job.state='running' AND job.lease_until<now()))
 		ORDER BY job.retry_at,job.id LIMIT 1 FOR UPDATE OF job SKIP LOCKED`, settings.Epoch).Scan(&job.ID, &kind, &id,
-		&job.Source.Version, &job.Source.Fingerprint, &job.SettingsEpoch, &job.Attempts, &job.CreatedAt, &job.Historical)
+		&job.Source.Version, &job.Source.Fingerprint, &job.SettingsEpoch, &job.Attempts, &job.CreatedAt, &job.Historical, &job.Truncations)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
@@ -276,7 +277,7 @@ func (d *DB) ClaimMemoryJob(ctx context.Context, leaseDuration time.Duration) (*
 	job.LeaseToken = hex.EncodeToString(token[:])
 	leaseUntil := time.Now().UTC().Add(leaseDuration)
 	job.LeaseUntil, job.State, job.Attempts = &leaseUntil, "running", job.Attempts+1
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state='running',attempts=attempts+1,
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state='running',attempts=attempts+1,lease_admitted=false,
 		lease_token=$2,lease_until=$3,updated_at=now() WHERE id=$1`, job.ID, job.LeaseToken, leaseUntil); err != nil {
 		return nil, err
 	}
@@ -368,6 +369,9 @@ func (d *DB) ValidateMemoryExtractionJob(ctx context.Context, job MemoryJob) err
 		return ErrMemoryStale
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_sources SET last_attempted_version=$2,last_attempted_job_id=$3 WHERE id=$1`, refID, version, job.ID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET lease_admitted=true WHERE id=$1`, job.ID); err != nil {
 		return err
 	}
 	if err := memoryAuditTx(ctx, tx, 0, 0, job.ID, MemoryAdmission{TaskID: current.TaskID, ConversationID: current.ConversationID,
@@ -633,8 +637,9 @@ func (d *DB) FailMemoryJobWithResult(ctx context.Context, job MemoryJob, retryAf
 	var state, token, fingerprint string
 	var version, epoch int64
 	var leaseUntil sql.NullTime
-	if err := tx.QueryRowContext(ctx, `SELECT state,lease_token,source_version,source_fingerprint,settings_epoch,lease_until
-		FROM memory_jobs WHERE id=$1 FOR UPDATE`, job.ID).Scan(&state, &token, &version, &fingerprint, &epoch, &leaseUntil); err != nil {
+	var admitted bool
+	if err := tx.QueryRowContext(ctx, `SELECT state,lease_token,source_version,source_fingerprint,settings_epoch,lease_until,lease_admitted
+		FROM memory_jobs WHERE id=$1 FOR UPDATE`, job.ID).Scan(&state, &token, &version, &fingerprint, &epoch, &leaseUntil, &admitted); err != nil {
 		return err
 	}
 	if state != "running" || token != job.LeaseToken || !leaseUntil.Valid || !leaseUntil.Time.After(time.Now()) {
@@ -647,9 +652,18 @@ func (d *DB) FailMemoryJobWithResult(ctx context.Context, job MemoryJob, retryAf
 		sourceVersion != version || version != job.Source.Version || sourceFingerprint != fingerprint || fingerprint != job.Source.Fingerprint {
 		return stale("source_changed")
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state=CASE WHEN attempts>=3 THEN 'skipped' ELSE 'failed' END,result=$4,
+	// A quota rejection before any HTTP admission is a wait, not a failed model
+	// attempt. Keep both hourly ledgers intact. A denied SDK retry after an
+	// admitted request retains its charge; old or expired leases cannot refund.
+	refund := 0
+	if result == "budget_deferred" && !admitted {
+		refund = 1
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state=CASE WHEN attempts-$5>=3 THEN 'skipped' ELSE 'failed' END,result=$4,
+		attempts=greatest(0,attempts-$5),
+		output_truncations=least(2,output_truncations+CASE WHEN $4='output_truncated' THEN 1 ELSE 0 END),
 		retry_at=$3,lease_token='',lease_until=NULL,updated_at=now() WHERE id=$1 AND state='running' AND lease_token=$2`,
-		job.ID, job.LeaseToken, time.Now().UTC().Add(retryAfter), result); err != nil {
+		job.ID, job.LeaseToken, time.Now().UTC().Add(retryAfter), result, refund); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_sources SET last_result=$3,last_result_at=now(),last_job_id=$2 WHERE id=$1`, refID, job.ID, result); err != nil {

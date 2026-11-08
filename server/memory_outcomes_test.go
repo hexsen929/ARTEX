@@ -327,7 +327,7 @@ func TestMemoryWorkerBudgetAdmissionIsNotAnAPIError(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, state, result, claims := memoryOutcomeJobState(t, f, task.ID)
-	if state != "failed" || result != "budget_deferred" || claims != 1 || invocations != 1 || attempts != 0 {
+	if state != "failed" || result != "budget_deferred" || claims != 0 || invocations != 1 || attempts != 0 {
 		t.Fatalf("budget gate misreported API outcome: %s/%s claims=%d invocations=%d attempts=%d", state, result, claims, invocations, attempts)
 	}
 }

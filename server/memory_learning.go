@@ -76,7 +76,7 @@ func memoryLearningStatus(settings db.MemorySettings, snapshot db.MemoryLearning
 	case v.LastResult == "output_invalid":
 		v.Message = "最近阶段模型输出格式不合格，未保存经验；不是已确认没有经验，按原有限重试与预算处理。"
 	case v.LastResult == "output_truncated":
-		v.Message = "最近阶段模型输出被截断，未保存不完整经验；没有提高原有时限、输出或调用预算。"
+		v.Message = "最近阶段模型输出被截断，未保存不完整经验；剩余重试会逐步增加输出空间，仍受三次尝试和小时调用额度限制。"
 	case v.LastResult == "input_sensitive" || v.LastResult == "output_sensitive":
 		v.Message = "最近阶段因敏感内容检查未采纳；未在学习诊断中保存正文或密钥。"
 	case v.LastResult == "input_invalid":
@@ -90,7 +90,7 @@ func memoryLearningStatus(settings db.MemorySettings, snapshot db.MemoryLearning
 	case v.LastResult == "lease_expired":
 		v.Message = "最近阶段最后一次运行租约过期，已停止重试；未发送第四次模型请求，也未复活旧运行。"
 	case v.LastResult == "budget_deferred":
-		v.Message = "最近阶段在发送前因预算准入推迟；本轮未发送 HTTP 请求，不是提供方调用失败。"
+		v.Message = "最近阶段因 HTTP 额度等待；被拦截的请求未发送。本次运行若已有请求发出仍计入尝试，否则保留重试次数。"
 	case v.LastResult == "source_changed" || v.LastResult == "settings_changed" || v.LastResult == "cleared":
 		v.Message = "最近阶段因来源、设置变化或清空操作未继续保存；不沿用旧快照，也不自动重放历史阶段。"
 	case v.LastResult == "skipped":

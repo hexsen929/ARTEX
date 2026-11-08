@@ -153,7 +153,9 @@ func (s *Server) memoryWorkerTickResult(ctx context.Context) error {
 	if err := s.discoverAndQueueMemorySources(ctx); err != nil {
 		return memoryWorkerStorageError(ctx, err)
 	}
-	job, err := s.m.pg.ClaimMemoryJob(ctx, 90*time.Second)
+	// Leave room beyond the longest extraction deadline for source reads and
+	// the final guarded database commit; a retry must not outlive its lease.
+	job, err := s.m.pg.ClaimMemoryJob(ctx, longmemory.MaxRetryDuration+30*time.Second)
 	if err != nil {
 		return memoryWorkerStorageError(ctx, err)
 	}
@@ -242,7 +244,8 @@ func (s *Server) runClaimedMemoryJob(ctx context.Context, settings db.MemorySett
 			return s.skipMemoryOutcome(ctx, job, "input_sensitive")
 		}
 	}
-	callCtx, cancel := context.WithTimeout(ctx, longmemory.MaxDuration)
+	_, duration := longmemory.ExtractionLimits(job.Truncations)
+	callCtx, cancel := context.WithTimeout(ctx, duration)
 	defer cancel()
 	callCtx = memcontext.WithMetadataOnly(callCtx)
 	var admissionFailure atomic.Value // safe code only; no source/error text
@@ -297,7 +300,7 @@ func (s *Server) runClaimedMemoryJob(ctx context.Context, settings db.MemorySett
 			return s.skipMemoryOutcome(ctx, job, "input_sensitive")
 		}
 	}
-	extracted, err := longmemory.ExtractDetailed(callCtx, provider, cfg.Model, input)
+	extracted, err := longmemory.ExtractAfterTruncations(callCtx, provider, cfg.Model, input, job.Truncations)
 	if err != nil {
 		if err := ctx.Err(); err != nil {
 			return err
