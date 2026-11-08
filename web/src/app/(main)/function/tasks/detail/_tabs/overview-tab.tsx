@@ -1,5 +1,6 @@
 "use client";
 
+import { ExecutionCheckpoint } from "@/components/execution-checkpoint";
 import * as React from "react";
 
 import {
@@ -1041,6 +1042,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                 <StatusBadge domain="intent" value={i.state} />
                 <div className="min-w-0 flex-1">
                   <span className="block truncate">{i.payload}</span>
+                  <ExecutionCheckpoint node={i} />
                   {i.worker_result && (
                     <p className="whitespace-normal text-xs text-muted-foreground">
                       {i.worker_result.message} <code>{i.worker_result.code}</code>
@@ -1117,6 +1119,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                 <StatusBadge domain="intent" value={i.state} />
                 <div className="min-w-0 flex-1">
                   <span className="block truncate">{i.payload}</span>
+                  <ExecutionCheckpoint node={i} />
                   {i.worker_result && (
                     <p className="whitespace-normal text-xs text-muted-foreground">
                       {i.worker_result.message} <code>{i.worker_result.code}</code>

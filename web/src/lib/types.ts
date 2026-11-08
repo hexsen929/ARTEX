@@ -444,6 +444,17 @@ export type HintState = "active" | "consumed";
 export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves" | "covers";
 
 export interface TaskNode {
+  execution_attempt?: number;
+  execution_checkpoint?: {
+    tool_calls: number;
+    tool_results: number;
+    pending: Record<string, string>;
+    last_tool?: string;
+    last_activity_id?: number;
+    last_result_id?: number;
+    incomplete?: boolean;
+    settled: boolean;
+  };
   verification_status?: FindingVerification;
   blocked_reason?: string;
   worker_result?: { code: string; message: string; at: string };
@@ -1041,6 +1052,7 @@ export interface Settings {
   // 全局出口代理(http/https/socks5，可带 user:pass)，所有目标流量走它。开启流量捕获时作为
   // MITM 上游；关闭捕获时直接注入 agent 的 bash/WebFetch。空=直连。
   global_proxy?: string;
+  global_proxy_enabled?: boolean;
   callback_addr?: string; // 有效回连地址；空值保持未配置，新建连接每次读取。
   callback_addr_source?: "env" | "settings" | "config" | "unset";
   callback_addr_locked?: boolean; // 显式环境变量覆盖时，后台保留只读。
@@ -1084,6 +1096,9 @@ export interface Settings {
 }
 
 export interface ProxyPoolEntry {
+  protocol_auto?: boolean;
+  detected_protocol?: string;
+  protocol_checks?: ProxyProtocolCheck[];
   id: string;
   url: string;
   name?: string;
@@ -1096,6 +1111,18 @@ export interface ProxyPoolEntry {
   last_checked_at?: string;
   consecutive_failures: number;
   health: "healthy" | "unhealthy-cooling" | "disabled" | string;
+}
+
+export interface ProxyProbeProgress {
+  id: number;
+  state: "idle" | "queued" | "running" | "completed" | "cancelled" | "superseded" | "save_failed";
+  total: number;
+  completed: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  concurrency: number;
+  items: Record<string, { state: string; ok: boolean; error?: string; ip?: string; protocol?: string; latency_ms?: number }>;
 }
 
 export interface ProxySwitchLog { at: string; from: string; to: string; reason: string }
@@ -2221,7 +2248,9 @@ export interface IntelligencePage {
 export interface EgressProbeResult {
   ok: boolean;
   exit_ip?: string;
-  via?: "direct" | "http" | "https" | "socks5";
+  via?: "direct" | "http" | "https" | "socks5" | "socks4";
+  protocol_recognized?: boolean;
+  protocol_checks?: ProxyProtocolCheck[];
   via_label?: string;
   latency_ms: number;
   error?: string;
@@ -2235,6 +2264,25 @@ export interface EgressProbeResult {
     error?: string;
     error_code?: string;
   }[];
+}
+
+export interface ProxyCapabilityCheck {
+  checked: boolean;
+  ok: boolean;
+  ip?: string;
+  error?: string;
+  error_code?: string;
+  latency_ms: number;
+}
+
+export interface ProxyProtocolCheck {
+  protocol: "http" | "https" | "socks5" | "socks4";
+  recognized: boolean;
+  supported: boolean;
+  evidence?: string;
+  auto_selection_blocked?: boolean;
+  http: ProxyCapabilityCheck;
+  https: ProxyCapabilityCheck;
 }
 
 export interface ProxyPoolDiagnosis {

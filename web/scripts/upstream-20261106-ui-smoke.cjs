@@ -19,6 +19,7 @@ const proxyCount = 125;
 const proxies = Array.from({ length: proxyCount }, (_, i) => ({
   id: `upstream-proxy-${i}`, url: `http://proxy-${i}.fixture.invalid:8080`,
   name: `FIXTURE_PROXY_${i}`, enabled: true, health: "unknown", consecutive_failures: 0,
+  protocol_auto: i === 1,
 }));
 const settings = {
   roe_enforcement: "strict", finding_inline_merge_enabled: false,
@@ -76,6 +77,25 @@ async function serveAPI(request, response, url) {
   requests.push({ endpoint, method, body });
   if (endpoint === "/api/settings/egress" && method === "GET") return json(response, 200, { show_egress_ip: false, global_proxy: settings.global_proxy });
   if (endpoint === "/api/settings" && method === "GET") return json(response, 200, settings);
+  if (endpoint === "/api/settings/proxy-pool/progress" && method === "GET") {
+    const ids = (url.searchParams.get("ids") || "").split(",").filter(Boolean);
+    assert.ok(ids.length <= 50, "Upstream settings fetched progress beyond the visible page");
+    return json(response, 200, { id: 0, state: "idle", total: 0, completed: 0, running: 0, succeeded: 0, failed: 0, concurrency: 12, items: {} });
+  }
+  const diagnostic = endpoint.match(/^\/api\/settings\/proxy-pool\/([^/]+)\/diagnose$/);
+  if (diagnostic && method === "POST") {
+    const entry = settings.proxy_pool.find((item) => item.id === diagnostic[1]);
+    assert.ok(entry); assert.deepEqual(body, {});
+    const scheme = new URL(settings.egress_probe_url).protocol;
+    const missing = { checked: false, ok: false, latency_ms: 0 };
+    const observed = (protocol) => ({ checked: true, ok: protocol === "http", ip: protocol === "http" ? "192.0.2.9" : undefined, error: protocol === "http" ? undefined : "协议请求失败", latency_ms: 1 });
+    const checks = ["http", "https", "socks5", "socks4"].map((protocol) => ({ protocol, recognized: protocol === "http" && scheme === "https:", supported: protocol !== "socks4",
+      evidence: "仅检查已保存回显服务", https: scheme === "https:" && protocol !== "socks4" ? observed(protocol) : missing,
+      http: scheme === "http:" && protocol !== "socks4" ? observed(protocol) : missing }));
+    return json(response, 200, { id: entry.id, probe_mode: "configured", probe_url: settings.egress_probe_url, http_skipped: true, health_updated: false, checked_at: "2026-11-08T00:00:00Z", scope: "fixture",
+      https: { ok: true, via: "http", exit_ip: "192.0.2.9", latency_ms: 1, probes: [], ...(entry.protocol_auto ? { protocol_checks: checks } : {}) },
+      http: { ok: false, error: "未请求额外公共回显", latency_ms: 0, probes: [] } });
+  }
   if (endpoint === "/api/settings" && method === "PUT") {
     assert.deepEqual(Object.keys(body), ["egress_probe_url"], "Probe service save changed unrelated settings");
     assert.equal(typeof body.egress_probe_url, "string");
@@ -194,6 +214,22 @@ async function main() {
     assert.equal(probes().length, 0, "Saving while egress banner was disabled silently probed");
     await gotoProbe(); assert.equal(await input().inputValue(), nextURL);
     console.log("PASS saved custom egress probe URL loads, saves and survives reload without changing proxy state");
+
+    const diagnosisDialog = () => page.getByRole("dialog", { name: "代理 HTTP／HTTPS 诊断", exact: true });
+    const explicitRow = page.getByTestId("proxy-pool-row").filter({ hasText: "FIXTURE_PROXY_0 ·" });
+    await explicitRow.getByRole("button", { name: "诊断", exact: true }).click();
+    await diagnosisDialog().getByText("已保存回显服务（HTTP，明文回显）：回显成功", { exact: true }).waitFor();
+    await diagnosisDialog().getByText("已使用保存的探测服务，未额外访问公共 HTTP 回显地址。", { exact: true }).waitFor();
+    assert.equal(await diagnosisDialog().getByText("访问 HTTPS 网站（校验证书）：回显成功", { exact: true }).count(), 0);
+    await diagnosisDialog().getByRole("button", { name: "关闭诊断", exact: true }).click();
+    const automaticRow = page.getByTestId("proxy-pool-row").filter({ hasText: "FIXTURE_PROXY_1 ·" });
+    await automaticRow.getByRole("button", { name: "诊断", exact: true }).click();
+    await diagnosisDialog().getByTestId("proxy-protocol-checks").waitFor();
+    assert.equal(await diagnosisDialog().getByText("访问 HTTPS 网站（校验证书）：未执行", { exact: true }).count(), 3);
+    await diagnosisDialog().getByText("访问 HTTP 网站（明文回显）：回显通过 · 192.0.2.9", { exact: true }).waitFor();
+    await diagnosisDialog().getByRole("button", { name: "关闭诊断", exact: true }).click();
+    assert.equal(JSON.stringify(settings.proxy_pool), initialProxies, "Configured diagnostics published protocol/health state");
+    console.log("PASS configured diagnostics distinguish website schemes for explicit and automatic proxy protocols");
 
     await input().fill(temporaryURL);
     const beforeTemporary = probeWrites().length;

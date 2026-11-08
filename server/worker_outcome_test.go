@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"github.com/Autumn-27/artex/intercept"
 	"strings"
 	"testing"
 
@@ -16,6 +17,8 @@ func TestWorkerOutcomeClassification(t *testing.T) {
 		state, code string
 	}{
 		{harness.ReasonCompleted, nil, "done", "completed"},
+		{harness.ReasonTimeout, intercept.ErrApprovalWait, "blocked", "approval_wait"},
+		{harness.ReasonModelError, errors.New("anthropic: status 403: 用户额度不足"), "blocked", "quota_exhausted"},
 		{harness.ReasonTimeout, context.DeadlineExceeded, "exhausted", "run_budget"},
 		{harness.ReasonMaxTurns, nil, "exhausted", "turn_budget"},
 		{harness.ReasonTimeout, errors.New("status 503: gateway"), "blocked", "provider_failure"},

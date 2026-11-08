@@ -330,6 +330,12 @@ ON CONFLICT (name) DO NOTHING`,
 	if err := d.seedYMHInterceptRulesV7(); err != nil {
 		return fmt.Errorf("seed ymh intercept rules v7: %w", err)
 	}
+	if err := d.repairHydraNamespaceRule(); err != nil {
+		return fmt.Errorf("repair hydra namespace rule: %w", err)
+	}
+	if err := d.refreshVerificationLimits(); err != nil {
+		return fmt.Errorf("refresh verification limits: %w", err)
+	}
 	return nil
 }
 
@@ -735,7 +741,7 @@ var builtinLateralRules = []struct {
 	},
 	{
 		name:    "[内置] 口令喷洒/爆破: hydra",
-		pattern: `(?i)\bhydra\b`,
+		pattern: hydraCommandPattern,
 	},
 	{
 		name:    "[内置] 口令喷洒/爆破: medusa",
@@ -749,6 +755,21 @@ var builtinLateralRules = []struct {
 		name:    "[内置] 域 Kerberos 枚举/喷洒: kerbrute",
 		pattern: `(?i)\bkerbrute\b`,
 	},
+}
+
+// A colon immediately after the word denotes a different shell command or a
+// namespaced data key (for example JSON-LD hydra:member), not the hydra binary.
+// Other mentions remain conservative matches, including generated scripts and
+// subprocess calls; this does not grant execution to an uninspected script.
+const hydraCommandPattern = `(?i)\bhydra(?:$|[^[:alnum:]_:])`
+
+func (d *DB) repairHydraNamespaceRule() error {
+	// Only replace the exact old built-in matcher. Preserve custom rules,
+	// priorities, approval actions, enabled flags and timeout choices.
+	_, err := d.Exec(`UPDATE intercept_rules SET pattern=$1
+WHERE builtin=true AND name=$2 AND match_target='tool_input' AND match_type='regex' AND pattern=$3`,
+		hydraCommandPattern, "[内置] 口令喷洒/爆破: hydra", `(?i)\bhydra\b`)
+	return err
 }
 
 // builtinTunnelBinaryRules 拦「裸用隧道二进制」(内网期 3 实战教训):worker 绕过

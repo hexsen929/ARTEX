@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"errors"
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/llmguard"
 	"github.com/Autumn-27/norma/harness"
 )
@@ -11,6 +13,12 @@ import (
 // workerOutcome is intentionally free of raw provider bodies, URLs or tool input.
 // Detailed traces remain in their existing access-controlled activity stream.
 func workerOutcome(reason harness.TerminalReason, err error) (state, code, message string) {
+	if errors.Is(err, agent.ErrWorkerHistoryUnavailable) {
+		return "blocked", "execution_history_unavailable", "历史执行记录暂不可用；核对并修复后继续，系统未从头重放操作"
+	}
+	if errors.Is(err, intercept.ErrApprovalWait) {
+		return "blocked", "approval_wait", "等待人工审批，工具未执行；处理审批并核对执行记录后继续，不能据此判定测试失败"
+	}
 	if reason == harness.ReasonTimeout && (err == nil || errors.Is(err, context.DeadlineExceeded)) {
 		return "exhausted", "run_budget", "运行时间预算耗尽；已保存的结果保留，未完成部分待继续"
 	}

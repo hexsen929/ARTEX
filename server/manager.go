@@ -1069,9 +1069,12 @@ func (m *Manager) syncBrowserMCPProxy() {
 	// reason to reactivate a browser disabled after that choice.
 	delete(env, "NODE_EXTRA_CA_CERTS")
 	if proxy != "" {
-		if u, perr := url.Parse(proxy); perr == nil && u.User != nil {
-			user := u.User.Username()
-			pass, _ := u.User.Password()
+		if u, perr := url.Parse(proxy); perr == nil && (u.User != nil || cert != "") {
+			user, pass := "", ""
+			if u.User != nil {
+				user = u.User.Username()
+				pass, _ = u.User.Password()
+			}
 			u.User = nil
 			switch {
 			case hasForeignProxyConfig(raw, cfgPath):
@@ -1080,7 +1083,7 @@ func (m *Manager) syncBrowserMCPProxy() {
 				// dropping their settings, leave the proxy unattached and warn.
 				log.Printf("[mcp] browser MCP 自带 --config，无法注入代理认证凭据；浏览器流量将不经过录制代理。请在其 config 的 browser.launchOptions.proxy 中配置 server=%s 及 username/password（口令见 data/traffic/_auth）", u.String())
 			default:
-				if err := writeBrowserMCPProxyConfig(cfgPath, u.String(), user, pass); err != nil {
+				if err := writeBrowserMCPProxyConfig(cfgPath, u.String(), user, pass, cert); err != nil {
 					log.Printf("[mcp] browser 代理同步: 写代理 config 失败: %v", err)
 				} else {
 					args = append(args, "--config", cfgPath)
@@ -1162,7 +1165,7 @@ func (m *Manager) browserMCPProxyConfigPath() string {
 // writeBrowserMCPProxyConfig persists the minimal playwright-mcp config that
 // routes the browser through a credentialed proxy. CLI args keep precedence
 // over a config file, so this only needs the proxy block.
-func writeBrowserMCPProxyConfig(path, server, username, password string) error {
+func writeBrowserMCPProxyConfig(path, server, username, password string, certPaths ...string) error {
 	cfg := map[string]any{
 		"browser": map[string]any{
 			"launchOptions": map[string]any{
@@ -1173,6 +1176,16 @@ func writeBrowserMCPProxyConfig(path, server, username, password string) error {
 				},
 			},
 		},
+	}
+	if len(certPaths) > 0 && certPaths[0] != "" {
+		pin, err := browserProxyCAPin(certPaths[0])
+		if err != nil {
+			return err
+		}
+		launch := cfg["browser"].(map[string]any)["launchOptions"].(map[string]any)
+		// Chromium has a separate verifier from Node. Trust only this recording
+		// CA's public key; unrelated certificates still fail verification.
+		launch["args"] = []string{"--ignore-certificate-errors-spki-list=" + pin}
 	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
@@ -1400,9 +1413,22 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 	}
 	if m.proxyPool != nil {
 		m.proxyPool.mu.Lock()
+		if raw == "" {
+			wasDisabled := m.proxyPool.disabled
+			m.proxyPool.disabled = true
+			if err := m.applyActiveProxyLocked("", "manual-disabled"); err != nil {
+				m.proxyPool.disabled = wasDisabled
+				m.proxyPool.mu.Unlock()
+				return err
+			}
+			m.proxyPool.generation++
+			m.proxyPool.mu.Unlock()
+			return nil
+		}
 		managed := len(m.proxyPool.entries) > 0
 		if !managed && raw != "" {
 			rollback := m.proxyPoolRollbackLocked()
+			m.proxyPool.disabled = false
 			m.proxyPool.entries = []proxyPoolEntry{{ProxyPoolEntry: ProxyPoolEntry{ID: "proxy-legacy", URL: maskSecrets(raw), Enabled: true, Health: "healthy"}, RawURL: raw}}
 			m.proxyPool.active = "proxy-legacy"
 			if err := m.applyActiveProxyLocked("proxy-legacy", "manual"); err != nil {
@@ -1415,8 +1441,8 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 		}
 		m.proxyPool.mu.Unlock()
 		if managed {
-			// The legacy field is a read-only echo once a pool exists. Pool API
-			// operations are the sole authority for health, enablement and switching.
+			// Non-empty legacy writes remain a read-only echo. Clearing explicitly
+			// disables routing while retaining the pool and rotation preferences.
 			return nil
 		}
 	}
@@ -1439,6 +1465,34 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 	}
 	// Keep the browser MCP's egress in sync with the new global proxy too.
 	m.syncBrowserMCPProxy()
+	return nil
+}
+
+// SetGlobalProxyEnabled changes routing independently of pool membership.
+// Enabling selects an available member; explicit node activation can also enable it.
+func (m *Manager) SetGlobalProxyEnabled(enabled bool) error {
+	if !enabled {
+		return m.SetGlobalProxy("")
+	}
+	if m.proxyPool == nil {
+		return errors.New("请先配置代理地址或导入代理池")
+	}
+	m.proxyPool.mu.Lock()
+	defer m.proxyPool.mu.Unlock()
+	if !m.proxyPool.disabled && m.proxyPool.active != "" {
+		return nil
+	}
+	id := m.selectHealthyLocked("")
+	if id == "" {
+		return errors.New("代理池暂无可用成员，请先启用或检测代理节点")
+	}
+	disabled := m.proxyPool.disabled
+	m.proxyPool.disabled = false
+	if err := m.applyActiveProxyLocked(id, "manual-enabled"); err != nil {
+		m.proxyPool.disabled = disabled
+		return err
+	}
+	m.proxyPool.generation++
 	return nil
 }
 

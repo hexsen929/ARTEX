@@ -92,7 +92,7 @@ func TestProxyProbeUntrustedHTTPSFailsWithSpecificPersistableReason(t *testing.T
 	}))
 	defer proxy.Close()
 	result := probeEgress(context.Background(), proxy.URL, "", []string{srv.URL}, 2*time.Second)
-	if result.OK || result.ErrorCode != "certificate_untrusted" || !strings.Contains(result.Error, "证书链不受信任") || requests != 0 {
+	if result.OK || !result.ProtocolRecognized || result.ErrorCode != "certificate_untrusted" || !strings.Contains(result.Error, "证书链不受信任") || requests != 0 {
 		t.Fatalf("untrusted TLS was not rejected with its actual reason: %+v", result)
 	}
 	entry := proxyScaleEntries(1)[0]
@@ -152,7 +152,7 @@ func TestProxyPoolDiagnosticsSeparateHTTPWithoutPublishingHealthOrRoute(t *testi
 }
 
 func TestProxyPoolDiagnosticRejectsCanceledOrChangedSnapshots(t *testing.T) {
-	for _, mode := range []string{"edit", "cancel", "shutdown", "batch-busy"} {
+	for _, mode := range []string{"edit", "cancel", "shutdown"} {
 		t.Run(mode, func(t *testing.T) {
 			entries := proxyScaleEntries(1)
 			m := &Manager{proxyPool: &proxyPoolState{entries: entries}}

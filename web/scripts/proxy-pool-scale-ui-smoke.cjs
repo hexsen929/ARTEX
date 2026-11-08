@@ -51,7 +51,8 @@ const settings = {
   constraints_inject_planner: true, constraints_inject_worker: true, noa_compaction: false,
   notify_enabled: true, notify_public_base_url: "", notify_digest_interval_min: 30,
 };
-const state = { holdEgress: false, liveEgressReads: 0, peakEgressReads: 0, failBulk: false, recoverOnCleanup: "", rotateOnBulk: "", importMode: "invalid", holdDiagnosis: false };
+const batch = { id: 0, state: "idle", total: 0, completed: 0, running: 0, succeeded: 0, failed: 0, concurrency: 12 };
+const state = { holdEgress: false, liveEgressReads: 0, peakEgressReads: 0, failBulk: false, failToggle: false, recoverOnCleanup: "", rotateOnBulk: "", importMode: "invalid", holdDiagnosis: false };
 const requests = [], unexpected = new Set(), external = new Set(), errors = [], heldEgress = [], heldDiagnoses = [];
 
 function json(response, code, value) {
@@ -96,6 +97,15 @@ async function serveAPI(request, response, url) {
   }
   if (endpoint === "/api/settings" && method === "GET") return json(response, 200, settings);
   if (endpoint === "/api/settings" && method === "PUT") {
+    if (Object.hasOwn(body, "global_proxy_enabled") || Object.hasOwn(body, "global_proxy")) {
+      assert.equal(Object.keys(body).length, 1, "Global proxy operation changed unrelated settings");
+      if (state.failToggle) { state.failToggle = false; return json(response, 500, { error: "FIXTURE_TOGGLE_STORAGE_FAILURE" }); }
+      if (Object.hasOwn(body, "global_proxy")) assert.equal(body.global_proxy, "", "Fixture only accepts explicit clearing");
+      const next = body.global_proxy_enabled ? settings.proxy_pool.find((entry) => entry.enabled && entry.url && entry.health !== "unhealthy-cooling") : undefined;
+      if (body.global_proxy_enabled && !next) return json(response, 400, { error: "代理池暂无可用成员" });
+      settings.global_proxy = next?.url ?? ""; settings.proxy_pool_active_id = next?.id ?? "";
+      return json(response, 200, settings);
+    }
     assert.deepEqual(Object.keys(body), ["show_egress_ip"], "Proxy UI changed an unrelated setting");
     settings.show_egress_ip = body.show_egress_ip;
     return json(response, 200, settings);
@@ -104,9 +114,16 @@ async function serveAPI(request, response, url) {
     assert.equal(body.resume, undefined, "A probe silently requested task resume");
     return json(response, 200, probeReport());
   }
+  if (endpoint === "/api/settings/proxy-pool/progress" && method === "GET") {
+    const ids = (url.searchParams.get("ids") || "").split(",").filter(Boolean);
+    assert.ok(ids.length <= 50, "Progress request loaded more than the visible page");
+    return json(response, 200, { ...batch, items: Object.fromEntries(ids.map((id) => [id, {state: batch.state === "running" ? "running" : "done", ok: true, ip: "192.0.2.5"}])) });
+  }
+  if (endpoint === "/api/settings/proxy-pool/cancel-tests" && method === "POST") { batch.state = "cancelled"; batch.running = 0; return json(response, 200, {ok:true}); }
   if (endpoint === "/api/settings/proxy-pool" && method === "GET") return json(response, 200, proxySnapshot());
   if (endpoint === "/api/settings/proxy-pool/import" && method === "POST") {
     assert.equal(typeof body.text, "string");
+    assert.equal(body.default_protocol, "auto");
     if (state.importMode !== "invalid") {
       let added = 0, duplicates = 0, invalid = 0, issues = [];
       if (state.importMode === "valid") {
@@ -131,6 +148,7 @@ async function serveAPI(request, response, url) {
     });
   }
   if (endpoint === "/api/settings/proxy-pool/test-all" && method === "POST") {
+    Object.assign(batch, {id:batch.id+1,state:"running",total:settings.proxy_pool.length,completed:17,running:12,succeeded:12,failed:5});
     return json(response, 200, {
       ...(url.searchParams.get("summary") === "1" ? { ok: true, count: settings.proxy_pool.length } : proxySnapshot()),
       probe_queued: true,
@@ -177,6 +195,7 @@ async function serveAPI(request, response, url) {
           probes: [{ url: "https://echo.fixture.invalid/ip", ok: false, error: "TLS 证书已过期或尚未生效", error_code: "certificate_time_invalid", latency_ms: 12 }] },
         http: { ok: true, exit_ip: "192.0.2.5", latency_ms: 9, probes: [{ url: "http://echo.fixture.invalid/ip", ok: true, ip: "192.0.2.5", latency_ms: 9 }] },
       };
+      if (found.protocol_auto && !found.detected_protocol) report.https.protocol_checks = found.protocol_checks;
       if (state.holdDiagnosis) { heldDiagnoses.push({ release: () => json(response, 200, report) }); return; }
       return json(response, 200, report);
     }
@@ -327,6 +346,38 @@ async function main() {
     assert.equal(callCount(`/api/settings/proxy-pool/${proxyID(17)}/activate`, "POST"), 1);
     console.log("PASS filtered row actions use stable proxy IDs and refresh the persisted route");
 
+    const globalToggle = () => page.getByRole("switch", { name: "启用全局代理", exact: true });
+    const poolBeforeToggle = JSON.stringify(settings.proxy_pool);
+    const writesBeforeToggle = requests.filter((r) => r.method === "PUT" && r.endpoint === "/api/settings").length;
+    await globalToggle().click();
+    await eventually(async () => await globalToggle().getAttribute("aria-checked") === "false" && await globalToggle().isEnabled(), "Global proxy did not disable with a populated pool");
+    assert.equal(settings.global_proxy, ""); assert.equal(settings.proxy_pool_active_id, "");
+    assert.equal(JSON.stringify(settings.proxy_pool), poolBeforeToggle, "Disabling altered pool members or health");
+    assert.equal(requests.filter((r) => r.method === "PUT" && r.endpoint === "/api/settings").length, writesBeforeToggle + 1);
+    await page.reload({ waitUntil: "networkidle" });
+    await page.getByRole("button", { name: /^流量与安全/ }).click();
+    await eventually(async () => await globalToggle().getAttribute("aria-checked") === "false" && await globalToggle().isEnabled(), "Disabled proxy was restored by a page reload");
+    await globalToggle().click();
+    await eventually(async () => await globalToggle().getAttribute("aria-checked") === "true" && await globalToggle().isEnabled(), "Global proxy did not re-enable an available pool member");
+    assert.ok(settings.global_proxy);
+    state.failToggle = true;
+    const routeBeforeRejection = settings.global_proxy;
+    await globalToggle().click();
+    await page.locator("[data-sonner-toast]").filter({ hasText: "FIXTURE_TOGGLE_STORAGE_FAILURE" }).first().waitFor();
+    await eventually(async () => await globalToggle().isEnabled(), "Rejected toggle remained busy");
+    assert.equal(await globalToggle().getAttribute("aria-checked"), "true");
+    assert.equal(settings.global_proxy, routeBeforeRejection);
+    await page.locator("#global-proxy").fill("");
+    await page.locator("#global-proxy").locator("..").getByRole("button", { name: "保存", exact: true }).click();
+    await eventually(async () => await globalToggle().getAttribute("aria-checked") === "false" && await globalToggle().isEnabled(), "Clearing the address failed to disable a managed pool");
+    assert.equal(JSON.stringify(settings.proxy_pool), poolBeforeToggle);
+    await search().fill(proxyID(17));
+    await selectedRow.getByRole("button", { name: "使用", exact: true }).click();
+    await selectedRow.getByText("当前使用", { exact: true }).waitFor();
+    assert.equal(await globalToggle().getAttribute("aria-checked"), "true");
+    assert.equal(settings.global_proxy, proxyEntry(17).url);
+    console.log("PASS global proxy independently disables, survives reload, re-enables and retains the route on save failure with 10,000 members");
+
     // The reported screenshot had one failed check still labeled untested.
     const diagnosedEntry = settings.proxy_pool.find((entry) => entry.id === proxyID(17));
     Object.assign(diagnosedEntry, { health: "healthy", last_error: "全部探测地址均失败", consecutive_failures: 1 });
@@ -339,9 +390,9 @@ async function main() {
     const settingsReadsBeforeDiagnosis = callCount("/api/settings");
     await selectedRow.getByRole("button", { name: "诊断", exact: true }).click();
     const diagnosisDialog = () => page.getByRole("dialog", { name: "代理 HTTP／HTTPS 诊断", exact: true });
-    await diagnosisDialog().getByText("HTTPS（验证证书）：失败", { exact: true }).waitFor();
-    await diagnosisDialog().getByText("HTTP（明文回显）：回显成功", { exact: true }).waitFor();
-    await diagnosisDialog().getByText("HTTP 可用，HTTPS 检测失败。该代理尚未达到 HTTPS 健康条件。", { exact: true }).waitFor();
+    await diagnosisDialog().getByText("访问 HTTPS 网站（校验证书）：失败", { exact: true }).waitFor();
+    await diagnosisDialog().getByText("访问 HTTP 网站（明文回显）：回显成功", { exact: true }).waitFor();
+    await diagnosisDialog().getByText("仅访问 HTTP 网站回显通过，HTTPS 未通过；这不代表已找到可完整使用的代理协议。", { exact: true }).waitFor();
     assert.match(await diagnosisDialog().innerText(), /证书已过期或尚未生效/);
     assert.equal(JSON.stringify(settings), beforeDiagnosis, "HTTP-only diagnostic published healthy state or changed the exit");
     assert.equal(callCount("/api/settings"), settingsReadsBeforeDiagnosis, "Read-only diagnosis reloaded mutable settings");
@@ -359,6 +410,33 @@ async function main() {
     await list().getByRole("button", { name: "刷新状态", exact: true }).click();
     await selectedRow.getByText("全部探测地址均失败：TLS 证书链不受信任", { exact: false }).waitFor();
     console.log("PASS single failures have accurate labels; HTTP/HTTPS diagnosis shows TLS reasons without publishing health or replaying after close");
+    const originalProtocolEntry = { ...diagnosedEntry };
+    const unavailable = { checked: true, ok: false, error: "代理拒绝 HTTPS CONNECT（HTTP 405）", error_code: "proxy_connect_rejected", latency_ms: 8 };
+    const capabilityChecks = ["http", "https", "socks5", "socks4"].map((protocol) => ({
+      protocol, supported: protocol !== "socks4", recognized: ["socks5", "socks4"].includes(protocol), evidence: "FIXTURE_PROTOCOL_EVIDENCE",
+      https: protocol === "socks4" ? { checked: false, ok: false, latency_ms: 0 } : unavailable,
+      http: protocol === "socks4" ? { checked: false, ok: false, latency_ms: 0 } : { checked: true, ok: true, ip: "192.0.2.5", latency_ms: 9 },
+    }));
+    Object.assign(diagnosedEntry, { protocol_auto: true, protocol_checks: capabilityChecks, health: "unhealthy-cooling", consecutive_failures: 5 });
+    await list().getByRole("button", { name: "刷新状态", exact: true }).click();
+    await selectedRow.getByText("部分检查通过 · 未完整可用", { exact: true }).waitFor();
+    await selectedRow.getByRole("button", { name: "诊断", exact: true }).click();
+    await diagnosisDialog().getByText("代理协议 SOCKS5：已识别", { exact: true }).waitFor();
+    await diagnosisDialog().getByText("代理协议 SOCKS4：已识别 · 暂不支持转发", { exact: true }).waitFor();
+    assert.match(await diagnosisDialog().innerText(), /访问 HTTPS 网站（校验证书）/);
+    assert.match(await diagnosisDialog().innerText(), /访问 HTTP 网站（明文回显）/);
+    await diagnosisDialog().getByRole("button", { name: "关闭诊断", exact: true }).click();
+    assert.equal(await selectedRow.getByRole("button", { name: /仅 HTTP/ }).count(), 0);
+    Object.assign(diagnosedEntry, { detected_protocol: "http", health: "healthy", last_error: "", consecutive_failures: 0,
+      protocol_checks: capabilityChecks.map((check) => check.protocol === "http" ? { ...check, recognized: true, https: { checked: true, ok: true, ip: "192.0.2.5", latency_ms: 10 } } : check) });
+    await list().getByRole("button", { name: "刷新状态", exact: true }).click();
+    await selectedRow.getByText("已识别 HTTP", { exact: true }).waitFor();
+    await selectedRow.getByText("健康", { exact: true }).waitFor();
+    for (const key of Object.keys(diagnosedEntry)) delete diagnosedEntry[key];
+    Object.assign(diagnosedEntry, originalProtocolEntry);
+    await list().getByRole("button", { name: "刷新状态", exact: true }).click();
+    console.log("PASS protocol identity is distinct from website schemes; only a complete candidate is shown usable");
+
 
     await list().getByRole("button", { name: "批量导入代理", exact: true }).click();
     const importText = () => page.locator('textarea[aria-label="批量代理文本"]');
@@ -416,8 +494,15 @@ async function main() {
     await eventually(async () => await list().getByRole("button", { name: "测试全部", exact: true }).isEnabled(), "Import kept all proxy operations disabled");
     await list().getByRole("button", { name: "测试全部", exact: true }).click();
     await eventually(() => callCount("/api/settings/proxy-pool/test-all", "POST") === 1, "Batch probe acknowledgement missing");
-    await eventually(async () => await list().getByRole("button", { name: "测试全部", exact: true }).isEnabled(), "Queued batch probe was treated as a long-running UI request");
-    const batchToast = page.locator("[data-sonner-toast]").filter({ hasText: /后台.*探测|探测.*后台|代理探测已排队/ }).first();
+    await page.getByTestId("proxy-probe-progress").filter({hasText: `17 / ${settings.proxy_pool.length}`}).waitFor();
+    const firstRow = rows().first();
+    const singleBefore = requests.filter((r) => r.endpoint.endsWith("/test") && r.endpoint.includes("proxy-pool/")).length;
+    await firstRow.getByRole("button", {name:"测试", exact:true}).click();
+    await eventually(() => requests.filter((r) => r.endpoint.endsWith("/test") && r.endpoint.includes("proxy-pool/")).length === singleBefore + 1, "Manual test blocked during batch");
+    await list().getByRole("button", {name:"停止本轮测试", exact:true}).click();
+    await page.getByTestId("proxy-probe-progress").filter({hasText:"本轮已停止"}).waitFor();
+    console.log("PASS live progress, independent single test and cancellation during batch");
+    const batchToast = page.locator("[data-sonner-toast]").filter({ hasText: /全部代理探测已排队/ }).first();
     await batchToast.waitFor();
     assert.equal(await page.locator("[data-sonner-toast]").filter({ hasText: "已完成全部代理探测" }).count(), 0, "Queued batch was mislabeled complete");
     assert.equal(requests.find((r) => r.endpoint === "/api/settings/proxy-pool/test-all").query, "?summary=1", "Batch probe retrieved a redundant full pool");

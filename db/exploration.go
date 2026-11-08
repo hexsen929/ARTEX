@@ -2,6 +2,8 @@ package db
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -123,6 +125,7 @@ func jsonUTF16EscapeAt(b []byte, offset int) (uint16, bool) {
 
 // Node is a typed reasoning node (= old task_nodes). kind ∈ goal|intent|finding|hint.
 type Node struct {
+	FactVersion        string          `json:"fact_version,omitempty"`
 	VerificationStatus string          `json:"verification_status,omitempty"`
 	VerificationNote   string          `json:"verification_note,omitempty"`
 	EvidenceVersion    int64           `json:"evidence_version,omitempty"`
@@ -350,28 +353,6 @@ func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) e
 	return nil
 }
 
-// ConfirmFact 把本 exploration 的一条 fact 节点 confidence 升级为 confirmed，并写入审计
-// 字段（confirmed_by/confirmed_at）。scoped 到 kind='fact'，不会误改 intent/goal；无此
-// 事实时报错。content_version 与 SetNodeState 同步 bump，让已折叠 digest 的缓存体失效。
-func (s *ExplorationStore) ConfirmFact(id int64, origin string) error {
-	if origin == "" {
-		origin = "system"
-	}
-	audit, _ := json.Marshal(map[string]any{
-		"confidence":   "confirmed",
-		"confirmed_by": origin,
-		"confirmed_at": time.Now().UTC().Format(time.RFC3339),
-	})
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload = payload || $1::jsonb, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3 AND kind='fact'`, string(audit), id, s.expID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("事实不存在")
-	}
-	return nil
-}
-
 // DeleteGoal hard-deletes a goal node; scoped to kind='goal' so it can never drop
 // an intent/fact by id. The edges (spawns) and anchors reference it with ON DELETE
 // CASCADE, so they go with it; activity.node_id is ON DELETE SET NULL. Returns an
@@ -409,6 +390,7 @@ WHERE exploration_id=$1 AND kind='intent' AND state='running'`, s.expID)
 func (s *ExplorationStore) ReopenIntent(id int64) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes
 SET state='open', completed_at=NULL, blocked_reason=NULL
+ ,payload=jsonb_set(payload,'{automatic_continuations}','0'::jsonb)
 WHERE id=$1 AND exploration_id=$2 AND kind='intent'
   AND state IN ('blocked','exhausted','stopped')`, id, s.expID)
 	if err != nil {
@@ -422,7 +404,7 @@ WHERE id=$1 AND exploration_id=$2 AND kind='intent'
 // (batch rerun after e.g. an LLM/network outage that blocked many at once). Returns the
 // number reopened. Workers resume from their transcripts; kept graph writes remain.
 func (s *ExplorationStore) ReopenBlockedIntents() (int64, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL,payload=jsonb_set(payload,'{automatic_continuations}','0'::jsonb)
 WHERE exploration_id=$1 AND kind='intent' AND state='blocked'`, s.expID)
 	if err != nil {
 		return 0, err
@@ -436,7 +418,8 @@ func (s *ExplorationStore) SetIntentState(id int64, state string) error {
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
 	_, err := s.db.Exec(`UPDATE exploration_nodes
 SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $4 THEN now() ELSE NULL END
-WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, terminal)
+,payload=CASE WHEN $1='running' AND state<>'running' THEN jsonb_set(payload,'{worker_run_token}',to_jsonb($5::text)) ELSE payload END
+WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, terminal, rand.Text())
 	return err
 }
 
@@ -447,7 +430,8 @@ func (s *ExplorationStore) CompareAndSetIntentState(id int64, expected, state st
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
 	res, err := s.db.Exec(`UPDATE exploration_nodes
 SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $5 THEN now() ELSE NULL END
-WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, state, id, s.expID, expected, terminal)
+,payload=CASE WHEN $1='running' AND state<>'running' THEN jsonb_set(payload,'{worker_run_token}',to_jsonb($6::text)) ELSE payload END
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, state, id, s.expID, expected, terminal, rand.Text())
 	if err != nil {
 		return false, err
 	}
@@ -1254,8 +1238,9 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exist
 
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
-WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id, s.expID)
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1,
+payload=jsonb_set(payload,'{worker_run_token}',to_jsonb($4::text))
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id, s.expID, rand.Text())
 	if err != nil {
 		return false, err
 	}
@@ -1286,17 +1271,14 @@ func (s *ExplorationStore) Stats() (map[string]int, error) {
 
 // AppendActivity records one worker step and returns its id.
 func (s *ExplorationStore) AppendActivity(a Activity) (int64, error) {
-	metadata := a.Metadata
-	if len(metadata) == 0 {
-		metadata = json.RawMessage(`{}`)
+	var meta struct {
+		RunToken string `json:"worker_run_token"`
 	}
-	var id int64
-	err := s.db.QueryRow(`
-INSERT INTO activity(exploration_id, node_id, worker, kind, tool, tool_use_id, is_error, summary, detail, metadata, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, main_seg)
-VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),$10,$11,$12,$13,$14,$15)
-RETURNING id`, s.expID, a.NodeID, utf8Clean(a.Worker), utf8Clean(a.Kind), utf8Clean(a.Tool), utf8Clean(a.ToolUseID), a.IsError, utf8Clean(a.Summary), utf8Clean(a.Detail),
-		metadata, a.InputTokens, a.OutputTokens, a.CacheReadTokens, a.CacheWriteTokens, a.MainSeg).Scan(&id)
-	return id, err
+	_ = json.Unmarshal(a.Metadata, &meta)
+	if a.NodeID != nil && meta.RunToken != "" && (a.Kind == "tool_use" || a.Kind == "tool_result") {
+		return s.appendCheckpointActivity(a, meta.RunToken)
+	}
+	return s.appendActivityRow(context.Background(), s.db, a)
 }
 
 // ExplorationDiag probes, at the moment of an activity FK violation (23503), why the

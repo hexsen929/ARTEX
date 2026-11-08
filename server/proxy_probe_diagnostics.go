@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -12,6 +13,12 @@ import (
 	"syscall"
 	"time"
 )
+
+type proxyConnectStatusError struct{ Status int }
+
+func (e proxyConnectStatusError) Error() string {
+	return fmt.Sprintf("proxy CONNECT status %d", e.Status)
+}
 
 // Public errors are closed host-selected categories, not raw proxy/server
 // messages. Keep certificate verification enabled and do not trust peer roots.
@@ -21,7 +28,13 @@ func classifyEgressProbeError(err error) (string, string) {
 	var hostname x509.HostnameError
 	var certificate *tls.CertificateVerificationError
 	var network net.Error
+	var connectStatus proxyConnectStatusError
 	switch {
+	case errors.As(err, &connectStatus):
+		if connectStatus.Status == http.StatusProxyAuthRequired {
+			return "proxy_authentication", "代理认证失败或需要账号密码"
+		}
+		return "proxy_connect_rejected", fmt.Sprintf("代理拒绝 HTTPS CONNECT（HTTP %d）", connectStatus.Status)
 	case errors.Is(err, context.Canceled):
 		return "cancelled", "探测已取消"
 	case errors.As(err, &invalid):
@@ -95,16 +108,11 @@ func summarizeEgressProbeFailures(attempts []egressAttempt) (string, string) {
 // Diagnostics never publish health, persist settings, switch routes, or release
 // paused tasks. Plain HTTP is a separate explicit check, not a TLS fallback.
 func (s *Server) diagnoseProxyPoolEntry(w http.ResponseWriter, r *http.Request) {
-	if !s.proxyPoolTickMu.TryLock() {
-		writeErr(w, http.StatusConflict, "批量探测中，请稍后诊断单条代理")
+	release, ok := s.beginInteractiveProxyProbe(w)
+	if !ok {
 		return
 	}
-	defer s.proxyPoolTickMu.Unlock()
-	if !s.beginProxyCallback() {
-		writeErr(w, http.StatusServiceUnavailable, "服务正在停止，诊断未执行")
-		return
-	}
-	defer s.proxyCallbackWG.Done()
+	defer release()
 	if r.Context().Err() != nil || s.proxyShuttingDown() {
 		writeErr(w, http.StatusServiceUnavailable, "请求已取消或服务正在停止，诊断未执行")
 		return
@@ -142,20 +150,30 @@ func (s *Server) diagnoseProxyPoolEntry(w http.ResponseWriter, r *http.Request) 
 	defer cancel()
 	stopCancellation := context.AfterFunc(serverContext(s), cancel)
 	defer stopCancellation()
-	primary := s.runProxyProbe(ctx, selected.RawURL, "", probes, proxyPoolProbeTimeout)
+	mode := "default"
+	var primary, httpResult egressProbeResult
+	auto := selected.ProtocolAuto && selected.DetectedProtocol == ""
+	if auto {
+		primary, httpResult, _ = s.inspectProxyProtocols(ctx, *selected, false, probes)
+	} else {
+		primary = s.runProxyProbe(ctx, selected.RawURL, "", probes, proxyPoolProbeTimeout)
+	}
 	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) || !s.m.egressProbesMatch(probes) {
 		writeErr(w, http.StatusConflict, "请求已取消或代理配置已变更，诊断结果已作废")
 		return
 	}
-	mode := "default"
-	httpResult := egressProbeResult{Probes: []egressAttempt{}}
 	if custom == "" {
-		httpResult = s.runProxyProbe(ctx, selected.RawURL, "", []string{"http://api.ipify.org?format=json"}, proxyPoolProbeTimeout)
+		if !auto {
+			httpResult = s.runProxyProbe(ctx, selected.RawURL, "", []string{"http://api.ipify.org?format=json"}, proxyPoolProbeTimeout)
+		}
 	} else {
-		// Explicit custom service selection is also a network boundary: a
-		// diagnostic must not silently issue an extra request to public echoes.
 		mode = "configured"
-		httpResult.ErrorCode, httpResult.Error = "not_requested", "已配置自定义回显服务，未请求默认公网 HTTP 服务"
+		if auto && strings.HasPrefix(strings.ToLower(custom), "http://") {
+			checks := primary.ProtocolChecks
+			primary = httpResult
+			primary.ProtocolChecks = checks
+		}
+		httpResult = egressProbeResult{ErrorCode: "not_requested", Error: "已配置自定义回显服务，未请求默认公网 HTTP 服务", Probes: []egressAttempt{}}
 	}
 	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) || !s.m.egressProbesMatch(probes) {
 		writeErr(w, http.StatusConflict, "请求已取消或代理配置已变更，诊断结果已作废")
@@ -167,6 +185,6 @@ func (s *Server) diagnoseProxyPoolEntry(w http.ResponseWriter, r *http.Request) 
 		"id": selected.ID, "https": primary, "http": httpResult,
 		"probe_mode": mode, "probe_url": maskSecrets(custom), "http_skipped": custom != "",
 		"checked_at": time.Now(), "health_updated": false,
-		"scope": "仅诊断这条代理；HTTP 回显不证明 HTTPS 可信，不改健康状态、出口或任务暂停状态",
+		"scope": "仅诊断这条代理；HTTP 回显可能受网络转发影响，不证明代理身份或 HTTPS 可信，不改健康状态、出口或任务暂停状态",
 	})
 }

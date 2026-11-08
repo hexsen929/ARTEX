@@ -150,23 +150,26 @@ type Server struct {
 
 	// Cold task archives run through one persistent FIFO worker. The buffered wake
 	// channel coalesces enqueue bursts; the database remains the source of truth.
-	archiveWake       chan struct{}
-	archiveWG         sync.WaitGroup
-	credentialWake    chan struct{}
-	proxyReconnect    proxyReconnectSupervisor
-	proxyPoolWake     chan struct{}
-	proxyPoolWG       sync.WaitGroup
-	proxyCallbackWG   sync.WaitGroup
-	proxyCtx          context.Context
-	proxyCancel       context.CancelFunc
-	proxyPoolProbeSem chan struct{}
-	proxyPoolTickMu   sync.Mutex
+	archiveWake          chan struct{}
+	archiveWG            sync.WaitGroup
+	credentialWake       chan struct{}
+	proxyReconnect       proxyReconnectSupervisor
+	proxyPoolWake        chan struct{}
+	proxyPoolWG          sync.WaitGroup
+	proxyCallbackWG      sync.WaitGroup
+	proxyCtx             context.Context
+	proxyCancel          context.CancelFunc
+	proxyPoolProbeSem    chan struct{}
+	proxyPoolTickMu      sync.Mutex
+	proxyInteractiveOnce sync.Once
+	proxyInteractiveSem  chan struct{}
 	// proxyProbe is injectable for deterministic reconnect race tests. Production
 	// servers leave it nil and use probeEgress directly.
-	proxyProbe func(context.Context, string, string, []string, time.Duration) egressProbeResult
-	side       *sideQuestionState
-	memoryWake chan struct{}
-	memoryWG   sync.WaitGroup
+	proxyProbe       func(context.Context, string, string, []string, time.Duration) egressProbeResult
+	proxySOCKS4Probe func(context.Context, string) (bool, string)
+	side             *sideQuestionState
+	memoryWake       chan struct{}
+	memoryWG         sync.WaitGroup
 }
 
 // provEntry is a cached provider + its config for one LLM profile id.
@@ -405,13 +408,17 @@ func (s *Server) restoreTaskRuntimes() {
 	// restore persisted paused state (so a task paused before restart stays paused).
 	for _, t := range m.LoadExisting() {
 		lifecycle := t.lifecycleSnapshot()
+		if lifecycle.Paused {
+			s.engine.Pause(t.ID, agent.AbortPausedOnReload)
+		}
+		if err := s.engine.recoverWorkerOutcomesBeforeStart(t); err != nil {
+			log.Printf("[engine] task %s 待保存的 Worker 结果尚未恢复，任务保持停止，请重试恢复", t.ID)
+			continue
+		}
 		// clear stale 'running' intents from a prior crash/restart (no live worker
 		// owns them) so they re-claim instead of spinning forever in the UI.
 		if n, _ := t.Store.ResetRunningIntents(); n > 0 {
 			log.Printf("[engine] task %s 重置 %d 个残留 running 意图为 open", t.ID, n)
-		}
-		if lifecycle.Paused {
-			s.engine.Pause(t.ID, agent.AbortPausedOnReload)
 		}
 		// 任务级超时:为每个未终态、带 timeout 的任务起 deadline 协调器,独立于 planner/worker
 		// loop——非活跃任务重启后也能在到点后被收尾(deadline 已过则立即走收尾时序)。
@@ -1186,6 +1193,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/settings/proxy-pool/{id}/test", s.testProxyPoolEntry)
 	mux.HandleFunc("POST /api/settings/proxy-pool/{id}/diagnose", s.diagnoseProxyPoolEntry)
 	mux.HandleFunc("POST /api/settings/proxy-pool/test-all", s.testAllProxyPool)
+	mux.HandleFunc("GET /api/settings/proxy-pool/progress", s.getProxyProbeProgress)
+	mux.HandleFunc("POST /api/settings/proxy-pool/cancel-tests", s.cancelProxyPoolTests)
 	mux.HandleFunc("POST /api/settings/proxy-pool/{id}/activate", s.activateProxyPool)
 	mux.HandleFunc("POST /api/tasks/{id}/proxy/test", s.testTaskProxy)
 	mux.HandleFunc("GET /api/report", s.getReport)
@@ -4012,6 +4021,7 @@ func (s *Server) settingsPayload() map[string]any {
 		"deepseek_search_key_set":              s.m.deepSeekSearchKey() != "",
 		"web_search_proxy":                     maskSecrets(proxy),             // 独立出口代理(http/https/socks5)，空=直连
 		"global_proxy":                         maskSecrets(s.m.GlobalProxy()), // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"global_proxy_enabled":                 s.m.GlobalProxy() != "",
 		"proxy_pool":                           proxyEntries,
 		"proxy_pool_active_id":                 proxyActiveID,
 		"proxy_pool_switch_log":                proxySwitchLog,
@@ -4118,6 +4128,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		DeepSeekSearchKey      *string       `json:"deepseek_search_api_key"`
 		WebSearchProxy         *string       `json:"web_search_proxy"` // 独立出口代理(http/https/socks5)；null=不改，""=清空
 		GlobalProxy            *string       `json:"global_proxy"`     // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
+		GlobalProxyEnabled     *bool         `json:"global_proxy_enabled"`
 		ProxyRotateTimed       *bool         `json:"proxy_rotate_timed_enabled"`
 		ProxyRotateInterval    *int          `json:"proxy_rotate_interval_seconds"`
 		ProxyRotateFailure     *bool         `json:"proxy_rotate_on_failure"`
@@ -4153,6 +4164,10 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
+		return
+	}
+	if req.GlobalProxy != nil && req.GlobalProxyEnabled != nil {
+		writeErr(w, http.StatusBadRequest, "代理地址与全局代理开关请分别保存")
 		return
 	}
 	roeUpdate, err := parseRoEEnforcementUpdate(req.RoEEnforcement)
@@ -4471,9 +4486,17 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, err.Error())
 			return
 		}
-		if globalProxyValue == "" && (s.m.proxyPool == nil || len(s.m.proxyPoolEntries()) == 0) {
+		if globalProxyValue == "" {
 			s.proxyReconnectSuccessWithGuards(proxyGuards, nil)
 		}
+	}
+	if req.GlobalProxyEnabled != nil {
+		guards := s.snapshotProxyReconnectGuards(false)
+		if err := s.m.SetGlobalProxyEnabled(*req.GlobalProxyEnabled); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.proxyReconnectSuccessWithGuards(guards, nil)
 	}
 	if req.ProxyReconnectMax != nil || req.ProxyReconnectInterval != nil {
 		if err := s.setProxyReconnectSettings(req.ProxyReconnectMax, req.ProxyReconnectInterval); err != nil {

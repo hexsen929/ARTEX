@@ -2461,6 +2461,15 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (Object.hasOwn(b, "egress_probe_url") && b.egress_probe_url !== null && typeof b.egress_probe_url !== "string") {
       throw new Error("egress_probe_url 必须是字符串");
     }
+    if (Object.hasOwn(b, "global_proxy_enabled")) {
+      if (typeof b.global_proxy_enabled !== "boolean" || Object.hasOwn(b, "global_proxy")) throw new Error("全局代理开关无效");
+      const entry = b.global_proxy_enabled ? (D.settings.proxy_pool ?? []).find((item) => item.enabled && item.url && item.health !== "unhealthy-cooling") : undefined;
+      if (b.global_proxy_enabled && !entry) throw new Error("代理池暂无可用成员");
+      b.global_proxy = entry?.url ?? "";
+      b.proxy_pool_active_id = entry?.id ?? "";
+    }
+    if (b.global_proxy === "") b.proxy_pool_active_id = "";
+    if (Object.hasOwn(b, "global_proxy")) b.global_proxy_enabled = Boolean(b.global_proxy);
     const next = { ...D.settings, ...b };
     if (b.egress_probe_url === null) next.egress_probe_url = D.settings.egress_probe_url;
     else if (typeof b.egress_probe_url === "string") next.egress_probe_url = b.egress_probe_url.trim();
@@ -2500,6 +2509,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       ],
       warnings: [],
     };
+  if (path === "/settings/proxy-pool/progress" && m === "GET") return {id:0,state:"idle",total:0,completed:0,running:0,succeeded:0,failed:0,concurrency:12,items:{}};
+  if (path === "/settings/proxy-pool/cancel-tests" && m === "POST") return {ok:true};
   if (path === "/settings/proxy-pool" && m === "GET") return { entries: D.settings.proxy_pool ?? [], active_id: D.settings.proxy_pool_active_id ?? "", active_proxy: D.settings.global_proxy ?? "", switch_log: [] };
   if (path === "/settings/proxy-pool/import" && m === "POST") return { ok: true, probe_queued: true, errors: [] };
   if (path === "/settings/proxy-pool/test-all" && m === "POST") return { ok: true, probe_queued: true };
@@ -2526,15 +2537,25 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       return true;
     });
     const pool = D.settings.proxy_pool;
-    if (!pool.some((entry) => entry.id === previous && entry.enabled)) {
+    if (previous && !pool.some((entry) => entry.id === previous && entry.enabled)) {
       const next = pool.find((entry) => entry.enabled && entry.health !== "unhealthy-cooling") ?? pool.find((entry) => entry.enabled);
       D.settings.proxy_pool_active_id = next?.id ?? "";
       D.settings.global_proxy = next?.url ?? "";
+      D.settings.global_proxy_enabled = Boolean(next);
     }
     return { ok: true, changed, skipped: ids.size - changed, active_id: D.settings.proxy_pool_active_id ?? "", active_changed: (D.settings.proxy_pool_active_id ?? "") !== previous };
   }
   if (path.startsWith("/settings/proxy-pool/") && m === "PUT") return { entry: { ...(D.settings.proxy_pool ?? []).find((x) => x.id === path.split("/").at(-1)), ...b } };
   if (path.startsWith("/settings/proxy-pool/") && m === "DELETE") return { ok: true };
+  if (path.startsWith("/settings/proxy-pool/") && path.endsWith("/activate") && m === "POST") {
+    const id = decodeURIComponent(path.split("/").at(-2) ?? "");
+    const entry = (D.settings.proxy_pool ?? []).find((item) => item.id === id && item.enabled && item.url && item.health !== "unhealthy-cooling");
+    if (!entry) throw new Error("代理未启用或不健康");
+    D.settings.proxy_pool_active_id = entry.id;
+    D.settings.global_proxy = entry.url;
+    D.settings.global_proxy_enabled = true;
+    return { ok: true, active_id: entry.id, active_proxy: entry.url };
+  }
   if (path.startsWith("/settings/proxy-pool/") && m === "POST") return { ok: true, active_id: path.split("/").at(-1), active_proxy: "" };
   if (path === "/settings/python/detect") return { python_interpreter: "/usr/bin/python3" };
   if (path === "/chat")

@@ -9,21 +9,22 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
-import { assertProxyDiagnosis, proxyDiagnosisPrimaryLabel, proxyProbeStatus } from "@/lib/proxy-probe-status";
+import { assertProxyDiagnosis, proxyDiagnosisPrimaryLabel, proxyProbeStatus, proxyProtocolStatus } from "@/lib/proxy-probe-status";
 import { filterProxyPool, PROXY_POOL_PAGE_SIZE, proxyCleanupEligible, proxyLastCheckFailed, proxyPoolPage } from "@/lib/proxy-pool-pagination";
-import type { EgressProbeResult, ProxyPoolBulkRequest, ProxyPoolDiagnosis, ProxyPoolEntry } from "@/lib/types";
+import type { EgressProbeResult, ProxyCapabilityCheck, ProxyProtocolCheck, ProxyPoolBulkRequest, ProxyPoolDiagnosis, ProxyPoolEntry, ProxyProbeProgress } from "@/lib/types";
 
 type Props = {
   entries: ProxyPoolEntry[];
   activeId: string;
   busy: boolean;
   draft: React.MutableRefObject<string>;
-  onImport: (text: string) => Promise<boolean>;
-  onTestAll: () => void;
+  onImport: (text: string, protocol: string) => Promise<boolean>;
+  onTestAll: () => Promise<void>;
+  onSnapshot: (snapshot: Awaited<ReturnType<typeof api.proxyPool>>) => void;
   onRefresh: () => void;
   onToggle: (entry: ProxyPoolEntry) => void;
   onActivate: (id: string) => void;
-  onTest: (id: string) => void;
+  onTest: (id: string) => Promise<void>;
   onDelete: (id: string) => void;
   healthThreshold: number;
   onBulk: (request: ProxyPoolBulkRequest) => Promise<boolean>;
@@ -34,6 +35,7 @@ function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy"
   // React on every input. Keep only small UI flags in state; the shared ref
   // preserves the full draft while this category/editor is not mounted.
   const [expanded, setExpanded] = React.useState(false);
+  const [protocol, setProtocol] = React.useState("auto");
   const [pending, setPending] = React.useState(false);
   const [hasText, setHasText] = React.useState(() => /\S/.test(draft.current));
   const editor = React.useRef<HTMLTextAreaElement>(null);
@@ -48,7 +50,7 @@ function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy"
     const submitted = editor.current?.value ?? draft.current;
     setPending(true);
     try {
-      if (await onImport(submitted)) {
+      if (await onImport(submitted, protocol)) {
         if (editor.current?.value === submitted && draft.current === "") editor.current.value = "";
         setHasText(/\S/.test(draft.current));
       }
@@ -69,6 +71,13 @@ function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy"
         批量导入代理
       </Button>
       {expanded ? <>
+        <label className="mt-2 flex flex-wrap items-center gap-2">未写协议的地址
+          <select aria-label="无协议地址处理" value={protocol} onChange={(event) => setProtocol(event.target.value)} disabled={pending || busy} className="rounded border bg-background p-1">
+            <option value="auto">自动识别（HTTP / HTTPS / SOCKS5）</option>
+            <option value="http">按 HTTP 导入</option><option value="https">按 HTTPS 导入</option><option value="socks5">按 SOCKS5 导入</option>
+          </select>
+        </label>
+        <p className="mt-1 text-muted-foreground">已填写协议或分组标签时按原协议测试。自动识别须通过 HTTPS 出口验证，未确认前不能使用；SOCKS 按 SOCKS5 处理。</p>
         <textarea
           ref={editor}
           aria-label="批量代理文本"
@@ -90,7 +99,7 @@ function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy"
           <Button type="button" size="sm" onClick={() => void submit()} disabled={busy || pending || !hasText}>
             {pending ? "导入中…" : "导入"}
           </Button>
-          <span className="text-muted-foreground">支持换行或空格分隔。裸地址默认 HTTP，随后沿用最近的明确协议；SOCKS5 列表前可单独写 socks5。# 后为备注，账号密码会掩码显示。</span>
+          <span className="text-muted-foreground">支持换行或空格分隔。未写协议默认自动识别，随后沿用最近的明确协议；SOCKS5 列表前可单独写 socks5。# 后为备注，账号密码会掩码显示。</span>
         </div>
       </> : null}
     </div>
@@ -107,7 +116,29 @@ function DiagnosisResult({ label, result }: { label: string; result: EgressProbe
   </section>;
 }
 
-export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onImport, onTestAll, onRefresh, onToggle, onActivate, onTest, onDelete, healthThreshold, onBulk }: Props) {
+function capabilityLabel(check: ProxyCapabilityCheck) {
+  if (!check.checked) return "未执行";
+  return check.ok ? `回显通过 · ${check.ip}` : check.error || "未通过";
+}
+
+function ProtocolChecks({ checks }: { checks: ProxyProtocolCheck[] }) {
+  return <div className="space-y-2" data-testid="proxy-protocol-checks">{checks.map((check) => <section key={check.protocol} className="rounded-md border p-2 text-xs">
+    <p className="font-medium">代理协议 {check.protocol.toUpperCase()}：{check.recognized ? "已识别" : "未确认"}{!check.supported ? " · 暂不支持转发" : ""}</p>
+    <p className="text-muted-foreground">{check.evidence}</p>
+    {check.supported ? <><p>访问 HTTPS 网站（校验证书）：{capabilityLabel(check.https)}</p><p>访问 HTTP 网站（明文回显）：{capabilityLabel(check.http)}</p></> : null}
+  </section>)}</div>;
+}
+
+export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onImport, onTestAll, onSnapshot, onRefresh, onToggle, onActivate, onTest, onDelete, healthThreshold, onBulk }: Props) {
+  const [progress, setProgress] = React.useState<ProxyProbeProgress | null>(null);
+  const [progressError, setProgressError] = React.useState("");
+  const [pollVersion, setPollVersion] = React.useState(0);
+  const [starting, setStarting] = React.useState(false);
+  const [testing, setTesting] = React.useState<Set<string>>(() => new Set());
+  const testPending = React.useRef(new Set<string>());
+  const snapshotCallback = React.useRef(onSnapshot);
+  snapshotCallback.current = onSnapshot;
+  const refreshedRound = React.useRef("");
   const [query, setQuery] = React.useState("");
   const [failedOnly, setFailedOnly] = React.useState(false);
   const [requestedPage, setRequestedPage] = React.useState(1);
@@ -117,7 +148,7 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
   const [diagnosis, setDiagnosis] = React.useState<{ id: string; url: string; result?: ProxyPoolDiagnosis; error?: string } | null>(null);
   const diagnosticRequest = React.useRef<AbortController | null>(null);
   const [diagnosing, setDiagnosing] = React.useState(false);
-  const busy = parentBusy || diagnosing;
+  const busy = parentBusy;
   const closeDiagnosis = () => {
     diagnosticRequest.current?.abort();
     diagnosticRequest.current = null;
@@ -146,6 +177,49 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
   const deferredQuery = React.useDeferredValue(query);
   const filtered = React.useMemo(() => filterProxyPool(failedOnly ? entries.filter(proxyLastCheckFailed) : entries, deferredQuery), [entries, deferredQuery, failedOnly]);
   const { items, page, pages } = proxyPoolPage(filtered, requestedPage);
+  const visibleIDs = items.map((entry) => entry.id).join(",");
+  React.useEffect(() => {
+    if (parentBusy) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      let active = false;
+      try {
+        if (document.visibilityState !== "hidden") {
+          const next = await api.proxyProbeProgress(visibleIDs ? visibleIDs.split(",") : [], controller.signal);
+          if (controller.signal.aborted) return;
+          if (!next || !Number.isFinite(next.completed) || !Number.isFinite(next.total) || !next.items) throw new Error("测试进度返回不完整");
+          setProgress(next); setProgressError("");
+          active = next.state === "running" || next.state === "queued";
+          const key = `${next.id}:${next.state}`;
+          if (!active && next.state !== "idle" && refreshedRound.current !== key) {
+            const snapshot = await api.proxyPool();
+            if (controller.signal.aborted) return;
+            refreshedRound.current = key; snapshotCallback.current(snapshot);
+          }
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) setProgressError((error as Error).message);
+      } finally {
+        if (!controller.signal.aborted) timer = setTimeout(poll, active ? 1000 : 4000);
+      }
+    };
+    void poll();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [visibleIDs, pollVersion, parentBusy, entries]);
+  const startBatch = async () => {
+    if (starting) return;
+    setStarting(true);
+    try { await onTestAll(); setPollVersion((value) => value + 1); } finally { setStarting(false); }
+  };
+  const testOne = async (id: string) => {
+    if (testPending.current.has(id)) return;
+    testPending.current.add(id); setTesting(new Set(testPending.current));
+    try { await onTest(id); } finally { testPending.current.delete(id); setTesting(new Set(testPending.current)); setPollVersion((value) => value + 1); }
+  };
+  const cancelBatch = async () => {
+    try { await api.cancelProxyPoolTests(); setPollVersion((value) => value + 1); } catch (error) { setProgressError((error as Error).message); }
+  };
   const active = React.useMemo(() => entries.find((entry) => entry.id === activeId), [entries, activeId]);
   const entryIDs = React.useMemo(() => new Set(entries.map((entry) => entry.id)), [entries]);
   const invalidIDs = React.useMemo(() => entries.filter((entry) => entry.id !== activeId && proxyCleanupEligible(entry, healthThreshold)).map((entry) => entry.id), [entries, activeId, healthThreshold]);
@@ -196,11 +270,17 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button type="button" variant="outline" size="sm" onClick={onRefresh} disabled={busy}>刷新状态</Button>
-          <Button type="button" variant="outline" size="sm" onClick={onTestAll} disabled={busy}>测试全部</Button>
+          <Button type="button" variant="outline" size="sm" onClick={() => void startBatch()} disabled={busy || starting || progress?.state === "running" || progress?.state === "queued"}>测试全部</Button>
           <Button type="button" variant="outline" size="sm" onClick={() => confirmBulk("delete", true)} disabled={busy || invalidIDs.length === 0}>清理失效（{invalidIDs.length}）</Button>
         </div>
       </div>
       <ProxyPoolImport draft={draft} busy={busy} onImport={onImport} />
+      {progress && progress.state !== "idle" ? <div className="space-y-2 rounded-md border p-3 text-xs" data-testid="proxy-probe-progress" aria-live="polite">
+        <p>{({ queued: "等待测试", running: "正在测试", completed: "测试完成", cancelled: "本轮已停止", superseded: "配置已变更，本轮结果作废", save_failed: "测试结果保存失败" } as Record<string, string>)[progress.state]}：{progress.completed} / {progress.total} · 成功 {progress.succeeded} · 失败 {progress.failed} · 执行中 {progress.running}</p>
+        <progress aria-label="代理测试进度" className="h-2 w-full" max={Math.max(1, progress.total)} value={progress.completed} />
+        {progress.state === "running" || progress.state === "queued" ? <><p>批量最多 {progress.concurrency} 条并行；单条测试使用独立名额。本轮结果逐条可见，健康状态在整批完成后保存。</p><Button type="button" size="sm" variant="outline" onClick={() => void cancelBatch()}>停止本轮测试</Button></> : null}
+      </div> : null}
+      {progressError ? <p role="alert" className="text-xs text-destructive">进度暂不可读：{progressError}</p> : null}
       <Input
         aria-label="搜索代理"
         placeholder="搜索名称、代理地址、备注、出口 IP"
@@ -226,7 +306,7 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
         <Button type="button" variant="outline" size="sm" disabled={busy || selectedCount === 0} onClick={() => confirmBulk("disable")}>禁用选中</Button>
         <Button type="button" variant="destructive" size="sm" disabled={busy || selectedCount === 0} onClick={() => confirmBulk("delete")}>删除选中</Button>
       </div>
-      <p className="text-muted-foreground text-xs">更改搜索或筛选会清空选择。失效清理覆盖整个代理池，按已保存的连续失败阈值（{healthThreshold} 次）判断，跳过当前使用项和未检测项。可先测试全部，稍后刷新状态再清理。</p>
+      <p className="text-muted-foreground text-xs">更改搜索或筛选会清空选择。失效清理覆盖整个代理池，按已保存的连续失败阈值（{healthThreshold} 次）判断，跳过当前使用项和未检测项。可先测试全部，进度与完成结果自动刷新。</p>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <span>共 {entries.length} 条，匹配 {filtered.length} 条，每页 {PROXY_POOL_PAGE_SIZE} 条</span>
         <div className="flex items-center gap-2">
@@ -247,6 +327,8 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
                 <div className="min-w-0">
                   <p className="text-muted-foreground">代理地址</p>
                   <p className="truncate font-mono" title={entry.url}>{entry.name ? `${entry.name} · ` : ""}{entry.url}</p>
+                  {entry.protocol_auto ? <p className="text-muted-foreground">{proxyProtocolStatus(entry)}</p> : null}
+                  {entry.protocol_checks?.length ? <details className="mt-1"><summary className="cursor-pointer">各代理协议检测详情</summary><ProtocolChecks checks={entry.protocol_checks} /></details> : null}
                 </div>
                 <div>
                   <p className="text-muted-foreground">探测出口 IP</p>
@@ -254,13 +336,14 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
                   {entry.last_error && entry.egress_ip ? <p className="text-muted-foreground">上次成功出口：{entry.egress_ip}</p> : null}
                 </div>
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <span className={proxyProbeStatus(entry, healthThreshold).tone === "healthy" ? "text-emerald-600" : proxyProbeStatus(entry, healthThreshold).tone === "failed" ? "text-destructive" : "text-muted-foreground"}>
+                  <span className={proxyProbeStatus(entry, healthThreshold).tone === "healthy" ? "text-emerald-600" : proxyProbeStatus(entry, healthThreshold).tone === "failed" ? "text-destructive" : proxyProbeStatus(entry, healthThreshold).tone === "limited" ? "text-amber-600" : "text-muted-foreground"}>
                     {proxyProbeStatus(entry, healthThreshold).label}
                   </span>
                   {entry.id === activeId && <span className="text-primary">当前使用</span>}
-                  <span className="text-muted-foreground">失败 {entry.consecutive_failures} 次</span>
+                  <span className="text-muted-foreground">检测失败 {entry.consecutive_failures} 次</span>
                 </div>
                 <div className="text-muted-foreground">
+                  {progress?.items[entry.id] && ["running", "queued"].includes(progress.state) ? <p data-testid="proxy-row-progress">本轮：{progress.items[entry.id].state === "done" ? (progress.items[entry.id].ok ? `通过 ${progress.items[entry.id].protocol?.toUpperCase() ?? ""} · ${progress.items[entry.id].ip ?? ""}` : `失败 · ${progress.items[entry.id].error ?? ""}`) : progress.items[entry.id].state === "running" ? "测试中…" : progress.items[entry.id].state === "superseded" ? "已由单条测试更新" : "等待测试"}</p> : null}
                   {entry.latency_ms != null ? `${entry.latency_ms} ms` : "暂无延迟数据"}
                   {entry.last_checked_at && !entry.last_checked_at.startsWith("0001-") && ` · ${new Date(entry.last_checked_at).toLocaleTimeString()}`}
                   {entry.last_error && <span className="text-destructive"> · {entry.last_error === "全部探测地址均失败" ? "历史检测失败，点击诊断查看当前原因" : entry.last_error}</span>}
@@ -268,8 +351,8 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
               </div>
             </div>
             <div className="flex justify-end gap-1">
-              <Button type="button" variant="ghost" size="sm" disabled={busy || !entry.enabled || entry.id === activeId} onClick={() => onActivate(entry.id)}>使用</Button>
-              <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => onTest(entry.id)}>测试</Button>
+              <Button type="button" variant="ghost" size="sm" disabled={busy || !entry.enabled || entry.id === activeId || (entry.protocol_auto && !entry.detected_protocol)} onClick={() => onActivate(entry.id)}>使用</Button>
+              <Button type="button" variant="ghost" size="sm" disabled={busy || !entry.enabled || testing.has(entry.id)} onClick={() => void testOne(entry.id)}>{testing.has(entry.id) ? "测试中…" : "测试"}</Button>
               <Button type="button" variant="ghost" size="sm" disabled={busy || !entry.enabled} onClick={() => void diagnose(entry)}>诊断</Button>
               <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => onDelete(entry.id)}>删除</Button>
             </div>
@@ -280,16 +363,21 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>代理 HTTP／HTTPS 诊断</DialogTitle>
-            <DialogDescription>已保存自定义探测服务时仅访问该服务；默认模式分别访问公开 HTTP／HTTPS 回显服务。HTTP 回显不证明 HTTPS 可信；诊断保留证书校验，结果不修改健康状态、当前出口或任务暂停状态。</DialogDescription>
+            <DialogDescription>分别检查代理连接协议和访问网站的 HTTP／HTTPS 能力。已保存自定义探测服务时仅访问该服务。HTTP 回显不能单独证明代理身份或 HTTPS 可信；诊断保留证书校验，不修改健康状态、当前出口或任务暂停状态。</DialogDescription>
           </DialogHeader>
           <p className="break-all font-mono text-xs">{diagnosis?.url}</p>
           {diagnosing ? <p role="status">正在诊断，请稍候…</p> : null}
           {diagnosis?.error ? <p role="alert" className="text-destructive">{diagnosis.error}</p> : null}
           {diagnosis?.result ? <div className="space-y-3">
+            {diagnosis.result.https.protocol_checks?.length ? <ProtocolChecks checks={diagnosis.result.https.protocol_checks} /> : <>
+            <p className="text-sm">代理连接协议：{diagnosis.result.https.via?.toUpperCase() || "按已配置协议"}</p>
             <DiagnosisResult label={proxyDiagnosisPrimaryLabel(diagnosis.result)} result={diagnosis.result.https} />
-            {diagnosis.result.http_skipped ? <p className="text-muted-foreground text-sm">已使用保存的探测服务，未额外访问公共 HTTP 回显地址。</p> : <DiagnosisResult label="HTTP（明文回显）" result={diagnosis.result.http} />}
-            {!diagnosis.result.http_skipped && diagnosis.result.http.ok && !diagnosis.result.https.ok ? <p className="text-amber-600 text-sm">HTTP 可用，HTTPS 检测失败。该代理尚未达到 HTTPS 健康条件。</p> : null}
+            {!diagnosis.result.http_skipped ? <DiagnosisResult label="访问 HTTP 网站（明文回显）" result={diagnosis.result.http} /> : null}
+            </>}
+            {diagnosis.result.http_skipped ? <p className="text-muted-foreground text-sm">已使用保存的探测服务，未额外访问公共 HTTP 回显地址。</p> : null}
+            {!diagnosis.result.http_skipped && diagnosis.result.http.ok && !diagnosis.result.https.ok ? <p className="text-amber-600 text-sm">仅访问 HTTP 网站回显通过，HTTPS 未通过；这不代表已找到可完整使用的代理协议。</p> : null}
             {diagnosis.result.probe_mode === "configured" ? <p className="break-all font-mono text-xs">探测服务：{diagnosis.result.probe_url}</p> : null}
+            {diagnosis.result.probe_mode === "configured" && diagnosis.result.https.protocol_checks?.length ? <p className="text-muted-foreground text-xs">自定义服务只验证其网址类型；恢复默认探测后可检查 HTTP 和 HTTPS 的完整访问能力。</p> : null}
             <p className="text-muted-foreground text-xs">本次诊断：{new Date(diagnosis.result.checked_at).toLocaleString()}</p>
           </div> : null}
           <Button type="button" variant="outline" onClick={closeDiagnosis}>关闭诊断</Button>

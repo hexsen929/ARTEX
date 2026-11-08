@@ -41,8 +41,11 @@ func VerificationLabel(s string) string {
 	}
 }
 func ValidateVerification(status, note, evidence string) error {
-	if !ValidVerificationStatus(status) || utf8.RuneCountInString(note) > 4000 {
+	if !ValidVerificationStatus(status) {
 		return ErrVerificationInput
+	}
+	if utf8.RuneCountInString(note) > 4000 {
+		return errors.Join(ErrVerificationInput, errors.New("验证说明最多4000字符，请精简 note 并将原始输出放入证据"))
 	}
 	if status == VerificationConfirmed && (strings.TrimSpace(evidence) == "" || strings.TrimSpace(note) == "") {
 		return errors.Join(ErrVerificationInput, errors.New("确认漏洞需提供证据和确认依据"))
@@ -80,7 +83,7 @@ func setFindingVerificationTx(ctx context.Context, tx *sql.Tx, id int64, status,
 		addition = strings.TrimSpace(additionalEvidence[0])
 	}
 	if utf8.RuneCountInString(addition) > 32000 {
-		return ErrVerificationInput
+		return errors.Join(ErrVerificationInput, errors.New("补充证据最多32000字符，请缩小输出范围"))
 	}
 	if addition != "" {
 		evidence = strings.TrimSpace(evidence + "\n\n补充验证证据：\n" + addition)

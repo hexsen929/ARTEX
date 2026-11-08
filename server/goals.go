@@ -158,6 +158,23 @@ func (s *Server) admitTaskWhenScheduledWithGenerationChecked(t *Task, mode strin
 		return false, fmt.Errorf("task is being deleted")
 	}
 	defer s.engine.decInflight(t.ID)
+	if s.engine.OutcomeRecoveryBlocked(t.ID) {
+		if scheduled || preserveSchedule {
+			return false, fmt.Errorf("Worker 结果恢复尚未完成，请手动恢复任务")
+		}
+		// The database outage may also have rejected startup's pause write.
+		// Persist it before clearing the recovery barrier so explicit resume
+		// still has its paused precondition, including if later admission fails.
+		state := t.lifecycleSnapshot()
+		if !state.Paused && !isTerminalStatus(state.Status) {
+			if err := s.m.ApplyTaskPauseOriginReason(t.ID, "outcome_recovery", false); err != nil {
+				return false, fmt.Errorf("Worker 结果恢复前保存暂停状态失败: %w", err)
+			}
+		}
+		if err := s.engine.recoverWorkerOutcomesBeforeStart(t); err != nil {
+			return false, fmt.Errorf("Worker 结果恢复失败，任务保持停止")
+		}
+	}
 	lifecycle := t.lifecycleSnapshot()
 	if scheduled {
 		var managed bool

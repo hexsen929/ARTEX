@@ -220,7 +220,7 @@ func TestStuckSuccessResetsFailureStreak(t *testing.T) {
 
 func TestStuckInterventionMessage(t *testing.T) {
 	msg := StuckIntervention(StuckEvent{Tool: "Bash", Kind: "same_signature", Count: 12, Signature: "abcd1234", N: 1})
-	for _, want := range []string{"【停滞检测】", "信息梯度为零", "换维度", "榨干", "请求转向", "12", "abcd1234"} {
+	for _, want := range []string{"【停滞检测】", "信息梯度为零", "审批/网络/模型/工具故障", "不证明整条方向已穷尽", "12", "abcd1234"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("干预消息缺少 %q:\n%s", want, msg)
 		}

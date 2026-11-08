@@ -40,9 +40,11 @@ type Compactor struct {
 	cooldown time.Duration // min gap between compactions per task (§7 60s)
 	maxDur   time.Duration // hard cap on one background compaction
 
-	mu      sync.Mutex
-	running map[int64]bool
-	lastRun map[int64]time.Time
+	mu       sync.Mutex
+	running  map[int64]bool
+	lastRun  map[int64]time.Time
+	nextRun  map[int64]time.Time
+	failures map[int64]int
 }
 
 // NewCompactor builds a compactor. prov/model are used for the §4 body LLM call
@@ -58,6 +60,7 @@ func NewCompactor(prov llm.Provider, model string) *Compactor {
 		maxDur:   5 * time.Minute,
 		running:  map[int64]bool{},
 		lastRun:  map[int64]time.Time{},
+		nextRun:  map[int64]time.Time{}, failures: map[int64]int{},
 	}
 }
 
@@ -84,8 +87,9 @@ func (c *Compactor) OnPlannerRound(ctx context.Context, ts *db.ExplorationStore)
 	}
 	go func() {
 		defer c.finish(ts.ID())
-		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.maxDur)
+		bg, cancel := context.WithTimeout(ctx, c.maxDur)
 		defer cancel()
+		bg = context.WithValue(bg, compactionRoundKey{}, new(compactionRound))
 		// 压缩是裸 provider 调用（compress 里直接 prov.Complete），不经过 agentcore
 		// 的会话循环，所以 ctx 上没有 session id；按 session-id 头做提示缓存/粘性
 		// 路由的网关（opencode zen 缺 x-opencode-session 直接 400）就收不到该头。
@@ -174,12 +178,18 @@ func (c *Compactor) minor(ctx context.Context, ts *db.ExplorationStore) {
 			uncompressed[id] = true
 		}
 	}
-	blocks := g.group(uncompressed, c.params)
+	blocks := boundedCompactionBlocks(g.group(uncompressed, c.params))
 	if len(blocks) == 0 {
 		return // this batch has no ≥2 connected/shared-parent block — nothing to fold (§7)
 	}
 	for _, b := range blocks {
-		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, nil))
+		if ctx.Err() != nil {
+			return
+		}
+		if err := c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, nil)); err != nil {
+			c.deferCompaction(ts.ID(), err)
+			return
+		}
 	}
 	// A minor may have pushed the segment count over M → merge in the same run.
 	if ad, e := ts.ActiveDigests(); e == nil && len(ad) >= c.m {
@@ -215,7 +225,7 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 	}
 	hot := g.hotSet()
 	elig := g.eligibleCold(g.structuralCold(hot), stamps, round, c.params)
-	blocks := g.group(elig, c.params)
+	blocks := boundedCompactionBlocks(g.group(elig, c.params))
 
 	bySig := map[string]*db.Node{}
 	for _, d := range active {
@@ -232,8 +242,8 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 		}
 		toCreate = append(toCreate, b)
 	}
-	// Supersede stale digests FIRST (atomic drop of their covers edges) so a member
-	// is never covered by both an old and a new digest (§5.1 one-member-one-digest).
+	// Keep previous coverage until replacements have actually been saved. A model
+	// failure or exhausted round must not erase the last usable summaries.
 	var stale []int64
 	for _, d := range active {
 		sig, _ := digestSigGen(d)
@@ -241,11 +251,19 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 			stale = append(stale, d.ID)
 		}
 	}
-	if err := ts.SupersedeDigests(stale); err != nil {
-		log.Printf("[compaction] supersede exp=%d: %v", ts.ID(), err)
-	}
 	for _, b := range toCreate {
-		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, active))
+		if ctx.Err() != nil {
+			return
+		}
+		if err := c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, active)); err != nil {
+			c.deferCompaction(ts.ID(), err)
+			return
+		}
+	}
+	if ctx.Err() == nil {
+		if err := ts.SupersedeDigests(stale); err != nil {
+			log.Printf("[compaction] supersede exp=%d failed", ts.ID())
+		}
 	}
 }
 
@@ -253,32 +271,42 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 // liveness recheck (§ concurrency): between grouping and write the graph may have
 // changed, so any member that has since gone hot (revived) is dropped from the
 // covers set. If the block dissolves below K it is skipped.
-func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *coldGraph, b block, nodeByID map[int64]*db.Node, cvers map[int64]int, generation int) {
+func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *coldGraph, b block, nodeByID map[int64]*db.Node, cvers map[int64]int, generation int) error {
 	body, err := c.compress(ctx, g, b, nodeByID)
 	if err != nil {
-		log.Printf("[compaction] compress exp=%d block=%v: %v", ts.ID(), b.Members, err)
-		return
+		log.Printf("[compaction] compress exp=%d deferred; previous summaries retained", ts.ID())
+		return err
 	}
-	// Re-read fresh state and drop any member that revived while we compressed.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Reject the whole summary if a member revived while we compressed: removing
+	// its coverage alone would retain generated text that still describes it.
 	fresh, _, err := loadColdGraph(ts)
 	if err != nil {
-		return
+		return err
 	}
 	freshHot := fresh.hotSet()
-	members := make([]int64, 0, len(b.Members))
+	members := append([]int64(nil), b.Members...)
+	sources := make(map[int64]*db.Node, len(b.Members)+len(b.Anchors))
 	for _, mID := range b.Members {
-		if !freshHot[mID] {
-			members = append(members, mID)
+		if freshHot[mID] {
+			return db.ErrDigestSnapshotChanged
 		}
+		sources[mID] = nodeByID[mID]
+	}
+	for _, id := range b.Anchors {
+		sources[id] = nodeByID[id]
 	}
 	if len(members) < c.params.K {
-		return // block revived out from under us — leave those nodes hot, don't fold
+		return fmt.Errorf("compaction members changed; retry next round")
 	}
 	final := block{Members: members, Anchors: b.Anchors}
 	payload := digestPayload(body, final, nodeByID, generation, blockSignature(final, cvers))
-	if _, err := ts.AddDigest(payload, members); err != nil {
-		log.Printf("[compaction] add digest exp=%d: %v", ts.ID(), err)
+	if _, err := ts.AddDigestFromSnapshot(ctx, payload, members, sources); err != nil {
+		return err
 	}
+	return nil
 }
 
 // generationFor computes a digest's重摘代次 (§1): 1 for a fresh fold; for a major
@@ -314,6 +342,9 @@ func (c *Compactor) tryStart(expID int64) bool {
 	if c.running[expID] {
 		return false
 	}
+	if time.Now().Before(c.nextRun[expID]) {
+		return false
+	}
 	if t, ok := c.lastRun[expID]; ok && time.Since(t) < c.cooldown {
 		return false
 	}
@@ -326,6 +357,10 @@ func (c *Compactor) finish(expID int64) {
 	defer c.mu.Unlock()
 	c.running[expID] = false
 	c.lastRun[expID] = time.Now()
+	if !time.Now().Before(c.nextRun[expID]) {
+		delete(c.failures, expID)
+		delete(c.nextRun, expID)
+	}
 }
 
 // --- helpers: db ↔ coldgraph ---
@@ -473,9 +508,9 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 		if n != nil {
 			state = n.State
 		}
-		line := fmt.Sprintf("- #%d [%s/%s] %s", m, kind, state, nodeSummary(n))
+		line := fmt.Sprintf("- #%d [%s/%s] %s", m, kind, state, compressionNodeSummary(n))
 		if conf := nodeConfidence(n); conf != "" {
-			line += fmt.Sprintf(" (confidence=%s)", conf)
+			line += fmt.Sprintf(" (confidence=%s)", boundedCompressionText(conf, 32))
 		}
 		sb.WriteString(line)
 		sb.WriteByte('\n')
@@ -497,13 +532,13 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 	}
 	if len(b.Anchors) > 0 {
 		sb.WriteString("\n【共同父 / 上下文锚（不是成员，只用于理解这些结果从哪个意图探出）】：\n")
-		for _, a := range b.Anchors {
+		for _, a := range b.Anchors[:min(8, len(b.Anchors))] {
 			n := nodeByID[a]
 			state := ""
 			if n != nil {
 				state = n.State
 			}
-			fmt.Fprintf(&sb, "- #%d [%s] %s\n", a, state, nodeSummary(n))
+			fmt.Fprintf(&sb, "- #%d [%s] %s\n", a, state, compressionNodeSummary(n))
 		}
 	}
 	return sb.String()
@@ -512,9 +547,24 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 // compress runs the §4 body LLM call on one block. Uses the same model the agent
 // runs on; thinking disabled (a pure summarization step).
 func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByID map[int64]*db.Node) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if round, _ := ctx.Value(compactionRoundKey{}).(*compactionRound); round != nil {
+		if round.calls >= 8 {
+			return "", errCompactionRoundBudget
+		}
+		round.calls++
+	}
+	input := buildCompressionInput(g, b, nodeByID)
+	if len(input) > 128*1024 {
+		return "", fmt.Errorf("compaction input exceeds bounded batch size")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
 	req := llm.CompletionRequest{
 		System:    []string{compressionSystemPrompt},
-		Messages:  []llm.Message{llm.UserText(buildCompressionInput(g, b, nodeByID))},
+		Messages:  []llm.Message{llm.UserText(input)},
 		MaxTokens: 1500,
 		Thinking:  "disabled",
 	}
@@ -540,7 +590,7 @@ const compressionSystemPrompt = `你在压缩一组【彼此关联】的探索�
 据此写一段 body：
 1. 综合、不罗列：顺着关系把因果串起来（哪个事实催生哪个意图、哪条意图产出了哪个结论），讲成"这一片探索得出了什么"，不要把每条 summary 抄一遍。
 2. 保留区分度：彼此不同的结论分别说清，别揉成一句笼统的话。
-3. 保留证据强度：带 confidence 的结论标出 observed / inferred；inferred 的否定/存疑结论要点明它只是推断、可复核，别写成定论。
+3. 保留证据强度：带 confidence 的结论标出 observed / inferred；inferred 的否定/存疑结论要点明它只是推断、可复核，别写成定论。事实带 tested_scope 时必须保留测过的身份、对象、条件及未测边界；未记录范围或 has_verification_evidence=false 时保留该限制，不把历史 confirmed 标签扩成全站安全或永久关闭路线。
 4. 带上 id：每条结论后标注来源节点 id（如"…（#12,#28）"），让规划者能按 id 还原原节点。
 5. 正向陈述、只写输入里有的：不脑补、不引入输入中没有的判断。
 6. 长度随内容自适应：结论少就短，多且互不相同就写够——但整体显著短于所有输入 summary 的总和。
