@@ -146,7 +146,7 @@ test("merged settings retain callback and inline merge cards behind the new cate
   assert.match(page, /onCheckedChange=\{\(enabled\) => void toggleInlineFindingMerge\(enabled\)\}/);
   assert.match(page, /const apply = React\.useCallback\(\(s: Settings\) => \{\s*try \{\s*assertSettingsSnapshot\(s, MAX_TASK_WORKER_COUNT\)/);
   assert.doesNotMatch(page, /setWorkerPools\(s\.worker_pools \?\? \[\]\)/);
-  assert.match(page, /未配置时使用公共 IP 回显服务/);
+  assert.match(page, /未配置时不查询 IP/);
 });
 
 test("egress provider suppresses stale results and consumes rejected UI promises", () => {

@@ -331,7 +331,7 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
                   {entry.protocol_checks?.length ? <details className="mt-1"><summary className="cursor-pointer">各代理协议检测详情</summary><ProtocolChecks checks={entry.protocol_checks} /></details> : null}
                 </div>
                 <div>
-                  <p className="text-muted-foreground">探测出口 IP</p>
+                  <p className="text-muted-foreground">HTTPS 连通性</p>
                   <p className="break-all font-mono">{entry.last_error ? "最近检测未通过" : entry.last_probe_kind === "connectivity" ? `通过 · HTTP ${entry.last_http_status ?? "成功"}` : entry.egress_ip ? "历史回显结果，需重新检测" : "尚未测试"}</p>
                   {entry.last_error && entry.egress_ip ? <p className="text-muted-foreground">上次成功出口：{entry.egress_ip}</p> : null}
                 </div>
@@ -362,7 +362,7 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
       <Dialog open={diagnosis !== null} onOpenChange={(open) => { if (!open) closeDiagnosis(); }}>
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>代理 HTTP／HTTPS 诊断</DialogTitle>
+            <DialogTitle>代理协议与连通性诊断</DialogTitle>
             <DialogDescription>通过所选代理访问 HTTPS 检测页并校验证书，不要求返回出口 IP。自定义检测网址只访问该站点。诊断不修改健康状态、当前出口或任务暂停状态。</DialogDescription>
           </DialogHeader>
           <p className="break-all font-mono text-xs">{diagnosis?.url}</p>

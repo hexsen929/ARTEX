@@ -113,3 +113,13 @@ test("single proxy diagnostics binds the stable member ID and forwards cancellat
   assert.equal(calls[0].init.signal, controller.signal);
   assert.equal(calls[0].init.body, "{}");
 });
+
+test("connectivity testing and optional IP lookup use different endpoints", async () => {
+  const calls=[];
+  const api=client({ok:true},calls);
+  await api.testProxyHealth({global_proxy:"http://proxy.fixture.invalid:8080",probe_url:""});
+  await api.testEgressProxy({global_proxy:"http://proxy.fixture.invalid:8080",probe_url:"https://owned.fixture.invalid/ip"});
+  assert.deepEqual(calls.map((call)=>call.url),["/api/settings/proxy/health-test","/api/settings/proxy/test"]);
+  assert.equal(JSON.parse(calls[0].init.body).resume,undefined);
+  assert.equal(JSON.parse(calls[1].init.body).resume,undefined);
+});

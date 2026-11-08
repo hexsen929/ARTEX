@@ -190,7 +190,7 @@ func (s *Server) finishProxyProbeRound(round *proxyProbeRound, state string) {
 }
 
 // Protocol observations are independent of route eligibility. Automatic
-// selection requires both HTTP and verified HTTPS; explicit schemes stay fixed.
+// selection requires verified HTTPS connectivity; explicit schemes stay fixed.
 func (s *Server) probePoolEntry(parent context.Context, e proxyPoolEntry, selectedProbes ...[]string) (egressProbeResult, string) {
 	ctx, cancel := context.WithTimeout(parent, proxyPoolProbeTimeout)
 	defer cancel()

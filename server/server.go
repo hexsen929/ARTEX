@@ -4145,7 +4145,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		ProxyReconnectMax      *int          `json:"proxy_reconnect_max_attempts"`
 		ProxyReconnectInterval *int          `json:"proxy_reconnect_interval_seconds"`
 		ShowEgressIP           *bool         `json:"show_egress_ip"`   // 在顶栏显示直连/全局代理出口 IP；默认关
-		EgressProbeURL         *string       `json:"egress_probe_url"` // null=不改；空串=默认公共探测服务
+		EgressProbeURL         *string       `json:"egress_probe_url"` // null=不改；空串=不查询 IP
 		ProxyHealthURL         *string       `json:"proxy_health_check_url"`
 		PythonInterp           *string       `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
 		Workers                *int          `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效

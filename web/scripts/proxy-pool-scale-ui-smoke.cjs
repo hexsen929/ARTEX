@@ -389,7 +389,7 @@ async function main() {
     const beforeDiagnosis = JSON.stringify(settings);
     const settingsReadsBeforeDiagnosis = callCount("/api/settings");
     await selectedRow.getByRole("button", { name: "诊断", exact: true }).click();
-    const diagnosisDialog = () => page.getByRole("dialog", { name: "代理 HTTP／HTTPS 诊断", exact: true });
+    const diagnosisDialog = () => page.getByRole("dialog", { name: "代理协议与连通性诊断", exact: true });
     await diagnosisDialog().getByText("访问 HTTPS 网站（校验证书）：失败", { exact: true }).waitFor();
     await diagnosisDialog().getByText("访问 HTTP 网站（明文回显）：回显成功", { exact: true }).waitFor();
     await diagnosisDialog().getByText("仅访问 HTTP 网站回显通过，HTTPS 未通过；这不代表已找到可完整使用的代理协议。", { exact: true }).waitFor();

@@ -220,7 +220,7 @@ async function main() {
     await gotoProbe(); assert.equal(await input().inputValue(), nextURL);
     console.log("PASS saved custom egress probe URL loads, saves and survives reload without changing proxy state");
 
-    const diagnosisDialog = () => page.getByRole("dialog", { name: "代理 HTTP／HTTPS 诊断", exact: true });
+    const diagnosisDialog = () => page.getByRole("dialog", { name: "代理协议与连通性诊断", exact: true });
     const explicitRow = page.getByTestId("proxy-pool-row").filter({ hasText: "FIXTURE_PROXY_0 ·" });
     await explicitRow.getByRole("button", { name: "诊断", exact: true }).click();
     await diagnosisDialog().getByText("HTTPS 连通性（校验证书）：通过", { exact: true }).waitFor();

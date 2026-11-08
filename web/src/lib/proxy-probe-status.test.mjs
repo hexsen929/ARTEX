@@ -59,3 +59,12 @@ test("configured HTTP services are not mislabeled HTTPS and do not invent an ext
   }
   for (const patch of [{ http_skipped: true }, { probe_url: "http://echo.fixture.invalid/ip" }]) assert.throws(() => assertProxyDiagnosis({ ...report, ...patch }, "fixture"));
 });
+
+test("connectivity success validates status without requiring an exit IP", () => {
+  const health = { ...report, probe_kind:"connectivity", probe_mode:"default", probe_url:"", http_skipped:true,
+    https:{kind:"connectivity",ok:true,status_code:204,latency_ms:12,probes:[]},
+    http:{ok:false,error:"未检查",latency_ms:0,probes:[]} };
+  assert.equal(assertProxyDiagnosis(health,"fixture"),health);
+  assert.equal(proxyDiagnosisPrimaryLabel(health),"HTTPS 连通性（校验证书）");
+  for (const status_code of [undefined,0,302,403,500]) assert.throws(()=>assertProxyDiagnosis({...health,https:{...health.https,status_code}},"fixture"));
+});

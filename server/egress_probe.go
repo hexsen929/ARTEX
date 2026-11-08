@@ -452,7 +452,7 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 func (s *Server) testProxyPaths(w http.ResponseWriter, r *http.Request, connectivity bool) {
 	var req struct {
 		GlobalProxy string  `json:"global_proxy"`
-		ProbeURL    *string `json:"probe_url"` // 省略=已保存地址；空串=默认；非空=临时覆盖
+		ProbeURL    *string `json:"probe_url"` // 省略=已保存地址；IP查询空串=禁用；健康检测空串=默认检测页
 	}
 	// 请求体只有一个地址，给个上限，免得被塞大 payload。
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
