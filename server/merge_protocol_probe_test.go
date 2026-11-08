@@ -113,6 +113,9 @@ func TestMergeProtocolProbeServiceChangeDiscardsInFlightAutoRound(t *testing.T) 
 			t.Fatal("protocol candidates did not start")
 		}
 	}
+	m.proxyPool.mu.Lock()
+	previousRound := m.proxyPool.probeRound
+	m.proxyPool.mu.Unlock()
 	if err := m.pg.SetSetting(settingEgressProbeURL, "https://second.fixture.invalid/ip"); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +130,11 @@ func TestMergeProtocolProbeServiceChangeDiscardsInFlightAutoRound(t *testing.T) 
 	if !stored.LastCheckedAt.IsZero() || stored.DetectedProtocol != "" || len(stored.ProtocolChecks) != 0 || m.GlobalProxy() != "" || !m.proxyPool.forceHealth {
 		t.Fatal("old service published health or lost retry", stored)
 	}
-	if m.proxyPool.probeRound.State != "superseded" {
-		t.Fatal("progress claimed success for superseded service", m.proxyPool.probeRound.State)
+	if previousRound.State != "superseded" {
+		t.Fatal("old progress claimed success for superseded service", previousRound.State)
+	}
+	queued := m.proxyPool.probeRound
+	if queued == previousRound || queued.State != "queued" || queued.generation != m.proxyPool.generation || queued.Completed != 0 {
+		t.Fatal("forced retry did not queue fresh progress", queued.State)
 	}
 }
