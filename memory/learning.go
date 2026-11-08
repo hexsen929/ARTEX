@@ -23,9 +23,9 @@ const (
 	// qualification is truncated to fit the envelope.
 	MaxInputBytes    = 12_000
 	MaxOutputBytes   = 16_384
-	MaxOutputTokens  = 1_500
+	MaxOutputTokens  = 3_000
 	MaxDrafts        = 3
-	MaxDuration      = 45 * time.Second
+	MaxDuration      = 60 * time.Second
 	MaxRetryDuration = 90 * time.Second
 
 	// Automatic notes must fit as complete reference material, not merely an
@@ -149,14 +149,10 @@ func ExtractDetailed(ctx context.Context, provider llm.Provider, model string, i
 // allowance; malformed output and transport failures do not. It does not raise
 // the stored-note limits, retry count or hourly request quota.
 func ExtractionLimits(truncations int) (int, time.Duration) {
-	switch {
-	case truncations <= 0:
+	if truncations <= 0 {
 		return MaxOutputTokens, MaxDuration
-	case truncations == 1:
-		return 3_000, 60 * time.Second
-	default:
-		return 6_000, MaxRetryDuration
 	}
+	return 6_000, MaxRetryDuration
 }
 
 // ExtractAfterTruncations still makes exactly one completion. The worker owns

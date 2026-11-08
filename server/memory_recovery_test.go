@@ -69,14 +69,18 @@ func TestMemoryWorkerRecoversTruncatedResponsesWithBoundedBudget(t *testing.T) {
 			}
 			f.server.llmDirect, f.server.llmCfg = provider, cfg
 			var jobID int64
-			for attempt := 1; attempt <= 3; attempt++ {
+			rounds := 2
+			if finish == "still truncated" {
+				rounds = 3
+			}
+			for attempt := 1; attempt <= rounds; attempt++ {
 				if err := f.server.memoryWorkerTickResult(t.Context()); err != nil {
 					t.Fatal(err)
 				}
 				id, state, result, tries := memoryOutcomeJobState(t, f, task.ID)
 				jobID = id
 				wantState, wantResult := "failed", "output_truncated"
-				if attempt == 3 {
+				if attempt == rounds {
 					wantState = "skipped"
 					if finish == "valid" {
 						wantState, wantResult = "done", "saved"
@@ -96,14 +100,16 @@ func TestMemoryWorkerRecoversTruncatedResponsesWithBoundedBudget(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			if len(budgets) != 3 || budgets[0] != 1500 || budgets[1] != 3000 || budgets[2] != 6000 {
+			if len(budgets) != rounds || budgets[0] != 3000 {
 				t.Fatalf("wire budgets or three-attempt cap changed: %v", budgets)
 			}
-			if inputs[0] != inputs[1] || inputs[1] != inputs[2] {
-				t.Fatal("recovery changed source conditions or replayed truncated output")
+			for i := 1; i < rounds; i++ {
+				if budgets[i] != 6000 || inputs[i] != inputs[0] {
+					t.Fatal("recovery changed its budget, source conditions or replayed truncated output")
+				}
 			}
 			var admitted int
-			if err := f.pg.QueryRow(`SELECT count(*) FROM memory_audit WHERE job_id=$1 AND action='extract_admitted'`, jobID).Scan(&admitted); err != nil || admitted != 3 {
+			if err := f.pg.QueryRow(`SELECT count(*) FROM memory_audit WHERE job_id=$1 AND action='extract_admitted'`, jobID).Scan(&admitted); err != nil || admitted != rounds {
 				t.Fatalf("actual HTTP attempts bypassed admission: %d %v", admitted, err)
 			}
 			entries, _, err := f.pg.ListMemoryEntries(t.Context(), db.MemoryFilter{TaskID: task.ID, State: "active"}, 0, 20)
@@ -137,7 +143,7 @@ func TestMemoryWorkerRecoveryDeadlineFitsLease(t *testing.T) {
 		deadline, ok := ctx.Deadline()
 		var lease time.Time
 		if err := f.pg.QueryRow(`SELECT lease_until FROM memory_jobs WHERE id=$1`, job.ID).Scan(&lease); err != nil || !ok || !lease.After(deadline.Add(15*time.Second)) || time.Until(deadline) > 90*time.Second || time.Until(deadline) < 85*time.Second {
-			t.Fatal("largest recovery deadline exceeded its claim lease or kept the old 45s limit")
+			t.Fatal("largest recovery deadline exceeded its claim lease or kept the initial limit")
 		}
 		if err := memcontext.Validate(ctx); err != nil {
 			return llm.Message{}, "", llm.Usage{}, err

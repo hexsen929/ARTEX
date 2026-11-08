@@ -13,7 +13,7 @@ func TestExtractDetailedTruncationRecoveryRemainsBounded(t *testing.T) {
 	for _, tc := range []struct {
 		truncations, tokens int
 		duration            time.Duration
-	}{{-1, 1500, 45 * time.Second}, {0, 1500, 45 * time.Second}, {1, 3000, time.Minute}, {2, 6000, 90 * time.Second}, {99, 6000, 90 * time.Second}} {
+	}{{-1, 3000, time.Minute}, {0, 3000, time.Minute}, {1, 6000, 90 * time.Second}, {2, 6000, 90 * time.Second}, {99, 6000, 90 * time.Second}} {
 		provider := &fixtureProvider{complete: func(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 			deadline, ok := ctx.Deadline()
 			if req.MaxTokens != tc.tokens || !ok || time.Until(deadline) > tc.duration || time.Until(deadline) < tc.duration-time.Second {
