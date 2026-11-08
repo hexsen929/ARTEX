@@ -377,6 +377,7 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
             {diagnosis.result.http_skipped ? <p className="text-muted-foreground text-sm">已使用保存的探测服务，未额外访问公共 HTTP 回显地址。</p> : null}
             {!diagnosis.result.http_skipped && diagnosis.result.http.ok && !diagnosis.result.https.ok ? <p className="text-amber-600 text-sm">仅访问 HTTP 网站回显通过，HTTPS 未通过；这不代表已找到可完整使用的代理协议。</p> : null}
             {diagnosis.result.probe_mode === "configured" ? <p className="break-all font-mono text-xs">探测服务：{diagnosis.result.probe_url}</p> : null}
+            {diagnosis.result.probe_mode === "configured" && diagnosis.result.https.protocol_checks?.length ? <p className="text-muted-foreground text-xs">自定义服务只验证其网址类型；恢复默认探测后可检查 HTTP 和 HTTPS 的完整访问能力。</p> : null}
             <p className="text-muted-foreground text-xs">本次诊断：{new Date(diagnosis.result.checked_at).toLocaleString()}</p>
           </div> : null}
           <Button type="button" variant="outline" onClick={closeDiagnosis}>关闭诊断</Button>
