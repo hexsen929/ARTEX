@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -45,46 +45,18 @@ func TestProxyProtocolHTTPResponsesDoNotProveHTTPSOrProxyIdentity(t *testing.T) 
 	}
 }
 
-func TestProxyProtocolSOCKS4ResponseRecognizedButNotRoutable(t *testing.T) {
-	for _, replyCode := range []byte{90, 91, 92, 93, 0} {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			defer conn.Close()
-			_ = conn.SetDeadline(time.Now().Add(time.Second))
-			request := make([]byte, 23)
-			if _, err := io.ReadFull(conn, request[:9]); err != nil {
-				return
-			}
-			if request[0] != 4 || request[1] != 1 || request[8] != 0 {
-				return
-			}
-			_, _ = conn.Write([]byte{0, replyCode, 0, 0, 0, 0, 0, 0})
-		}()
-		entry := proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ID: "socks4", ProtocolAuto: true, Enabled: true}, RawURL: "http://" + listener.Addr().String()}
-		s := &Server{proxyProbe: func(context.Context, string, string, []string, time.Duration) egressProbeResult {
-			return egressProbeResult{Error: "fixture transport failure", ErrorCode: "proxy_transport", Probes: []egressAttempt{}}
-		}}
-		result, raw := s.probePoolEntry(t.Context(), entry)
-		_ = listener.Close()
-		<-done
-		if result.OK || raw != "" || len(result.ProtocolChecks) != 4 || result.ProtocolChecks[3].Supported {
-			t.Fatal(result, raw)
-		}
-		if result.ProtocolChecks[3].Recognized != (replyCode != 0) {
-			t.Fatal("invalid SOCKS4 classification", replyCode, result)
-		}
-		if replyCode != 0 && result.ErrorCode != "unsupported_proxy_protocol" {
-			t.Fatal("SOCKS4 support was implied", result)
-		}
+func TestProxyProtocolSOCKS4RemainsUnsupportedWithoutExternalProbe(t *testing.T) {
+	var calls atomic.Int32
+	s := &Server{proxySOCKS4Probe: func(context.Context, string) (bool, string) {
+		t.Fatal("unsupported protocol sent external probe")
+		return false, ""
+	}, proxyProbe: func(context.Context, string, string, []string, time.Duration) egressProbeResult {
+		calls.Add(1)
+		return egressProbeResult{Error: "fixture", ErrorCode: "proxy_transport", Probes: []egressAttempt{}}
+	}}
+	result, raw := s.probePoolEntry(t.Context(), proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ProtocolAuto: true}, RawURL: "http://proxy.invalid:8080"})
+	if result.OK || raw != "" || len(result.ProtocolChecks) != 4 || result.ProtocolChecks[3].Supported || result.ProtocolChecks[3].Recognized || calls.Load() != 3 {
+		t.Fatal(result, raw, calls.Load())
 	}
 }
 
@@ -157,7 +129,7 @@ func TestProxyProtocolAutoDiagnosisUsesAllCandidatesAndDoesNotMutate(t *testing.
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != 200 || result.HTTPS.OK || !result.HTTP.OK || result.HTTP.Via != "socks5" || result.HealthUpdated || len(result.HTTPS.ProtocolChecks) != 4 {
+	if w.Code != 200 || result.HTTPS.OK || result.HTTP.OK || result.HTTP.ErrorCode != "not_requested" || result.HealthUpdated || len(result.HTTPS.ProtocolChecks) != 4 {
 		t.Fatal(w.Body.String())
 	}
 	stored := s.m.proxyPoolEntries()[0]
@@ -168,9 +140,9 @@ func TestProxyProtocolAutoDiagnosisUsesAllCandidatesAndDoesNotMutate(t *testing.
 
 func TestProxyProtocolCancellationJoinsEveryCandidate(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
-	started := make(chan struct{}, 8)
+	started := make(chan struct{}, 3)
 	var joined sync.WaitGroup
-	joined.Add(8)
+	joined.Add(3)
 	s := &Server{
 		proxyProbe: func(ctx context.Context, _, _ string, _ []string, _ time.Duration) egressProbeResult {
 			started <- struct{}{}
@@ -190,7 +162,7 @@ func TestProxyProtocolCancellationJoinsEveryCandidate(t *testing.T) {
 		defer close(done)
 		s.probePoolEntry(ctx, proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ProtocolAuto: true}, RawURL: "http://proxy.invalid:8080"})
 	}()
-	for range 8 {
+	for range 3 {
 		select {
 		case <-started:
 		case <-time.After(time.Second):
@@ -241,39 +213,35 @@ func TestProxyProtocolAutoSelectsCompleteProtocolWithoutCandidateVeto(t *testing
 	}
 }
 
-func TestProxyProtocolPartialCapabilityNeverBecomesCompleteRoute(t *testing.T) {
+func TestProxyProtocolHTTPSHealthDoesNotDependOnPlainHTTPEcho(t *testing.T) {
 	for _, available := range []string{"http://", "https://"} {
-		s := &Server{
-			proxySOCKS4Probe: func(context.Context, string) (bool, string) { return false, "fixture" },
-			proxyProbe: func(_ context.Context, raw, _ string, probes []string, _ time.Duration) egressProbeResult {
-				if raw == "http://proxy.invalid:8080" && strings.HasPrefix(probes[0], available) {
-					return egressProbeResult{OK: true, ExitIP: "192.0.2.12", Probes: []egressAttempt{}}
-				}
-				return egressProbeResult{Error: "fixture failure", ErrorCode: "proxy_transport", Probes: []egressAttempt{}}
-			},
-		}
+		s := &Server{proxyProbe: func(_ context.Context, raw, _ string, probes []string, _ time.Duration) egressProbeResult {
+			if raw == "http://proxy.invalid:8080" && strings.HasPrefix(probes[0], available) {
+				return egressProbeResult{Kind: "connectivity", OK: true, StatusCode: 204, Probes: []egressAttempt{}}
+			}
+			return egressProbeResult{Error: "fixture failure", ErrorCode: "proxy_transport", Probes: []egressAttempt{}}
+		}}
 		res, raw := s.probePoolEntry(t.Context(), proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ProtocolAuto: true}, RawURL: "http://proxy.invalid:8080"})
-		if res.OK || raw != "" {
-			t.Fatal("partial capability became a complete route", available, res, raw)
-		}
-		if res.ProtocolChecks[0].HTTP.OK != (available == "http://") || res.ProtocolChecks[0].HTTPS.OK != (available == "https://") {
-			t.Fatal("partial capability was discarded", res)
+		if res.OK != (available == "https://") || (res.OK && raw == "") || res.ProtocolChecks[0].HTTP.Checked {
+			t.Fatal("IP/plain HTTP affected TLS health", available, res, raw)
 		}
 	}
 }
 
-func TestProxyProtocolNegativeControlBlocksTransparentHTTPFalsePositive(t *testing.T) {
-	s := &Server{
-		proxySOCKS4Probe: func(context.Context, string) (bool, string) { return false, "fixture" },
-		proxyProbe: func(_ context.Context, raw, _ string, probes []string, _ time.Duration) egressProbeResult {
-			if strings.HasPrefix(raw, "http://") && strings.HasPrefix(probes[0], "http://") {
-				return egressProbeResult{OK: true, ExitIP: "192.0.2.11", Probes: []egressAttempt{}}
+func TestProxyProtocolNoIPLookupOrNegativeControlRequests(t *testing.T) {
+	s := &Server{proxyProbe: func(_ context.Context, raw, _ string, probes []string, _ time.Duration) egressProbeResult {
+		if strings.Contains(raw, "203.0.113.1") {
+			t.Error("sent a negative-control request")
+		}
+		for _, probe := range probes {
+			if !strings.HasPrefix(probe, "https://") || strings.Contains(probe, "ipify") || strings.Contains(probe, "ifconfig") {
+				t.Error("sent non-health request", probe)
 			}
-			return egressProbeResult{Error: "CONNECT 被拒绝", ErrorCode: "proxy_connect_rejected", Probes: []egressAttempt{}}
-		},
-	}
-	result, raw := s.probePoolEntry(t.Context(), proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ProtocolAuto: true}, RawURL: "http://proxy.invalid:80"})
-	if result.OK || raw != "" || !result.ProtocolChecks[0].HTTP.OK || !result.ProtocolChecks[0].AutoSelectionBlocked {
-		t.Fatal("transparent HTTP false positive became a proxy route", result, raw)
+		}
+		return egressProbeResult{Kind: "connectivity", OK: true, StatusCode: 204, Probes: []egressAttempt{}}
+	}}
+	res, raw := s.probePoolEntry(t.Context(), proxyPoolEntry{ProxyPoolEntry: ProxyPoolEntry{ProtocolAuto: true}, RawURL: "http://proxy.invalid:8080"})
+	if !res.OK || raw == "" || res.ExitIP != "" {
+		t.Fatal(res, raw)
 	}
 }

@@ -75,7 +75,7 @@ func TestEgressProbeSettingsPersistence(t *testing.T) {
 		}
 	}
 	assertResponse(http.MethodGet, "", "")
-	if got := m.egressProbes(); !reflect.DeepEqual(got, defaultEgressProbes) {
+	if got := m.egressProbes(); len(got) != 0 {
 		t.Fatalf("default probes=%v", got)
 	}
 	const custom = "http://192.168.132.130:19000/ip"
@@ -96,7 +96,7 @@ func TestEgressProbeSettingsPersistence(t *testing.T) {
 		t.Fatalf("reloaded probes=%v", got)
 	}
 	assertResponse(http.MethodPut, `{"egress_probe_url":"  "}`, "")
-	if got := reloaded.egressProbes(); !reflect.DeepEqual(got, defaultEgressProbes) {
+	if got := reloaded.egressProbes(); len(got) != 0 {
 		t.Fatalf("cleared probes=%v", got)
 	}
 }
@@ -117,8 +117,7 @@ func TestEgressProbeSavedAndTemporaryURLs(t *testing.T) {
 		{"navbar uses saved", `{}`, []string{saved}},
 		{"null uses saved", `{"probe_url":null}`, []string{saved}},
 		{"unsaved override", `{"probe_url":" https://example.com/ip "}`, []string{"https://example.com/ip"}},
-		{"empty previews defaults", `{"probe_url":""}`, defaultEgressProbes},
-		{"whitespace previews defaults", `{"probe_url":"  "}`, defaultEgressProbes},
+
 		{"global proxy uses saved", `{"global_proxy":"http://10.0.0.9:8080"}`, []string{saved}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -155,11 +154,11 @@ func TestEgressProbeSavedAndTemporaryURLs(t *testing.T) {
 	}
 }
 
-func TestProxyPoolHealthUsesSavedEgressProbe(t *testing.T) {
+func TestProxyPoolHealthUsesSavedHealthURL(t *testing.T) {
 	m := proxyTestManager(t)
-	preserveEgressProbeSetting(t, m)
-	const custom = "http://10.0.0.5/ip"
-	if err := m.pg.SetSetting(settingEgressProbeURL, custom); err != nil {
+	preserveHealthProbeSetting(t, m)
+	const custom = "https://10.0.0.5/health"
+	if err := m.pg.SetSetting(settingProxyHealthURL, custom); err != nil {
 		t.Fatal(err)
 	}
 	m.globalProxy = "http://proxy.example:8080"

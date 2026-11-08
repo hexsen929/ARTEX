@@ -176,7 +176,7 @@ func TestProxyHealthSettingsUsesStrictUpstreamAndActualCapture(t *testing.T) {
 			return egressProbeResult{OK: true, ExitIP: "192.0.2.4", Probes: []egressAttempt{}}
 		}
 		w := httptest.NewRecorder()
-		s.testEgressProxy(w, httptest.NewRequest("POST", "/proxy/test", strings.NewReader(`{"global_proxy":"socks5://proxy.fixture.invalid:1080"}`)))
+		s.testProxyHealth(w, httptest.NewRequest("POST", "/proxy/test", strings.NewReader(`{"global_proxy":"socks5://proxy.fixture.invalid:1080"}`)))
 		var report egressReport
 		if err := json.Unmarshal(w.Body.Bytes(), &report); err != nil {
 			t.Fatal(err)

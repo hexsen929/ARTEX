@@ -105,7 +105,7 @@ func TestProxyProbeUntrustedHTTPSFailsWithSpecificPersistableReason(t *testing.T
 	}
 }
 
-func TestProxyPoolDiagnosticsSeparateHTTPWithoutPublishingHealthOrRoute(t *testing.T) {
+func TestProxyPoolDiagnosticsDoNotQueryIPOrPublishHealth(t *testing.T) {
 	entry := proxyScaleEntries(1)[0]
 	entry.LastError, entry.LastErrorCode, entry.ConsecutiveFailures, entry.Health = "old failure", "certificate_untrusted", 1, "unknown"
 	m := &Manager{globalProxy: entry.RawURL, proxyPool: &proxyPoolState{entries: []proxyPoolEntry{entry}, active: entry.ID, generation: 8}}
@@ -117,15 +117,14 @@ func TestProxyPoolDiagnosticsSeparateHTTPWithoutPublishingHealthOrRoute(t *testi
 			t.Fatal("diagnostic lost proxy identity or changed trust")
 		}
 		if calls == 1 {
-			if !reflect.DeepEqual(probes, defaultEgressProbes) {
+			if !reflect.DeepEqual(probes, defaultHealthProbes) {
 				t.Fatal("HTTPS health addresses were replaced")
 			}
 			return egressProbeResult{Error: "TLS 证书链不受信任", ErrorCode: "certificate_untrusted", Probes: []egressAttempt{}}
 		}
-		if len(probes) != 1 || probes[0] != "http://api.ipify.org?format=json" {
-			t.Fatal("HTTP diagnosis did not use its separate echo")
-		}
-		return egressProbeResult{OK: true, ExitIP: "192.0.2.5", Probes: []egressAttempt{}}
+		t.Fatal("diagnostic sent an extra request")
+		return egressProbeResult{}
+
 	}
 	r := httptest.NewRequest(http.MethodPost, "/api/settings/proxy-pool/scale-0/diagnose", nil)
 	r.SetPathValue("id", entry.ID)
@@ -140,7 +139,7 @@ func TestProxyPoolDiagnosticsSeparateHTTPWithoutPublishingHealthOrRoute(t *testi
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != http.StatusOK || result.ID != entry.ID || result.HTTPS.OK || !result.HTTP.OK || result.HealthUpdated || calls != 2 {
+	if w.Code != http.StatusOK || result.ID != entry.ID || result.HTTPS.OK || result.HTTP.OK || result.HTTP.ErrorCode != "not_requested" || result.HealthUpdated || calls != 1 {
 		t.Fatalf("bad diagnostic response: %d %s", w.Code, w.Body.String())
 	}
 	if !reflect.DeepEqual(m.proxyPoolEntries(), []proxyPoolEntry{entry}) || m.proxyPool.generation != 8 || m.GlobalProxy() != entry.RawURL || len(m.proxyPool.logs) != 0 {

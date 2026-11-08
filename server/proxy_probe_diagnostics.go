@@ -29,7 +29,10 @@ func classifyEgressProbeError(err error) (string, string) {
 	var certificate *tls.CertificateVerificationError
 	var network net.Error
 	var connectStatus proxyConnectStatusError
+	var healthStatus healthHTTPStatusError
 	switch {
+	case errors.As(err, &healthStatus):
+		return "health_http_status", fmt.Sprintf("检测站点返回 HTTP %d，未满足成功条件", int(healthStatus))
 	case errors.As(err, &connectStatus):
 		if connectStatus.Status == http.StatusProxyAuthRequired {
 			return "proxy_authentication", "代理认证失败或需要账号密码"
@@ -112,7 +115,7 @@ func egressProbeInconclusive(result egressProbeResult) bool {
 		return false
 	}
 	serviceError := func(code string) bool {
-		return code == "echo_http_error" || code == "invalid_ip_response" || code == "probe_boundary"
+		return code == "health_http_status" || code == "echo_http_error" || code == "invalid_ip_response" || code == "probe_boundary"
 	}
 	if serviceError(result.ErrorCode) {
 		return true
@@ -156,12 +159,12 @@ func (s *Server) diagnoseProxyPoolEntry(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusNotFound, "代理不存在或已禁用")
 		return
 	}
-	probes, err := s.m.egressProbesChecked()
+	probes, err := s.m.healthProbesChecked()
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	custom, err := s.m.EgressProbeURLChecked()
+	custom, err := s.m.ProxyHealthURLChecked()
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -176,26 +179,17 @@ func (s *Server) diagnoseProxyPoolEntry(w http.ResponseWriter, r *http.Request) 
 	if auto {
 		primary, httpResult, _ = s.inspectProxyProtocols(ctx, *selected, false, probes)
 	} else {
-		primary = s.runProxyProbe(ctx, selected.RawURL, "", probes, proxyPoolProbeTimeout)
+		primary = s.runProxyHealthProbe(ctx, selected.RawURL, "", probes, proxyPoolProbeTimeout)
 	}
-	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) || !s.m.egressProbesMatch(probes) {
+	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) || !s.m.healthProbesMatch(probes) {
 		writeErr(w, http.StatusConflict, "请求已取消或代理配置已变更，诊断结果已作废")
 		return
 	}
-	if custom == "" {
-		if !auto {
-			httpResult = s.runProxyProbe(ctx, selected.RawURL, "", []string{"http://api.ipify.org?format=json"}, proxyPoolProbeTimeout)
-		}
-	} else {
+	if custom != "" {
 		mode = "configured"
-		if auto && strings.HasPrefix(strings.ToLower(custom), "http://") {
-			checks := primary.ProtocolChecks
-			primary = httpResult
-			primary.ProtocolChecks = checks
-		}
-		httpResult = egressProbeResult{ErrorCode: "not_requested", Error: "已配置自定义回显服务，未请求默认公网 HTTP 服务", Probes: []egressAttempt{}}
 	}
-	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) || !s.m.egressProbesMatch(probes) {
+	httpResult = skippedProtocolCheck()
+	if ctx.Err() != nil || s.proxyShuttingDown() || !s.proxyPoolGenerationMatches(generation) || !s.m.healthProbesMatch(probes) {
 		writeErr(w, http.StatusConflict, "请求已取消或代理配置已变更，诊断结果已作废")
 		return
 	}
@@ -203,8 +197,8 @@ func (s *Server) diagnoseProxyPoolEntry(w http.ResponseWriter, r *http.Request) 
 		// Keep the old primary slot, but explicitly label configured HTTP so
 		// clients never infer HTTPS certificate trust from its success.
 		"id": selected.ID, "https": primary, "http": httpResult,
-		"probe_mode": mode, "probe_url": maskSecrets(custom), "http_skipped": custom != "",
+		"probe_mode": mode, "probe_url": maskSecrets(custom), "http_skipped": true, "probe_kind": "connectivity",
 		"checked_at": time.Now(), "health_updated": false,
-		"scope": "仅诊断这条代理；HTTP 回显可能受网络转发影响，不证明代理身份或 HTTPS 可信，不改健康状态、出口或任务暂停状态",
+		"scope": "通过所选代理访问 HTTPS 检测站点并验证证书；不查询出口 IP，不修改健康状态、出口或任务状态",
 	})
 }

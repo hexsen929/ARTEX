@@ -1102,6 +1102,8 @@ export const api = {
     post<{ ok: boolean; changed: number; skipped: number; active_id: string; active_changed: boolean }>(
       `/settings/proxy-pool/bulk`, payload,
     ),
+  testProxyHealth: (patch: { global_proxy?: string; probe_url?: string }) =>
+    post<import("./types").EgressReport>(`/settings/proxy/health-test`, patch),
   testProxyPoolEntry: (id: string) =>
     post<{ ok: boolean; result?: EgressReport["checks"][number]["result"] }>(
       `/settings/proxy-pool/${encodeURIComponent(id)}/test`,

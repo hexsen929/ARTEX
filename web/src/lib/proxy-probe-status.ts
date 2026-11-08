@@ -25,7 +25,7 @@ export function proxyProbeStatus(entry: ProxyPoolEntry, threshold: number) {
 
 function validResult(result: EgressProbeResult) {
   return !!result && typeof result.ok === "boolean" && Number.isFinite(result.latency_ms) && result.latency_ms >= 0 &&
-    (result.ok ? typeof result.exit_ip === "string" && result.exit_ip.length > 0 : typeof result.error === "string") &&
+    (result.ok ? (result.kind === "connectivity" ? Number.isInteger(result.status_code) && result.status_code! >= 200 && result.status_code! < 300 : typeof result.exit_ip === "string" && result.exit_ip.length > 0) : typeof result.error === "string") &&
     Array.isArray(result.probes) && result.probes.length <= 2 && result.probes.every((attempt) =>
       !!attempt && typeof attempt.url === "string" && typeof attempt.ok === "boolean" && Number.isFinite(attempt.latency_ms));
 }
@@ -33,7 +33,7 @@ function validResult(result: EgressProbeResult) {
 function validCapability(check: ProxyCapabilityCheck) {
   return !!check && typeof check.checked === "boolean" && typeof check.ok === "boolean" &&
     Number.isFinite(check.latency_ms) && check.latency_ms >= 0 &&
-    (check.checked ? (check.ok ? typeof check.ip === "string" && check.ip.length > 0 : typeof check.error === "string") : !check.ok);
+    (check.checked ? (check.ok ? ((Number.isInteger(check.status_code) && check.status_code! >= 200 && check.status_code! < 300) || (typeof check.ip === "string" && check.ip.length > 0)) : typeof check.error === "string") : !check.ok);
 }
 
 export function assertProxyDiagnosis(result: ProxyPoolDiagnosis, id: string): ProxyPoolDiagnosis {
@@ -50,7 +50,7 @@ export function assertProxyDiagnosis(result: ProxyPoolDiagnosis, id: string): Pr
     }
     if (result.probe_mode === "configured") {
       if (!/^https?:\/\//i.test(result.probe_url) || result.http_skipped !== true) throw new Error("诊断探测服务未能核对，请重试");
-    } else if (result.probe_url !== "" || result.http_skipped !== false) throw new Error("诊断探测服务未能核对，请重试");
+    } else if (result.probe_url !== "" || (result.http_skipped !== false && result.probe_kind !== "connectivity")) throw new Error("诊断探测服务未能核对，请重试");
   } else if (result.probe_url !== undefined || result.http_skipped !== undefined) {
     throw new Error("诊断探测服务未能核对，请重试");
   }
@@ -58,6 +58,7 @@ export function assertProxyDiagnosis(result: ProxyPoolDiagnosis, id: string): Pr
 }
 
 export function proxyDiagnosisPrimaryLabel(result: ProxyPoolDiagnosis): string {
+  if (result.probe_kind === "connectivity") return "HTTPS 连通性（校验证书）";
   if (result.probe_mode !== "configured") return "访问 HTTPS 网站（校验证书）";
   return /^https:\/\//i.test(result.probe_url ?? "") ? "已保存回显服务（HTTPS，验证证书）" : "已保存回显服务（HTTP，明文回显）";
 }

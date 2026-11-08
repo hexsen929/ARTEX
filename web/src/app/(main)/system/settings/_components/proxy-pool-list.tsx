@@ -108,17 +108,17 @@ function ProxyPoolImport({ draft, busy, onImport }: Pick<Props, "draft" | "busy"
 
 function DiagnosisResult({ label, result }: { label: string; result: EgressProbeResult }) {
   return <section className="space-y-2 rounded-md border p-3 text-sm">
-    <p className="font-medium">{label}：{result.ok ? "回显成功" : "失败"}</p>
-    <p className={result.ok ? "text-emerald-600" : "text-destructive"}>{result.ok ? `出口 IP：${result.exit_ip}` : result.error}</p>
+    <p className="font-medium">{label}：{result.ok ? (result.kind === "connectivity" ? "通过" : "回显成功") : "失败"}</p>
+    <p className={result.ok ? "text-emerald-600" : "text-destructive"}>{result.ok ? (result.kind === "connectivity" ? `响应 HTTP ${result.status_code}` : `出口 IP：${result.exit_ip}`) : result.error}</p>
     <ul className="space-y-1 text-xs text-muted-foreground">
-      {result.probes.map((attempt, index) => <li key={index} className="break-all">{attempt.url} · {attempt.ok ? attempt.ip : attempt.error} · {attempt.latency_ms} ms</li>)}
+      {result.probes.map((attempt, index) => <li key={index} className="break-all">{attempt.url} · {attempt.ok ? (attempt.status_code ? `HTTP ${attempt.status_code}` : attempt.ip) : attempt.error} · {attempt.latency_ms} ms</li>)}
     </ul>
   </section>;
 }
 
 function capabilityLabel(check: ProxyCapabilityCheck) {
   if (!check.checked) return "未执行";
-  return check.ok ? `回显通过 · ${check.ip}` : check.error || "未通过";
+  return check.ok ? (check.status_code ? `连通性通过 · HTTP ${check.status_code}` : `回显通过 · ${check.ip}`) : check.error || "未通过";
 }
 
 function ProtocolChecks({ checks }: { checks: ProxyProtocolCheck[] }) {
@@ -331,8 +331,8 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
                   {entry.protocol_checks?.length ? <details className="mt-1"><summary className="cursor-pointer">各代理协议检测详情</summary><ProtocolChecks checks={entry.protocol_checks} /></details> : null}
                 </div>
                 <div>
-                  <p className="text-muted-foreground">探测出口 IP</p>
-                  <p className="break-all font-mono">{entry.last_error ? "最近检测失败" : entry.egress_ip || "尚未测试"}</p>
+                  <p className="text-muted-foreground">HTTPS 连通性</p>
+                  <p className="break-all font-mono">{entry.last_error ? "最近检测未通过" : entry.last_probe_kind === "connectivity" ? `通过 · HTTP ${entry.last_http_status ?? "成功"}` : entry.egress_ip ? "历史回显结果，需重新检测" : "尚未测试"}</p>
                   {entry.last_error && entry.egress_ip ? <p className="text-muted-foreground">上次成功出口：{entry.egress_ip}</p> : null}
                 </div>
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -362,8 +362,8 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
       <Dialog open={diagnosis !== null} onOpenChange={(open) => { if (!open) closeDiagnosis(); }}>
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>代理 HTTP／HTTPS 诊断</DialogTitle>
-            <DialogDescription>分别检查代理连接协议和访问网站的 HTTP／HTTPS 能力。已保存自定义探测服务时仅访问该服务。HTTP 回显不能单独证明代理身份或 HTTPS 可信；诊断保留证书校验，不修改健康状态、当前出口或任务暂停状态。</DialogDescription>
+            <DialogTitle>代理协议与连通性诊断</DialogTitle>
+            <DialogDescription>通过所选代理访问 HTTPS 检测页并校验证书，不要求返回出口 IP。自定义检测网址只访问该站点。诊断不修改健康状态、当前出口或任务暂停状态。</DialogDescription>
           </DialogHeader>
           <p className="break-all font-mono text-xs">{diagnosis?.url}</p>
           {diagnosing ? <p role="status">正在诊断，请稍候…</p> : null}
@@ -374,10 +374,9 @@ export function ProxyPoolList({ entries, activeId, busy: parentBusy, draft, onIm
             <DiagnosisResult label={proxyDiagnosisPrimaryLabel(diagnosis.result)} result={diagnosis.result.https} />
             {!diagnosis.result.http_skipped ? <DiagnosisResult label="访问 HTTP 网站（明文回显）" result={diagnosis.result.http} /> : null}
             </>}
-            {diagnosis.result.http_skipped ? <p className="text-muted-foreground text-sm">已使用保存的探测服务，未额外访问公共 HTTP 回显地址。</p> : null}
+            {diagnosis.result.http_skipped ? <p className="text-muted-foreground text-sm">仅检查 HTTPS 连通性，未查询出口 IP。</p> : null}
             {!diagnosis.result.http_skipped && diagnosis.result.http.ok && !diagnosis.result.https.ok ? <p className="text-amber-600 text-sm">仅访问 HTTP 网站回显通过，HTTPS 未通过；这不代表已找到可完整使用的代理协议。</p> : null}
             {diagnosis.result.probe_mode === "configured" ? <p className="break-all font-mono text-xs">探测服务：{diagnosis.result.probe_url}</p> : null}
-            {diagnosis.result.probe_mode === "configured" && diagnosis.result.https.protocol_checks?.length ? <p className="text-muted-foreground text-xs">自定义服务只验证其网址类型；恢复默认探测后可检查 HTTP 和 HTTPS 的完整访问能力。</p> : null}
             <p className="text-muted-foreground text-xs">本次诊断：{new Date(diagnosis.result.checked_at).toLocaleString()}</p>
           </div> : null}
           <Button type="button" variant="outline" onClick={closeDiagnosis}>关闭诊断</Button>

@@ -27,6 +27,7 @@ func proxyTestManager(t *testing.T) *Manager {
 		settingProxyRotateTimed, settingProxyRotateInterval,
 		settingProxyRotateFailure, settingProxyRotateStrategy,
 		settingProxyHealthThreshold, settingProxyHealthCooldown, settingProxyHealthInterval,
+		settingProxyHealthURL,
 	}
 	values := map[string]string{}
 	present := map[string]bool{}
