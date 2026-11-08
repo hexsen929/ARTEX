@@ -55,8 +55,17 @@ func socksFixture(t *testing.T, mode string) string {
 				if _, err := io.ReadFull(conn, header); err != nil || header[0] != 5 {
 					return
 				}
-				if _, err := io.CopyN(io.Discard, conn, int64(header[1])); err != nil {
+				methods := make([]byte, int(header[1]))
+				if _, err := io.ReadFull(conn, methods); err != nil {
 					return
+				}
+				if mode == "prefer-auth" {
+					for _, method := range methods {
+						if method == 2 {
+							_, _ = conn.Write([]byte{5, 2})
+							return
+						}
+					}
 				}
 				switch mode {
 				case "truncated-greeting":
@@ -109,7 +118,7 @@ func socksFixture(t *testing.T, mode string) string {
 					_, _ = conn.Write([]byte{5, 5, 0, 1, 127, 0, 0, 1, 0, 0})
 				case "truncated-connect":
 					_, _ = conn.Write([]byte{5, 0})
-				case "success":
+				case "success", "prefer-auth":
 					_, _ = conn.Write([]byte{5, 0, 0, 1, 127, 0, 0, 1, 0, 0})
 					_, _ = conn.Write([]byte("fixture-tunnel-ready\n"))
 					_, _ = io.Copy(conn, conn)
@@ -123,6 +132,39 @@ func socksFixture(t *testing.T, mode string) string {
 		u.User = url.UserPassword("fixture-user", "fixture-secret")
 	}
 	return u.String()
+}
+
+func TestSOCKS5CaptureDoesNotOfferAbsentCredentials(t *testing.T) {
+	t.Setenv("ARTEX_PROXY_AUTH", "capture-fixture:local-secret")
+	for _, shared := range []bool{false, true} {
+		for _, intercepted := range []bool{false, true} {
+			t.Run(fmt.Sprintf("shared=%t/intercept=%t", shared, intercepted), func(t *testing.T) {
+				parent, err := Open(t.TempDir(), sharedProxyAddress(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = parent.Close() })
+				capture := parent
+				if shared {
+					capture, err = parent.OpenProxy(t.TempDir(), sharedProxyAddress(t))
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				capture.proxy.SetShouldInterceptRule(func(*http.Request) bool { return intercepted })
+				upstream := socksFixture(t, "prefer-auth")
+				if err := capture.SetUpstreamProxy(upstream); err != nil {
+					t.Fatal(err)
+				}
+				startSharedProxy(t, capture)
+				conn, _, status := captureConnect(t, capture, "echo.fixture.invalid:443")
+				_ = conn.Close()
+				if status != http.StatusOK {
+					t.Fatalf("credential-free SOCKS5 capture status=%d; must not offer password authentication", status)
+				}
+			})
+		}
+	}
 }
 
 func captureConnect(t *testing.T, capture *Traffic, target string) (net.Conn, *bufio.Reader, int) {
