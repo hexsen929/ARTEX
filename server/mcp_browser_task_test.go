@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -224,7 +225,7 @@ func TestTaskBrowserMCPDoesNotChangeNonTaskOrOtherServerDialers(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		id   int64
-	}{{browserMCPName, 0}, {"jshook", 7}} {
+	}{{browserMCPName, 0}, {"browser-cloak", 0}, {"jshook", 7}, {"custom-shared-browser", 7}} {
 		t.Run(test.name, func(t *testing.T) {
 			server := taskBrowserFixture()
 			server.Name = test.name
@@ -249,13 +250,21 @@ func TestTaskBrowserMCPDoesNotChangeNonTaskOrOtherServerDialers(t *testing.T) {
 }
 
 func TestTaskBrowserMCPMetadataNeverDialsAndCleanupFollowsSession(t *testing.T) {
+	for _, name := range []string{browserMCPName, "browser-cloak"} {
+		t.Run(name, func(t *testing.T) { testTaskBrowserMCPPrivateSession(t, name) })
+	}
+}
+
+func testTaskBrowserMCPPrivateSession(t *testing.T, serverName string) {
+	t.Helper()
 	server := taskBrowserFixture()
+	server.Name = serverName
 	session := newLazyMCPSession(context.Background(), server)
 	defer session.Close()
 	var starts, calls atomic.Int32
 	dir := filepath.Join(t.TempDir(), "mcp-private")
 	var privateFile string
-	name := "mcp__browser__browser_snapshot"
+	name := "mcp__" + serverName + "__browser_snapshot"
 	client := &lifecycleFakeClient{tools: []actool.CoreTool{lifecycleTool(name, func(context.Context, json.RawMessage, *actool.ToolContext) (actool.Result, error) {
 		calls.Add(1)
 		return actool.Text("fixture"), nil
@@ -296,6 +305,83 @@ func TestTaskBrowserMCPMetadataNeverDialsAndCleanupFollowsSession(t *testing.T) 
 	}
 	if _, err := os.Stat(privateFile); !os.IsNotExist(err) {
 		t.Fatal("private browser config survived session cleanup")
+	}
+}
+
+func TestTaskBrowserMCPCloakKeepsOptionsAndIsolatesWorkersWithinTask(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "cloak.json")
+	original := `{"browser":{"browserName":"chromium","launchOptions":{"headless":true,"executablePath":"/fixture/Cloak Chromium","args":["--fingerprint=424242","--fingerprint-platform=macos"],"proxy":{"server":"http://old.invalid"}},"contextOptions":{"locale":"zh-CN"}},"snapshot":{"mode":"full"}}`
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := taskBrowserFixture("-y", "@playwright/mcp@0.0.84", "--headless", "--config", path)
+	server.Name = "browser-cloak"
+	server.Env = encodeJSON(map[string]string{"PLAYWRIGHT_MCP_EXECUTABLE_PATH": "/fixture/Cloak Chromium", "USER_SETTING": "preserved"})
+	beforeArgs, beforeEnv := string(server.Args), string(server.Env)
+	privateDir := filepath.Join(root, "private")
+	first, closeFirst, err := prepareTaskBrowserMCP(server, 7, privateDir, "http://fixture:password@127.0.0.1:21107", "/fixture/task-ca.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFirst()
+	second, closeSecond, err := prepareTaskBrowserMCP(server, 7, privateDir, "http://fixture:password@127.0.0.1:21107", "/fixture/task-ca.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSecond()
+	if first.Name != server.Name || second.Name != server.Name || taskBrowserConfigPath(t, first) == taskBrowserConfigPath(t, second) {
+		t.Fatal("same-task workers lost tool identity or share private configuration")
+	}
+	for _, scoped := range []*db.MCPServer{first, second} {
+		browser := readTaskBrowserFixture(t, taskBrowserConfigPath(t, scoped))["browser"].(map[string]any)
+		launch := browser["launchOptions"].(map[string]any)
+		if browser["isolated"] != true || launch["executablePath"] != "/fixture/Cloak Chromium" || launch["headless"] != true || !reflect.DeepEqual(launch["args"], []any{"--fingerprint=424242", "--fingerprint-platform=macos"}) {
+			t.Fatal("Cloak options changed or session isolation missing")
+		}
+		if launch["proxy"].(map[string]any)["server"] != "http://127.0.0.1:21107" || browser["contextOptions"].(map[string]any)["locale"] != "zh-CN" {
+			t.Fatal("task route or context options lost")
+		}
+		if env := jsonStrMap(scoped.Env); env["PLAYWRIGHT_MCP_EXECUTABLE_PATH"] != "/fixture/Cloak Chromium" || env["NODE_EXTRA_CA_CERTS"] != "/fixture/task-ca.pem" || env["PLAYWRIGHT_MCP_ISOLATED"] != "true" {
+			t.Fatal("Cloak executable, task CA, or isolation environment lost")
+		}
+	}
+	closeFirst()
+	if _, err := os.Stat(taskBrowserConfigPath(t, second)); err != nil {
+		t.Fatal("closing one worker removed another worker's configuration")
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != original || string(server.Args) != beforeArgs || string(server.Env) != beforeEnv {
+		t.Fatal("Cloak installation configuration was modified")
+	}
+}
+
+func TestTaskBrowserMCPCloakRejectsSharedOrUnsupportedModes(t *testing.T) {
+	for _, mode := range []string{"profile", "cdp", "http", "unknown-launcher"} {
+		t.Run(mode, func(t *testing.T) {
+			server := taskBrowserFixture()
+			server.Name = "browser-cloak"
+			switch mode {
+			case "profile":
+				server.Args = encodeJSON([]string{"@playwright/mcp", "--user-data-dir", "/fixture/shared"})
+			case "cdp":
+				server.Args = encodeJSON([]string{"@playwright/mcp", "--cdp-endpoint", "http://fixture.invalid"})
+			case "http":
+				server.Transport = "http"
+			case "unknown-launcher":
+				server.Command, server.Args = "fixture-unsupported", encodeJSON([]string{})
+			}
+			private := filepath.Join(t.TempDir(), "private")
+			_, cleanup, err := prepareTaskBrowserMCP(server, 7, private, "http://127.0.0.1:21107", "")
+			if cleanup != nil {
+				defer cleanup()
+			}
+			if err == nil {
+				t.Fatal("unsupported browser-cloak mode silently bypassed task isolation")
+			}
+			if _, err := os.Stat(private); !os.IsNotExist(err) {
+				t.Fatal("invalid browser config left private state")
+			}
+		})
 	}
 }
 

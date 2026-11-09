@@ -38,7 +38,8 @@
         "@playwright/mcp",
         "--headless",
         "--config",
-        "${ARTEX_DATA_DIR}/browser-mcp-cloak.json"
+        "${ARTEX_DATA_DIR}/browser-mcp-cloak.json",
+        "--isolated"
       ],
       "env": {
         "NODE_EXTRA_CA_CERTS": "${BROWSER_CLOAK_NODE_EXTRA_CA_CERTS}",

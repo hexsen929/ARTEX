@@ -19,8 +19,15 @@ import (
 // Metadata discovery continues to use the unchanged, persisted MCP descriptor.
 type taskMCPDialer func(context.Context, *db.MCPServer, int64) (mcpClient, error)
 
+// Both supported browser entries need the same per-run profile and task route.
+// Other named MCPs keep their explicit connection semantics. The launcher and
+// shared/remote modes are still validated before creating a private config.
+func isTaskBrowserMCP(server *db.MCPServer) bool {
+	return server != nil && (server.Name == browserMCPName || server.Name == "browser-cloak")
+}
+
 func attachTaskMCPDialer(session *lazyMCPSession, taskID int64, dial taskMCPDialer) {
-	if taskID <= 0 || dial == nil || session.server.Name != browserMCPName {
+	if taskID <= 0 || dial == nil || !isTaskBrowserMCP(session.server) {
 		return
 	}
 	session.dial = func(ctx context.Context, server *db.MCPServer) (mcpClient, error) {
@@ -34,7 +41,7 @@ func (s *Server) taskMCPDial(ctx context.Context, server *db.MCPServer, taskID i
 	if server == nil {
 		return nil, errors.New("任务浏览器 MCP 配置缺失")
 	}
-	if taskID <= 0 || server.Name != browserMCPName {
+	if taskID <= 0 || !isTaskBrowserMCP(server) {
 		return connectMCP(ctx, server)
 	}
 	if s.m == nil || s.m.dir == "" {
@@ -174,7 +181,7 @@ func readTaskBrowserConfig(path string) (map[string]any, error) {
 }
 
 func prepareTaskBrowserMCP(server *db.MCPServer, taskID int64, privateDir, rawProxy, cert string) (*db.MCPServer, func(), error) {
-	if server == nil || taskID <= 0 || server.Name != browserMCPName || server.Transport != "stdio" {
+	if taskID <= 0 || !isTaskBrowserMCP(server) || server.Transport != "stdio" {
 		return nil, nil, errors.New("任务浏览器代理仅支持独立的 Playwright stdio MCP")
 	}
 	args := jsonStrSlice(server.Args)
