@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Shodan 查询封装。调用前由运行环境提供 SHODAN_API_KEY。
+# 用法: shodan <子命令> [参数]
+set -euo pipefail
+KEY="${SHODAN_API_KEY:-}"
+if [[ -z "$KEY" ]]; then
+  printf "%s\n" "请先设置 SHODAN_API_KEY；仓库不保存 API 密钥。" >&2
+  exit 2
+fi
+API="https://api.shodan.io"
+pp() { if command -v python3 >/dev/null 2>&1; then python3 -m json.tool 2>/dev/null || cat; else cat; fi; }
+get() { curl -s --max-time 30 -G "$@"; }
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  info)        get "$API/api-info" --data-urlencode "key=$KEY" | pp ;;
+  myip)        get "$API/tools/myip" --data-urlencode "key=$KEY" ;;
+  host)        # host <ip> [--history]  主机的全部开放端口/服务/banner/CVE
+               ip="${1:?用法: host <ip>}"; shift || true
+               get "$API/shodan/host/$ip" --data-urlencode "key=$KEY" "$@" | pp ;;
+  search)      # search '<query>' [page]  例: search 'ssl:example.com http.title:admin'
+               q="${1:?用法: search <query> [page]}"; page="${2:-1}"
+               get "$API/shodan/host/search" --data-urlencode "key=$KEY" \
+                   --data-urlencode "query=$q" --data-urlencode "page=$page" | pp ;;
+  count)       # count '<query>'  只要命中数与分面，不消耗记录额度
+               q="${1:?用法: count <query>}"
+               get "$API/shodan/host/count" --data-urlencode "key=$KEY" \
+                   --data-urlencode "query=$q" | pp ;;
+  domain)      # domain <domain>  子域名 + DNS 记录
+               d="${1:?用法: domain <domain>}"
+               get "$API/dns/domain/$d" --data-urlencode "key=$KEY" | pp ;;
+  resolve)     # resolve host1,host2  域名->IP
+               h="${1:?用法: resolve host1,host2}"
+               get "$API/dns/resolve" --data-urlencode "hostnames=$h" --data-urlencode "key=$KEY" | pp ;;
+  reverse)     # reverse ip1,ip2  IP->域名
+               i="${1:?用法: reverse ip1,ip2}"
+               get "$API/dns/reverse" --data-urlencode "ips=$i" --data-urlencode "key=$KEY" | pp ;;
+  *) cat >&2 <<'USAGE'
+shodan 子命令:
+  info                 查 API 额度/套餐
+  host <ip>            主机全部端口/服务/banner/已知CVE
+  search '<query>'[页] Shodan 搜索(消耗 query 额度); 过滤器如 ssl: http.title: product: port: org: hostname:
+  count '<query>'      只取命中数+分面(不消耗记录额度, 适合先摸量)
+  domain <domain>      子域名 + DNS 记录
+  resolve h1,h2        域名->IP
+  reverse ip1,ip2      IP->域名
+  myip                 出口 IP
+USAGE
+     exit 2 ;;
+esac

@@ -31,6 +31,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Ensure open-file inspection for cleanup regressions
+        run: command -v lsof || (sudo apt-get update && sudo apt-get install -y lsof)
       - name: Tool deployment integrity and isolation regressions
         run: python3 -m unittest discover -s packaging -p 'test_*.py'
 

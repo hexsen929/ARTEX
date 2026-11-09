@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "description": "Reference templates, not directly usable runtime configuration. Supply local recording proxy credentials and certificate pin; these placeholders are not expanded by Playwright.",
+  "templates": {
+    "browser-mcp-proxy.json": {
+      "browser": {
+        "launchOptions": {
+          "args": [
+            "--ignore-certificate-errors-spki-list=${RECORDING_CA_SPKI}"
+          ],
+          "proxy": {
+            "password": "${LOCAL_PROXY_PASSWORD}",
+            "server": "${LOCAL_PROXY_SERVER}",
+            "username": "${LOCAL_PROXY_USERNAME}"
+          }
+        }
+      }
+    },
+    "browser-mcp-cloak.json": {
+      "browser": {
+        "browserName": "chromium",
+        "launchOptions": {
+          "headless": true,
+          "executablePath": "${CLOAK_BROWSER_EXECUTABLE}",
+          "args": [
+            "--no-sandbox",
+            "--fingerprint=424242",
+            "--fingerprint-platform=macos"
+          ],
+          "ignoreHTTPSErrors": true,
+          "proxy": {
+            "server": "${LOCAL_PROXY_SERVER}",
+            "username": "${LOCAL_PROXY_USERNAME}",
+            "password": "${LOCAL_PROXY_PASSWORD}"
+          }
+        },
+        "contextOptions": {
+          "ignoreHTTPSErrors": true
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,258 @@
+{
+  "version": 1,
+  "description": "Reference MCP definitions. Expand placeholders locally before importing; no credentials or dependency trees are included. Preserve current bindings and do not enable unavailable runtimes.",
+  "placeholders": {
+    "BROWSER_NODE_EXTRA_CA_CERTS": "Configure NODE_EXTRA_CA_CERTS locally for browser",
+    "BROWSER_CLOAK_NODE_EXTRA_CA_CERTS": "Configure NODE_EXTRA_CA_CERTS locally for browser-cloak",
+    "BROWSER_CLOAK_PLAYWRIGHT_MCP_EXECUTABLE_PATH": "Configure PLAYWRIGHT_MCP_EXECUTABLE_PATH locally for browser-cloak",
+    "NODE_EXECUTABLE": "Node executable for the target host",
+    "SCOPESENTRY_X_API_KEY": "Configure X-API-Key locally for ScopeSentry",
+    "ARTEX_DATA_DIR": "ARTEX data directory; prepare browser JSON configuration locally",
+    "ARTEX_REPO_DIR": "Checkout root containing the shipped guard script",
+    "JSHOOK_RUNTIME_DIR": "Directory with installed @jshookmcp/jshook 0.4.2 runtime dependencies"
+  },
+  "servers": [
+    {
+      "name": "browser",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "@playwright/mcp",
+        "--headless",
+        "--config",
+        "${ARTEX_DATA_DIR}/browser-mcp-proxy.json"
+      ],
+      "env": {
+        "NODE_EXTRA_CA_CERTS": "${BROWSER_NODE_EXTRA_CA_CERTS}"
+      },
+      "url": null,
+      "enabled": true,
+      "insecure": false
+    },
+    {
+      "name": "browser-cloak",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp",
+        "--headless",
+        "--config",
+        "${ARTEX_DATA_DIR}/browser-mcp-cloak.json"
+      ],
+      "env": {
+        "NODE_EXTRA_CA_CERTS": "${BROWSER_CLOAK_NODE_EXTRA_CA_CERTS}",
+        "PLAYWRIGHT_MCP_EXECUTABLE_PATH": "${BROWSER_CLOAK_PLAYWRIGHT_MCP_EXECUTABLE_PATH}"
+      },
+      "url": null,
+      "enabled": true,
+      "insecure": false
+    },
+    {
+      "name": "js-reverse",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "js-reverse-mcp"
+      ],
+      "env": {},
+      "url": null,
+      "enabled": true,
+      "insecure": false
+    },
+    {
+      "name": "jshook",
+      "transport": "stdio",
+      "command": "${NODE_EXECUTABLE}",
+      "args": [
+        "--max-old-space-size=512",
+        "--import",
+        "${ARTEX_REPO_DIR}/packaging/local-capabilities/jshook-guard.mjs",
+        "${JSHOOK_RUNTIME_DIR}/node_modules/@jshookmcp/jshook/dist/index.mjs"
+      ],
+      "env": {
+        "JSHOOK_GUARD_RSS_MB": "768",
+        "JSHOOK_MAX_INSTANCES": "4"
+      },
+      "url": null,
+      "enabled": true,
+      "insecure": false
+    },
+    {
+      "name": "ScopeSentry",
+      "transport": "http",
+      "command": null,
+      "args": [],
+      "env": {
+        "X-API-Key": "${SCOPESENTRY_X_API_KEY}"
+      },
+      "url": null,
+      "enabled": false,
+      "insecure": false
+    }
+  ],
+  "bindings": [
+    {
+      "agent_key": "auto",
+      "server_name": "browser",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "auto",
+      "server_name": "browser-cloak",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "auto",
+      "server_name": "js-reverse",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "auto",
+      "server_name": "jshook",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "mainagent",
+      "server_name": "browser",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "mainagent",
+      "server_name": "browser-cloak",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "mainagent",
+      "server_name": "jshook",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "server_name": "browser",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "server_name": "browser-cloak",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "server_name": "js-reverse",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "server_name": "jshook",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "retester",
+      "server_name": "browser",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "retester",
+      "server_name": "browser-cloak",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "retester",
+      "server_name": "js-reverse",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "retester",
+      "server_name": "jshook",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "verifier",
+      "server_name": "browser",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "verifier",
+      "server_name": "browser-cloak",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "verifier",
+      "server_name": "js-reverse",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "verifier",
+      "server_name": "jshook",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "server_name": "browser",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "server_name": "browser-cloak",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "server_name": "js-reverse",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "server_name": "jshook",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "server_name": "browser",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "server_name": "browser-cloak",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "server_name": "js-reverse",
+      "mcp_tool_name": "",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "server_name": "jshook",
+      "mcp_tool_name": "",
+      "enabled": true
+    }
+  ]
+}
