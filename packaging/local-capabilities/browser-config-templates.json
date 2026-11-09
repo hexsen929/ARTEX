@@ -36,7 +36,8 @@
         },
         "contextOptions": {
           "ignoreHTTPSErrors": true
-        }
+        },
+        "isolated": true
       }
     }
   }

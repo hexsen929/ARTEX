@@ -43,6 +43,9 @@ class LocalCapabilityTests(unittest.TestCase):
         names = {server['name'] for server in profile['servers']}
         self.assertTrue(all(binding['server_name'] in names for binding in profile['bindings']))
         configs = json.loads((folder / 'browser-config-templates.json').read_text())['templates']
+        cloak = next(server for server in profile['servers'] if server['name'] == 'browser-cloak')
+        self.assertIn('--isolated', cloak['args'])
+        self.assertIs(configs['browser-mcp-cloak.json']['browser']['isolated'], True)
         for config in configs.values():
             proxy = config['browser']['launchOptions']['proxy']
             self.assertEqual(proxy['password'], '${LOCAL_PROXY_PASSWORD}')

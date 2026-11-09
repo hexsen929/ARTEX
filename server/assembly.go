@@ -212,7 +212,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 					continue // neither directly visible nor referenced by a visible skill
 				}
 				var ts []actool.CoreTool
-				scopedBrowser := taskID > 0 && taskDial != nil && m.Name == browserMCPName
+				scopedBrowser := taskID > 0 && taskDial != nil && isTaskBrowserMCP(m)
 				if m.Transport == "stdio" || scopedBrowser {
 					// Upgrade name-only legacy caches once, then assemble from schemas.
 					metadataCtx, cancel := context.WithTimeout(ctx, 30*time.Second)

@@ -10,6 +10,31 @@ concurrency:
   group: tests-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 jobs:
+  browser-isolation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Prepare pinned Playwright MCP runtime
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/mcp-isolation-browsers
+        run: |
+          npm install --prefix "$RUNNER_TEMP/mcp-isolation-runtime" --no-save --package-lock=false --ignore-scripts --no-audit --no-fund @playwright/mcp@0.0.84
+          node "$RUNNER_TEMP/mcp-isolation-runtime/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Concurrent browser-cloak workers and task routing
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/mcp-isolation-browsers
+          ARTEX_TEST_BROWSER_MCP_CLI: ${{ runner.temp }}/mcp-isolation-runtime/node_modules/@playwright/mcp/cli.js
+        run: |
+          export ARTEX_TEST_BROWSER_EXECUTABLE="$(node -e 'console.log(require(process.env.RUNNER_TEMP + "/mcp-isolation-runtime/node_modules/playwright").chromium.executablePath())')"
+          go test -race -v ./server -run '^TestTaskBrowserMCP' -count=1 -timeout=3m
+
   socks5-capture:
     runs-on: ubuntu-24.04
     timeout-minutes: 8
