@@ -1,0 +1,711 @@
+{
+  "version": 1,
+  "description": "Reusable ARTEX custom tool definitions and skill visibility. Secrets and machine paths are placeholders; preserve existing runtime settings during import.",
+  "placeholders": {
+    "ARTEX_DATA_DIR": "Absolute target data directory",
+    "ARTEX_SKILL_DIR": "Absolute target skills directory",
+    "SHODAN_API_KEY": "Import from the process environment; never commit a value"
+  },
+  "tools": [
+    {
+      "key": "external_chisel",
+      "description": "反向 TCP 隧道：目标能出网时建反向 socks5 / 单端口转发。固定调用路径：${ARTEX_DATA_DIR}/tools/chisel。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_ffuf",
+      "description": "HTTP 路径、参数与 API 模糊测试。固定调用路径：${ARTEX_DATA_DIR}/tools/ffuf。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_fscan",
+      "description": "内网综合扫描：端口/服务/弱口令一把梭。固定调用路径：${ARTEX_DATA_DIR}/tools/fscan。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_gogo",
+      "description": "内网端口扫描与服务识别（红队向，低噪声；端口参数 -p 1-1000，预设名为 top1/top2）。固定调用路径：${ARTEX_DATA_DIR}/tools/gogo。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_httpx",
+      "description": "HTTP 服务探活与指纹/标题识别（projectdiscovery）。固定调用路径：${ARTEX_DATA_DIR}/tools/httpx。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker",
+        "pentest",
+        "verifier",
+        "retester"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_impacket",
+      "description": "Windows protocol tool collection; invoke impacket <script.py> [arguments].。固定调用路径：${ARTEX_DATA_DIR}/tools/impacket。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_katana",
+      "description": "Web 爬虫与端点发现（projectdiscovery）。固定调用路径：${ARTEX_DATA_DIR}/tools/katana。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker",
+        "pentest"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_ligolo_proxy",
+      "description": "ligolo-ng 反向隧道 proxy（攻击机侧运行，TUN 组网）。固定调用路径：${ARTEX_DATA_DIR}/tools/ligolo-proxy。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_naabu",
+      "description": "快速端口扫描（projectdiscovery）。固定调用路径：${ARTEX_DATA_DIR}/tools/naabu。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_nmap",
+      "description": "端口、服务与操作系统识别（使用 Homebrew 预编译 bottle，依赖单独保留）。固定调用路径：${ARTEX_DATA_DIR}/tools/nmap。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_nuclei",
+      "description": "基于模板的漏洞与配置检测（模板需单独固定版本）。固定调用路径：${ARTEX_DATA_DIR}/tools/nuclei。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。 模板显式指定 -t ${ARTEX_DATA_DIR}/tools/nuclei-templates，使用 -duc 关闭自动更新检查；不自动下载模板或写入全局模板目录。",
+      "schema": {},
+      "agents": [
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_nxc",
+      "description": "NetExec protocol test CLI in an isolated Python environment.。固定调用路径：${ARTEX_DATA_DIR}/tools/nxc。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_penelope",
+      "description": "Managed session handler with ARTEX-compatible authenticated loopback HTTP MCP.。固定调用路径：${ARTEX_DATA_DIR}/tools/penelope。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_pypykatz",
+      "description": "Offline Windows memory/credential artifact parser; does not capture host memory.。固定调用路径：${ARTEX_DATA_DIR}/tools/pypykatz。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "external_suo5",
+      "description": "HTTP 隧道 CLI：目标无出网时经 webshell payload 建 socks5。固定调用路径：${ARTEX_DATA_DIR}/tools/suo5。通过现有 Bash 调用并遵循其权限与审批；不要按裸命令名猜测 PATH 中的同名程序。此记录表示文件完整性和本机架构已核对，具体功能以实际调用结果为准。",
+      "schema": {},
+      "agents": [
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "shell",
+      "exec": {},
+      "deferred": false
+    },
+    {
+      "key": "shodan_count",
+      "description": "用 Shodan 统计某查询命中的主机数与分面(country/port/org)，不返回明细、不消耗记录额度，适合先摸量。",
+      "schema": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Shodan查询语句,如 ssl:example.com 或 http.title:admin"
+          }
+        }
+      },
+      "agents": [
+        "worker",
+        "pentest",
+        "planner"
+      ],
+      "enabled": true,
+      "kind": "http",
+      "exec": {
+        "url": "https://api.shodan.io/shodan/host/count?key=${SHODAN_API_KEY}&query={query}",
+        "body": "",
+        "proxy": "",
+        "method": "GET",
+        "headers": {},
+        "timeout_ms": 30000,
+        "use_recording_proxy": false
+      },
+      "deferred": false
+    },
+    {
+      "key": "shodan_domain",
+      "description": "用 Shodan 查某根域名的子域名与 DNS 记录。",
+      "schema": {
+        "type": "object",
+        "required": [
+          "domain"
+        ],
+        "properties": {
+          "domain": {
+            "type": "string",
+            "description": "根域名,如 example.com"
+          }
+        }
+      },
+      "agents": [
+        "worker",
+        "pentest",
+        "planner"
+      ],
+      "enabled": true,
+      "kind": "http",
+      "exec": {
+        "url": "https://api.shodan.io/dns/domain/{domain}?key=${SHODAN_API_KEY}",
+        "body": "",
+        "proxy": "",
+        "method": "GET",
+        "headers": {},
+        "timeout_ms": 30000,
+        "use_recording_proxy": false
+      },
+      "deferred": false
+    },
+    {
+      "key": "shodan_host",
+      "description": "用 Shodan 查某 IP 的开放端口/服务/组件版本/banner/已知CVE（被动情报，不消耗 query 额度）。",
+      "schema": {
+        "type": "object",
+        "required": [
+          "ip"
+        ],
+        "properties": {
+          "ip": {
+            "type": "string",
+            "description": "目标IPv4地址"
+          }
+        }
+      },
+      "agents": [
+        "worker",
+        "pentest",
+        "planner"
+      ],
+      "enabled": true,
+      "kind": "http",
+      "exec": {
+        "url": "https://api.shodan.io/shodan/host/{ip}?key=${SHODAN_API_KEY}",
+        "body": "",
+        "proxy": "",
+        "method": "GET",
+        "headers": {},
+        "timeout_ms": 30000,
+        "use_recording_proxy": false
+      },
+      "deferred": false
+    },
+    {
+      "key": "shodan_search",
+      "description": "用 Shodan 搜索(消耗 query 额度,每页100条)。query 支持 ssl: http.title: http.favicon.hash: product: port: org: vuln: 等过滤器。",
+      "schema": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "page": {
+            "type": "integer",
+            "description": "页码,默认1"
+          },
+          "query": {
+            "type": "string",
+            "description": "Shodan查询语句"
+          }
+        }
+      },
+      "agents": [
+        "worker",
+        "pentest",
+        "planner"
+      ],
+      "enabled": true,
+      "kind": "http",
+      "exec": {
+        "url": "https://api.shodan.io/shodan/host/search?key=${SHODAN_API_KEY}&query={query}&page={page}",
+        "body": "",
+        "proxy": "",
+        "method": "GET",
+        "headers": {},
+        "timeout_ms": 30000,
+        "use_recording_proxy": false
+      },
+      "deferred": false
+    }
+  ],
+  "skill_bindings": [
+    {
+      "agent_key": "auto",
+      "skill_name": "artex-intent-cleanup",
+      "enabled": true
+    },
+    {
+      "agent_key": "auto",
+      "skill_name": "bool-sqli-admin-takeover",
+      "enabled": true
+    },
+    {
+      "agent_key": "auto",
+      "skill_name": "ctf-web",
+      "enabled": true
+    },
+    {
+      "agent_key": "goals",
+      "skill_name": "chains-meta",
+      "enabled": true
+    },
+    {
+      "agent_key": "goals",
+      "skill_name": "chains-recon",
+      "enabled": true
+    },
+    {
+      "agent_key": "mainagent",
+      "skill_name": "bool-sqli-admin-takeover",
+      "enabled": true
+    },
+    {
+      "agent_key": "mainagent",
+      "skill_name": "ctf-web",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "api-recon",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "bool-sqli-admin-takeover",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "chains-ad",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "chains-app",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "chains-meta",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "chains-pivot",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "chains-priv",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "chains-pwn",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "chains-recon",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "chains-rev",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "chains-web",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "ctf-ai-ml",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "ctf-web",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "cve-search",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "playwright-cli",
+      "enabled": true
+    },
+    {
+      "agent_key": "pentest",
+      "skill_name": "shodan",
+      "enabled": true
+    },
+    {
+      "agent_key": "planner",
+      "skill_name": "api-recon",
+      "enabled": true
+    },
+    {
+      "agent_key": "planner",
+      "skill_name": "chains-ad",
+      "enabled": true
+    },
+    {
+      "agent_key": "planner",
+      "skill_name": "chains-app",
+      "enabled": true
+    },
+    {
+      "agent_key": "planner",
+      "skill_name": "chains-meta",
+      "enabled": true
+    },
+    {
+      "agent_key": "planner",
+      "skill_name": "chains-pivot",
+      "enabled": true
+    },
+    {
+      "agent_key": "planner",
+      "skill_name": "chains-priv",
+      "enabled": true
+    },
+    {
+      "agent_key": "planner",
+      "skill_name": "chains-pwn",
+      "enabled": true
+    },
+    {
+      "agent_key": "planner",
+      "skill_name": "chains-recon",
+      "enabled": true
+    },
+    {
+      "agent_key": "planner",
+      "skill_name": "chains-rev",
+      "enabled": true
+    },
+    {
+      "agent_key": "planner",
+      "skill_name": "chains-web",
+      "enabled": true
+    },
+    {
+      "agent_key": "planner",
+      "skill_name": "cve-search",
+      "enabled": true
+    },
+    {
+      "agent_key": "planner",
+      "skill_name": "shodan",
+      "enabled": true
+    },
+    {
+      "agent_key": "reporter",
+      "skill_name": "cve-search",
+      "enabled": true
+    },
+    {
+      "agent_key": "retester",
+      "skill_name": "api-recon",
+      "enabled": true
+    },
+    {
+      "agent_key": "retester",
+      "skill_name": "bool-sqli-admin-takeover",
+      "enabled": true
+    },
+    {
+      "agent_key": "retester",
+      "skill_name": "chains-meta",
+      "enabled": false
+    },
+    {
+      "agent_key": "retester",
+      "skill_name": "chains-recon",
+      "enabled": true
+    },
+    {
+      "agent_key": "retester",
+      "skill_name": "chains-web",
+      "enabled": true
+    },
+    {
+      "agent_key": "retester",
+      "skill_name": "cve-search",
+      "enabled": true
+    },
+    {
+      "agent_key": "retester",
+      "skill_name": "playwright-cli",
+      "enabled": true
+    },
+    {
+      "agent_key": "verifier",
+      "skill_name": "api-recon",
+      "enabled": true
+    },
+    {
+      "agent_key": "verifier",
+      "skill_name": "chains-recon",
+      "enabled": true
+    },
+    {
+      "agent_key": "verifier",
+      "skill_name": "chains-web",
+      "enabled": true
+    },
+    {
+      "agent_key": "verifier",
+      "skill_name": "cve-search",
+      "enabled": true
+    },
+    {
+      "agent_key": "verifier",
+      "skill_name": "playwright-cli",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "api-recon",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "artex-intent-cleanup",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "bool-sqli-admin-takeover",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "chains-ad",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "chains-app",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "chains-pivot",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "chains-priv",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "chains-pwn",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "chains-recon",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "chains-rev",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "chains-web",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "ctf-web",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "cve-search",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "playwright-cli",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker",
+      "skill_name": "shodan",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "skill_name": "api-recon",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "skill_name": "artex-intent-cleanup",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "skill_name": "bool-sqli-admin-takeover",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "skill_name": "chains-ad",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "skill_name": "chains-meta",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "skill_name": "chains-pivot",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "skill_name": "chains-priv",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "skill_name": "chains-recon",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "skill_name": "ctf-web",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "skill_name": "cve-search",
+      "enabled": true
+    },
+    {
+      "agent_key": "worker.intranet",
+      "skill_name": "shodan",
+      "enabled": true
+    }
+  ],
+  "prompt_append": {
+    "agent_keys": [
+      "worker",
+      "worker.intranet"
+    ],
+    "source": "skills/artex-intent-cleanup/references/activation.md",
+    "mode": "preview"
+  }
+}

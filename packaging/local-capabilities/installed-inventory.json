@@ -1,0 +1,370 @@
+{
+  "schema": 1,
+  "description": "Reference inventory only. Install from the fixed packaging catalogs; this is not an installation manifest and includes no binaries or virtual environments.",
+  "catalogs": [
+    "packaging/tools-manifest.json",
+    "packaging/python-tools-sources.json"
+  ],
+  "resources": [
+    {
+      "name": "suo5",
+      "version": "2.2.0",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/suo5",
+      "sha256": "f5681a08ed2a5bbe8223584f3b827a09cf65878864685b862120dd010961a9f4",
+      "category": "tunnel"
+    },
+    {
+      "name": "chisel",
+      "version": "1.12.0",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/chisel",
+      "sha256": "13d6208ed0e575eb5ce852d3a9e55ad4af7be3a22f0e0067ffb567c308e1709a",
+      "category": "tunnel"
+    },
+    {
+      "name": "gogo",
+      "version": "2.15.0",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/gogo",
+      "sha256": "1f705ca1065191c5bdfbadf5722e69c85a6640a45de67a83e4fb6f1b9064cdca",
+      "category": "arsenal"
+    },
+    {
+      "name": "naabu",
+      "version": "2.6.1",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/naabu",
+      "sha256": "b76f173c3a3787513bfb3a95827e262b7e2a3fd6864e8a4346410acd1e889a3a",
+      "category": "arsenal"
+    },
+    {
+      "name": "httpx",
+      "version": "1.12.0",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/httpx",
+      "sha256": "34c76faace5657d2deb7e9ae4060e6a15c95c0b8311fcfb268d68f37dab0f67e",
+      "category": "arsenal"
+    },
+    {
+      "name": "katana",
+      "version": "1.8.0",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/katana",
+      "sha256": "380ee5fe18551a68d84f040ac0bd24f56817166df2a1c0d11216ede49b6337e7",
+      "category": "arsenal"
+    },
+    {
+      "name": "fscan",
+      "version": "2.2.2",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/fscan",
+      "sha256": "eca58aa1c1fe7fc43e48478a907be40f1b8627c39674a0365c2aa67b83377418",
+      "category": "arsenal"
+    },
+    {
+      "name": "ligolo-proxy",
+      "version": "0.9.2",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/ligolo-proxy",
+      "sha256": "9deba4988acffd91907f8491ac163a44c781ef497e7c65f60b43268cadf6b1a5",
+      "category": "arsenal"
+    },
+    {
+      "name": "nuclei",
+      "version": "3.11.1",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/nuclei",
+      "sha256": "f427ae885dcd60be25cf27c34a416ef18a803b29e153d5568057d7b6012a454d",
+      "category": "arsenal"
+    },
+    {
+      "name": "ffuf",
+      "version": "2.3.0",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/ffuf",
+      "sha256": "e550d4c517867e584188cf1706de909302fb5ef017bf67caca26b426b45d79af",
+      "category": "arsenal"
+    },
+    {
+      "name": "suo5-php",
+      "version": "2.2.0",
+      "execution": "target",
+      "platform": "any",
+      "path": "tools/suo5-payloads/suo5.php",
+      "sha256": "fd324c46f155c49f843429171b7aeabaf93f07474c0f58f937d8d3f2666fe883",
+      "category": "tunnel"
+    },
+    {
+      "name": "suo5-jsp",
+      "version": "2.2.0",
+      "execution": "target",
+      "platform": "any",
+      "path": "tools/suo5-payloads/suo5.jsp",
+      "sha256": "dce872632388cd739190e1c7ffbb48beb89d8653e44ffa805852a2857699f13f",
+      "category": "tunnel"
+    },
+    {
+      "name": "suo5-aspx",
+      "version": "2.2.0",
+      "execution": "target",
+      "platform": "any",
+      "path": "tools/suo5-payloads/suo5.aspx",
+      "sha256": "6e159e3e0ee8d5dc17a26b89c985761e35f0c52c0702027b88d8c5f8135d21af",
+      "category": "tunnel"
+    },
+    {
+      "name": "mimikatz",
+      "version": "2.2.0-20220919",
+      "execution": "target",
+      "platform": "windows/amd64",
+      "path": "tools/targets/windows-amd64/mimikatz.exe",
+      "sha256": "61c0810a23580cf492a6ba4f7654566108331e7a4134c968c2d6a05261b2d8a1",
+      "category": "arsenal"
+    },
+    {
+      "name": "laZagne",
+      "version": "2.4.7",
+      "execution": "target",
+      "platform": "windows/amd64",
+      "path": "tools/targets/windows-amd64/LaZagne.exe",
+      "sha256": "dc06d62ee95062e714f2566c95b8edaabfd387023b1bf98a09078b84007d5268",
+      "category": "arsenal"
+    },
+    {
+      "name": "ligolo-agent-linux-amd64",
+      "version": "0.9.2",
+      "execution": "target",
+      "platform": "linux/amd64",
+      "path": "tools/targets/linux-amd64/ligolo-agent",
+      "sha256": "df59f9263a075dd869819e2e54dccec3a4417d213af12df8c82859eb57d73048",
+      "category": "arsenal"
+    },
+    {
+      "name": "ligolo-agent-linux-arm64",
+      "version": "0.9.2",
+      "execution": "target",
+      "platform": "linux/arm64",
+      "path": "tools/targets/linux-arm64/ligolo-agent",
+      "sha256": "14c704facda7d42b0cec3dc5c448aa01fb253e038473a2e3bce69300fa85345f",
+      "category": "arsenal"
+    },
+    {
+      "name": "ligolo-agent-windows-amd64",
+      "version": "0.9.2",
+      "execution": "target",
+      "platform": "windows/amd64",
+      "path": "tools/targets/windows-amd64/ligolo-agent.exe",
+      "sha256": "1c7581cb54dab15b61cc8b5fee944d12f8cf96510f993637b91ce57aecbacaa0",
+      "category": "arsenal"
+    },
+    {
+      "name": "ligolo-agent-windows-arm64",
+      "version": "0.9.2",
+      "execution": "target",
+      "platform": "windows/arm64",
+      "path": "tools/targets/windows-arm64/ligolo-agent.exe",
+      "sha256": "8fa0361f949d24f7e84d957476db7adbc73bf972b372b2fe040340ab549c2d1e",
+      "category": "arsenal"
+    },
+    {
+      "name": "ligolo-agent-darwin-arm64",
+      "version": "0.9.2",
+      "execution": "target",
+      "platform": "darwin/arm64",
+      "path": "tools/targets/darwin-arm64/ligolo-agent",
+      "sha256": "eb91f89430b70c102c837103ef5758add05d05b87f560ca419aac27f0605ad7d",
+      "category": "arsenal"
+    },
+    {
+      "name": "ligolo-agent-darwin-amd64",
+      "version": "0.9.2",
+      "execution": "target",
+      "platform": "darwin/amd64",
+      "path": "tools/targets/darwin-amd64/ligolo-agent",
+      "sha256": "834b5b94b068e272edc857f6ed9a94c57fed1b14296390ab91474a53ee814f12",
+      "category": "arsenal"
+    },
+    {
+      "name": "peass-linpeas.sh",
+      "version": "20261026-7db7cb7e",
+      "execution": "target",
+      "platform": "any",
+      "path": "tools/peass/linpeas.sh",
+      "sha256": "d09482ffc38350f50f286aba5ad71d710c1b66cf4522d605f4a90963118eceb1",
+      "category": "arsenal"
+    },
+    {
+      "name": "peass-linpeas_darwin_arm64",
+      "version": "20261026-7db7cb7e",
+      "execution": "target",
+      "platform": "darwin/arm64",
+      "path": "tools/peass/linpeas_darwin_arm64",
+      "sha256": "0f6d404539c3abfe30fddb75f3a1718c253b884925d8bdcc4c97bc6771d31970",
+      "category": "arsenal"
+    },
+    {
+      "name": "peass-linpeas_linux_amd64",
+      "version": "20261026-7db7cb7e",
+      "execution": "target",
+      "platform": "linux/amd64",
+      "path": "tools/peass/linpeas_linux_amd64",
+      "sha256": "ab2cf17b44b8069a4688d7090ca7a68cd2471b3cda509ba64d976d89535891b1",
+      "category": "arsenal"
+    },
+    {
+      "name": "peass-linpeas_linux_arm64",
+      "version": "20261026-7db7cb7e",
+      "execution": "target",
+      "platform": "linux/arm64",
+      "path": "tools/peass/linpeas_linux_arm64",
+      "sha256": "225749e631a86a24f1e7498d02b66c4ca28e374e9676565c881a834d327300a4",
+      "category": "arsenal"
+    },
+    {
+      "name": "peass-winPEASx64.exe",
+      "version": "20261026-7db7cb7e",
+      "execution": "target",
+      "platform": "windows/amd64",
+      "path": "tools/peass/winPEASx64.exe",
+      "sha256": "6410e66a8039a513c60156bf18c5b3ebcc6df803b09d50bddb191ec5cf9153b5",
+      "category": "arsenal"
+    },
+    {
+      "name": "chisel-target-linux-amd64",
+      "version": "1.12.0",
+      "execution": "target",
+      "platform": "linux/amd64",
+      "path": "tools/targets/linux-amd64/chisel",
+      "sha256": "811362311f13ac4bdc42fe4e7650aca618a68e3a40f930de88536d18b14d2b52",
+      "category": "tunnel"
+    },
+    {
+      "name": "chisel-target-linux-arm64",
+      "version": "1.12.0",
+      "execution": "target",
+      "platform": "linux/arm64",
+      "path": "tools/targets/linux-arm64/chisel",
+      "sha256": "8417fbcd05a93f4c6ca1b971cb8fd7ba4702c283c1fdde47b8dce22affc6dba8",
+      "category": "tunnel"
+    },
+    {
+      "name": "chisel-target-windows-amd64",
+      "version": "1.12.0",
+      "execution": "target",
+      "platform": "windows/amd64",
+      "path": "tools/targets/windows-amd64/chisel.exe",
+      "sha256": "ca5f8e5247f1a044b8be45ef03187726b9af3ac30fd93fb5bb54144e34ed3738",
+      "category": "tunnel"
+    },
+    {
+      "name": "chisel-target-windows-arm64",
+      "version": "1.12.0",
+      "execution": "target",
+      "platform": "windows/arm64",
+      "path": "tools/targets/windows-arm64/chisel.exe",
+      "sha256": "d836c4490d2d5651ed59ec88e38284d16c6094f2bf95d8b2b6fea12ac650759e",
+      "category": "tunnel"
+    },
+    {
+      "name": "chisel-target-darwin-arm64",
+      "version": "1.12.0",
+      "execution": "target",
+      "platform": "darwin/arm64",
+      "path": "tools/targets/darwin-arm64/chisel",
+      "sha256": "13d6208ed0e575eb5ce852d3a9e55ad4af7be3a22f0e0067ffb567c308e1709a",
+      "category": "tunnel"
+    },
+    {
+      "name": "chisel-target-darwin-amd64",
+      "version": "1.12.0",
+      "execution": "target",
+      "platform": "darwin/amd64",
+      "path": "tools/targets/darwin-amd64/chisel",
+      "sha256": "07c1066ac2b837cddf7d660b811d5e64ac46ff9469a58805b61d6e2023cfeb4e",
+      "category": "tunnel"
+    },
+    {
+      "name": "nmap",
+      "version": "7.992",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/nmap",
+      "sha256": "d08a4cb43ef36f39dfaa907b53d75554ebc8168904bbf350109b01ef496230d0",
+      "category": "arsenal"
+    },
+    {
+      "name": "nuclei-templates",
+      "version": "10.5.1",
+      "execution": "resource",
+      "platform": "any",
+      "path": "tools/nuclei-templates",
+      "sha256": "",
+      "category": "arsenal"
+    },
+    {
+      "name": "lazagne-macos-source",
+      "version": "2.4.7",
+      "execution": "target",
+      "platform": "any",
+      "path": "tools/targets/darwin-any/lazagne",
+      "sha256": "",
+      "category": "arsenal"
+    },
+    {
+      "name": "impacket",
+      "version": "0.13.1",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/impacket",
+      "sha256": "dfcda1c8cbb5604e4d6c7bcaef7acf4b61a74c3162cc5f76bd684006e96178ac",
+      "category": "arsenal"
+    },
+    {
+      "name": "nxc",
+      "version": "1.5.1",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/nxc",
+      "sha256": "9c4f4c07aaeb2ed3ac7a6aabd6f6a08715041e1f05cdd92596333b29f907e59e",
+      "category": "arsenal"
+    },
+    {
+      "name": "pypykatz",
+      "version": "0.6.13",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/pypykatz",
+      "sha256": "06f7e6b93c0fc62f74491fdcb044cfeeaaa705664f0bf983c520337920c853e5",
+      "category": "arsenal"
+    },
+    {
+      "name": "lazagne-macos",
+      "version": "2.4.7",
+      "execution": "target",
+      "platform": "darwin/arm64",
+      "path": "tools/lazagne-macos",
+      "sha256": "d85a9f26087232262cc2dafe5d050448123877a61c048e176abb288e8ec6f9f8",
+      "category": "arsenal"
+    },
+    {
+      "name": "penelope",
+      "version": "f72cd94c3793132c35cc2c87c28f0f6b8e4a6d79",
+      "execution": "host",
+      "platform": "darwin/arm64",
+      "path": "tools/penelope",
+      "sha256": "f8c402f0f8061d08a5e271b52e7f0dbae26a8478a50600f8b009d6dbc0a5640f",
+      "category": "arsenal"
+    }
+  ]
+}

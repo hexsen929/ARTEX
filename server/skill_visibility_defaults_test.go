@@ -11,18 +11,24 @@ import (
 	"github.com/Autumn-27/artex/db"
 )
 
-func TestInstalledSkillDefaultsMatchPublicReleaseBundle(t *testing.T) {
+func TestInstalledSkillDefaultsMatchReleaseBundle(t *testing.T) {
 	root := filepath.Join("..", "skills")
 	available, skipped, err := installedBuiltinSkillDefaults(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantMissing := []string{"bool-sqli-admin-takeover", "ctf-ai-ml", "ctf-web", "cve-search", "shodan"}
-	if !reflect.DeepEqual(skipped, wantMissing) || len(available) != 11 {
-		t.Fatalf("public package defaults disagree with shipped files: available=%v skipped=%v", available, skipped)
+	wantAvailable := []string{
+		"api-recon", "bool-sqli-admin-takeover", "chains-ad", "chains-app", "chains-meta",
+		"chains-pivot", "chains-priv", "chains-pwn", "chains-recon", "chains-rev",
+		"chains-web", "ctf-ai-ml", "ctf-web", "cve-search", "playwright-cli", "shodan",
 	}
-	if slices.Contains(available, "scopesentry") {
-		t.Fatal("installed optional Skill was automatically default-authorized")
+	if len(skipped) != 0 || !reflect.DeepEqual(available, wantAvailable) {
+		t.Fatalf("package defaults disagree with shipped files: available=%v skipped=%v", available, skipped)
+	}
+	for _, name := range []string{"scopesentry", "artex-intent-cleanup", "zz-probe"} {
+		if slices.Contains(available, name) {
+			t.Fatalf("installed optional Skill was automatically default-authorized: %s", name)
+		}
 	}
 	for _, name := range available {
 		if !slices.Contains(db.BuiltinSkillDefaultNames(), name) {
