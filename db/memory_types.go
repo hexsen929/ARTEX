@@ -93,6 +93,9 @@ type MemorySearchInput struct {
 	AgentKey       string
 	SessionID      string
 	Limit          int
+	// ForRecall retrieves a bounded candidate buffer before server-side safety,
+	// exact deduplication and whole-note byte budgeting. It is not an output cap.
+	ForRecall bool
 }
 
 type MemoryRef struct {
@@ -134,6 +137,7 @@ type MemoryJob struct {
 	SettingsEpoch int64        `json:"settings_epoch"`
 	State         string       `json:"state"`
 	Attempts      int          `json:"attempts"`
+	Truncations   int          `json:"-"`
 	LeaseToken    string       `json:"-"`
 	LeaseUntil    *time.Time   `json:"lease_until,omitempty"`
 	CreatedAt     time.Time    `json:"created_at"`

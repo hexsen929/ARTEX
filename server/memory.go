@@ -567,6 +567,7 @@ func (s *Server) recallMemory(ctx context.Context, info agent.RunInfo, role stri
 	defer cancel()
 	entries, settings, err := s.m.pg.SearchMemory(lookupCtx, db.MemorySearchInput{
 		Query: query, TaskID: info.TaskID, ConversationID: convID, AgentKey: role, SessionID: sessionID,
+		ForRecall: true,
 	})
 	if err != nil {
 		return empty, errors.New("记忆读取暂不可用，本次继续使用原任务上下文")

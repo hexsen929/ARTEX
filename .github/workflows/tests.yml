@@ -234,6 +234,15 @@ jobs:
           grep -q -- '^--- PASS: TestMemoryBudgetReleaseWaitsForBothWindowsAndLoweredLimit ' "$memory_log"
           grep -q -- '^--- PASS: TestMemoryThirdExpiredLeaseTerminatesWithoutFourthAttempt ' "$memory_log"
 
+      - name: Memory extraction recovery and recall regressions
+        run: |
+          set -euo pipefail
+          memory_log="$RUNNER_TEMP/memory-recovery.log"
+          go test -race -p=1 -v ./memory ./db ./server -run '^(TestExtractDetailedTruncationRecovery|TestMemoryBudgetDeferral|TestMemoryBudgetDeniedSDK|TestMemoryRecoveryMigration|TestMemoryWorkerRecoversTruncated|TestMemoryWorkerRecoveryDeadline|TestMemoryRecallCandidates)' -count=1 -timeout=5m | tee "$memory_log"
+          for name in TestExtractDetailedTruncationRecoveryRemainsBounded TestMemoryBudgetDeferralPreservesUnsentRetries TestMemoryBudgetDeniedSDKRetryKeepsAdmittedAttempt TestMemoryRecoveryMigrationPreservesPendingAndTerminalJobs TestMemoryWorkerRecoversTruncatedResponsesWithBoundedBudget TestMemoryWorkerRecoveryDeadlineFitsLease TestMemoryRecallCandidatesSurviveDuplicateAndSensitiveTopHits; do
+            grep -q -- "^--- PASS: $name " "$memory_log"
+          done
+
       - name: PostgreSQL 18 upstream task visibility and probe settings
         run: |
           set -euo pipefail

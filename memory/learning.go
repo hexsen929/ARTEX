@@ -21,11 +21,12 @@ const (
 	// metadata and JSON escaping, not only Content. A stage may select fewer
 	// complete facts to fit, with explicit partial coverage; no fact text or
 	// qualification is truncated to fit the envelope.
-	MaxInputBytes   = 12_000
-	MaxOutputBytes  = 16_384
-	MaxOutputTokens = 1_500
-	MaxDrafts       = 3
-	MaxDuration     = 45 * time.Second
+	MaxInputBytes    = 12_000
+	MaxOutputBytes   = 16_384
+	MaxOutputTokens  = 3_000
+	MaxDrafts        = 3
+	MaxDuration      = 60 * time.Second
+	MaxRetryDuration = 90 * time.Second
 
 	// Automatic notes must fit as complete reference material, not merely an
 	// index entry whose omitted body has no runtime reader. Limits are UTF-8
@@ -140,6 +141,23 @@ var errEmptyStage = errors.New("memory stage has no complete facts")
 // returns fixed diagnostic categories, never provider/source/response text.
 // Source/settings/lease validation and entry activation belong to the host.
 func ExtractDetailed(ctx context.Context, provider llm.Provider, model string, input Input) (ExtractionResult, error) {
+	return ExtractAfterTruncations(ctx, provider, model, input, 0)
+}
+
+// ExtractionLimits reserves bounded room for providers whose output allowance
+// includes reasoning. Only a recorded truncation raises the next attempt's
+// allowance; malformed output and transport failures do not. It does not raise
+// the stored-note limits, retry count or hourly request quota.
+func ExtractionLimits(truncations int) (int, time.Duration) {
+	if truncations <= 0 {
+		return MaxOutputTokens, MaxDuration
+	}
+	return 6_000, MaxRetryDuration
+}
+
+// ExtractAfterTruncations still makes exactly one completion. The worker owns
+// the persistent truncation count, retry delay, source checks and HTTP budget.
+func ExtractAfterTruncations(ctx context.Context, provider llm.Provider, model string, input Input, truncations int) (ExtractionResult, error) {
 	if ctx == nil {
 		return ExtractionResult{}, inputDiagnostic(fmt.Errorf("%w: missing context", ErrInvalid))
 	}
@@ -168,7 +186,8 @@ func ExtractDetailed(ctx context.Context, provider llm.Provider, model string, i
 	if err != nil {
 		return ExtractionResult{}, inputDiagnostic(err)
 	}
-	callCtx, cancel := context.WithTimeout(ctx, MaxDuration)
+	outputTokens, duration := ExtractionLimits(truncations)
+	callCtx, cancel := context.WithTimeout(ctx, duration)
 	defer cancel()
 	if err := callCtx.Err(); err != nil {
 		return ExtractionResult{}, err
@@ -179,7 +198,7 @@ func ExtractDetailed(ctx context.Context, provider llm.Provider, model string, i
 		System:      []string{extractionInstruction},
 		Messages:    []llm.Message{llm.UserText(string(data))},
 		Tools:       []llm.ToolSchema{},
-		MaxTokens:   MaxOutputTokens,
+		MaxTokens:   outputTokens,
 		Temperature: &temperature,
 		Thinking:    "disabled",
 	})
