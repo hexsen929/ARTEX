@@ -210,7 +210,7 @@ func TestRuntimeContractToolLoopStopsRepeatedInvalidEdits(t *testing.T) {
 
 func TestRuntimeContractSDKValidationFailureStopsBeforeHandler(t *testing.T) {
 	calls, executed := 0, 0
-	probe := actool.Build(actool.Spec{Name: "set_finding_verification", Description: "synthetic validation", Schema: map[string]any{"type": "object", "properties": map[string]any{"version": map[string]any{"type": "integer"}}, "required": []string{"version"}}, Run: func(context.Context, json.RawMessage, *actool.ToolContext) (actool.Result, error) {
+	probe := actool.Build(actool.Spec{Name: "set_finding_verification", Description: "synthetic validation", Schema: map[string]any{"type": "object", "properties": map[string]any{"version": map[string]any{"type": "integer"}}, "required": []any{"version"}}, Run: func(context.Context, json.RawMessage, *actool.ToolContext) (actool.Result, error) {
 		executed++
 		return actool.Text("must not run"), nil
 	}})
