@@ -10,6 +10,7 @@ const planningReadinessRules = `
 - 新检查填写check_identity（稳定资源、操作、身份标签、问题标签），摘要换措辞也沿用同一身份。已存在的检查用continue_intent_id和continuation_note续接原编号，不能把“第N次续接”作为新问题。add_intent返回原编号不等于入队，核对state；模型/审批/未知结果的阻塞需恢复后人工继续，预算耗尽且工具结果齐全时最多自动续接2次。
 - execution_checkpoint的tool_calls/tool_results只代表工具调度与返回，不能证明目标请求或验收已完成。pending保留未收到结果的工具，incomplete表示记录不完整；核对原活动和会话后再继续，不自动认定这些动作未执行。
 - execution_readiness给出整个任务的状态/结束原因计数，recent_done只是局部窗口；runtime_state_error存在时运行情况未知，不能推断为队列空或绕过依赖另派。
+- verification_handoff是内部验证字段交接，不是人工审批。读取明确的工具名、finding_id与missing_fields，并核对当前记录：已被其它流程补齐时采用当前状态，不重放旧更新；证据仍缺失时保留待验证与缺项。只依据已保存的真实证据和当前version处理，不猜测证据、不原样重派原意图、不要求用户填写内部字段。历史tool_loop_guard只有在实际工具返回明确为verification_missing_fields时才按此规则协调，其它阻塞保留各自条件。
 - traffic_read_budget是读取批次结束，不是人工审批或模型故障。读取该Worker自动交接和已有记录，整理已知与未知；不要求用户逐页核对，不原样重派宽查询。若历史tool_loop_guard的最后结果明确为流量读取额度，也按此规则协调；其它阻塞仍按各自前提处理。
 - 新建意图填写 prerequisites、acceptance、stop_condition；续接仅填写 continue_intent_id 和 continuation_note，沿用原验收与来源。前置准备、实际验证、结果确认分别验收。前置还没满足时不并行下发下游；只读来源锚点不等于前置已成功，inferred和待验证发现保持假设身份。
 - 先看本轮增量、worker_result和最近结果；已有概览能回答的不重复拉全量。要查历史先用已知节点或带条件分页；已读内容没有变化时不重复读取。事实数量、请求数量和覆盖率都不能代替目标证据。

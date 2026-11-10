@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
@@ -42,6 +43,7 @@ type toolLoopGuard struct {
 	readBudget                bool
 	handoffTaken              bool
 	handoffText               string
+	hardContractFailure       bool
 }
 
 type toolLoopGuardKey struct{}
@@ -181,9 +183,21 @@ func observeToolLoopResult(ctx context.Context, name string, input, result []byt
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.failures++
+	var verification *db.VerificationFieldFailure
+	if name == "set_finding_verification" {
+		verification = db.ParseVerificationFieldFailure(input, result)
+	}
+	if verification == nil {
+		g.hardContractFailure = true
+	}
 	key := name + ":" + code + ":" + contractFailureTarget(input)
 	g.repeated[key]++
 	if g.repeated[key] >= repeatedContractFailureLimit || g.failures >= contractFailureLimit {
+		if verification != nil && !g.hardContractFailure && g.stopped == nil {
+			g.stopped = &verificationHandoffError{failure: verification}
+			g.cancel(g.stopped)
+			return
+		}
 		g.stopLocked("repeated_contract_failure")
 	}
 }

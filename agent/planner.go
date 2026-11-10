@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -489,7 +488,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 				emit(r)
 			}
 		})
-	if errors.Is(err, ErrTrafficReadBudget) {
+	if automaticToolHandoff(err) {
 		err = nil
 	}
 	return tsx.GoalMet, tsx.Reason, err

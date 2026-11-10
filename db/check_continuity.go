@@ -70,7 +70,7 @@ func (s *ExplorationStore) ContinuePlannerIntent(id int64, note string, limit in
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return 0, err
 	}
-	if state == "exhausted" && p.Result.Code == "traffic_read_budget" {
+	if state == "exhausted" && (p.Result.Code == "traffic_read_budget" || p.Result.Code == VerificationHandoffCode) {
 		// The work has already handed its saved results back to the Planner.
 		// Do not turn coordination into replay of the same bounded read loop.
 		return id, tx.Commit()

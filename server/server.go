@@ -413,10 +413,10 @@ func (s *Server) restoreTaskRuntimes() {
 	// restore persisted paused state (so a task paused before restart stays paused).
 	for _, t := range m.LoadExisting() {
 		repairCtx, repairCancel := context.WithTimeout(s.ctx, 5*time.Second)
-		if n, err := t.Store.ReclassifyLegacyReadBudgetStops(repairCtx); err != nil {
-			log.Printf("[runtime] task %s read-budget classification pending", t.ID)
+		if n, err := t.Store.ReclassifyLegacyToolStops(repairCtx); err != nil {
+			log.Printf("[runtime] task %s tool-stop classification pending", t.ID)
 		} else if n > 0 {
-			log.Printf("[runtime] task %s reclassified %d saved read-budget stops without executing work", t.ID, n)
+			log.Printf("[runtime] task %s reclassified %d saved tool stops without executing work", t.ID, n)
 		}
 		repairCancel()
 		lifecycle := t.lifecycleSnapshot()

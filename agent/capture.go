@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -88,8 +87,8 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 		if err != nil {
 			flush()
 			if cause := toolLoopCause(ctx); cause != nil {
-				rec(activityWithUsage(db.Activity{Kind: "result", IsError: true, Summary: cause.Error(), Detail: cause.Error()}, lastUsage))
-				return finalText, harness.ReasonHookStopped, cause
+				rec(activityWithUsage(db.Activity{Kind: "result", IsError: !automaticToolHandoff(cause), Summary: cause.Error(), Detail: cause.Error()}, lastUsage))
+				return cause.Error(), harness.ReasonHookStopped, cause
 			}
 			if ctx.Err() != nil { // engine/user cancellation, not a provider failure
 				sum, detail := terminalText(ctx, &harness.Terminal{Reason: reason, Err: ctx.Err()}, lastTool)
@@ -178,7 +177,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 					sum, detail = terminalText(ctx, ev.Terminal, lastTool)
 				}
 				u := ev.Terminal.Usage // cumulative token usage for this session
-				rec(db.Activity{Kind: "result", IsError: ev.Terminal.Err != nil && !errors.Is(ev.Terminal.Err, ErrTrafficReadBudget),
+				rec(db.Activity{Kind: "result", IsError: ev.Terminal.Err != nil && !automaticToolHandoff(ev.Terminal.Err),
 					Summary: firstLine(sum, 400), Detail: detail,
 					InputTokens: &u.InputTokens, OutputTokens: &u.OutputTokens,
 					CacheReadTokens: &u.CacheReadTokens, CacheWriteTokens: &u.CacheWriteTokens})

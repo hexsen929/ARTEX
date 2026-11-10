@@ -27,7 +27,11 @@ func (t *ToolSet) verifyFinding() actool.CoreTool {
 		if err != nil {
 			var missing *db.VerificationMissingFields
 			if errors.As(err, &missing) {
-				raw, _ := json.Marshal(map[string]any{"error": "verification_missing_fields", "missing_fields": missing.Fields, "retryable_without_changes": false, "message": missing.Error()})
+				raw, _ := json.Marshal(map[string]any{
+					"error": "verification_missing_fields", "finding_id": pid(a.FindingID), "missing_fields": missing.Fields,
+					"retryable_without_changes": false, "requires_operator": false, "message": missing.Error(),
+					"repair": "由调用 Agent 处理：先读取当前记录，已更新成功则停止提交；additional_evidence 只能填写已实际读取且支持该结论的证据正文，note 只写判断依据。缺少真实证据时保留待验证状态并交接缺项，不请求用户填写内部字段，不原样重试。",
+				})
 				return actool.Errorf(string(raw)), nil
 			}
 			return actool.Errorf(err.Error()), nil
