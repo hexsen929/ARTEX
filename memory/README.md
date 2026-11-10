@@ -13,7 +13,10 @@ the server owns administrator endpoints and provider selection; `agent` and
   worker intents and tasks must end and settle for 30 seconds before learning.
   One stage has one bounded summary job, selecting at most eight complete native
   fact summaries. Coverage limitations and real confidence remain explicit.
-  Administrators can explicitly enqueue at most 50 historical stages at a time.
+  Administrators can explicitly inspect at most 50 historical stages at a time,
+  then continue using the returned cursor even when the batch queues nothing.
+  The cursor is bound to the task scope and settings epoch. A full queue retains
+  the position before the unqueued stage; starting over rechecks changed history.
 - Briefs, ordinary chat, assistant repetitions, untracked digests, raw evidence,
   traffic, credentials and reports are not automatic sources. Task-level fallback
   includes only facts not already owned by worker stages.

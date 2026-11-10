@@ -125,6 +125,18 @@ func sameMemorySource(a, b MemorySource) bool {
 }
 
 func (d *DB) QueueMemoryExtraction(ctx context.Context, source MemorySource) (bool, error) {
+	queued, err := d.queueMemoryExtraction(ctx, source)
+	if errors.Is(err, errMemoryQueueFull) {
+		return false, nil
+	}
+	return queued, err
+}
+
+var errMemoryQueueFull = errors.New("memory learning queue is full")
+
+// History pagination must distinguish capacity from an already queued source:
+// it must retry the same cursor instead of losing an eligible stage.
+func (d *DB) queueMemoryExtraction(ctx context.Context, source MemorySource) (bool, error) {
 	if !isMemoryStage(source.Kind) {
 		return false, ErrMemoryInput
 	}
@@ -173,7 +185,7 @@ func (d *DB) QueueMemoryExtraction(ctx context.Context, source MemorySource) (bo
 		return false, err
 	}
 	if pending >= 200 {
-		return false, nil
+		return false, errMemoryQueueFull
 	}
 	var refID int64
 	var suppressed sql.NullTime

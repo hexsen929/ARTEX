@@ -21,7 +21,7 @@ import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetT
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { memoryAPI } from "@/lib/memory-api";
+import { memoryAPI, type MemoryHistoryProgress } from "@/lib/memory-api";
 import { MEMORY_KIND_LABELS, MEMORY_STATUS_LABELS, memoryConflict, memorySourceHref, memorySourceLabel, memorySharingLabel, memoryTime, validateMemoryEntryInput, type MemoryEntry, type MemoryEntryInput, type MemoryKind, type MemoryQuery, type MemorySettings, type MemoryStatus } from "@/lib/memory-types";
 
 const PAGE_SIZE = 20;
@@ -68,6 +68,8 @@ export default function MemoriesPage() {
   const [extractOpen, setExtractOpen] = React.useState(false);
   const [extractTask, setExtractTask] = React.useState("");
   const [extractError, setExtractError] = React.useState("");
+  const [extractProgress, setExtractProgress] = React.useState<MemoryHistoryProgress | null>(null);
+  const [extractConflict, setExtractConflict] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const busyRef = React.useRef(false);
   const mounted = React.useRef(false);
@@ -196,10 +198,17 @@ export default function MemoriesPage() {
     if (!startMutation()) return;
     setExtractError("");
     try {
-      const result = await memoryAPI.extract(id);
-      if (!Number.isSafeInteger(result.queued) || result.queued < 0) throw new Error("服务未确认排队结果");
-      if (mounted.current) { setExtractOpen(false); toast.success(result.queued > 0 ? `已排队 ${result.queued} 个已结束阶段，等待后台总结；尚未报告产生经验` : "本批没有新增可排队的已结束阶段，不代表全部历史已学习"); }
-    } catch (cause) { if (mounted.current) setExtractError(`回顾请求失败：${(cause as Error).message}`); }
+      const result = await memoryAPI.extract(id, extractProgress?.next_cursor);
+      if (mounted.current) {
+        setExtractProgress(result);
+        toast.success(`本批检查 ${result.scanned} 个阶段，已排队 ${result.queued} 个；尚未报告产生经验`);
+      }
+    } catch (cause) {
+      if (mounted.current) {
+        setExtractConflict(memoryConflict(cause));
+        setExtractError(memoryConflict(cause) ? "设置或来源已变化，请从头重新检查；已排队的阶段不会重复入队。" : `回顾请求失败：${(cause as Error).message}`);
+      }
+    }
     finally { finishMutation(); }
   };
 
@@ -210,7 +219,7 @@ export default function MemoriesPage() {
     <div className="flex min-w-0 flex-1 flex-col gap-5 p-4 md:p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div><h1 className="flex items-center gap-2 text-xl font-semibold"><BrainIcon className="size-5" />跨任务经验库</h1><p className="text-muted-foreground mt-1 text-sm">自动共享工具、方法和排错经验；目标记录仅在原任务使用。有效条目是否命中取决于相关性与预算，不等于已确认漏洞。</p></div>
-        <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy || !extractionAvailable} onClick={() => { setExtractTask(taskFilter); setExtractError(""); setExtractOpen(true); }}><HistoryIcon className="size-4" />主动回顾历史</Button><Button disabled={busy} onClick={() => openEditor(null)}><PlusIcon className="size-4" />记住这个</Button></div>
+        <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy || !extractionAvailable} onClick={() => { setExtractTask(taskFilter); setExtractError(""); setExtractProgress(null); setExtractConflict(false); setExtractOpen(true); }}><HistoryIcon className="size-4" />主动回顾历史</Button><Button disabled={busy} onClick={() => openEditor(null)}><PlusIcon className="size-4" />记住这个</Button></div>
       </div>
       {settingsError ? <p role="alert" className="text-destructive text-sm">{settingsError}。请在设置页签重新读取，未知状态不会用于发起提炼。</p> : settings?.model_available === false ? <p role="alert" className="text-destructive text-sm">自动提炼不可用：{settings.model_error || "尚未配置可用模型"}。<Link className="underline" href="/system/llm">前往 LLM 设置</Link></p> : settings && !settings.enabled ? <p role="status" className="text-muted-foreground text-sm">记忆已关闭：停止新的学习与召回，仍可管理已有条目。</p> : settings && !settings.auto_extract ? <p role="status" className="text-muted-foreground text-sm">阶段自动总结已关闭，已有经验仍按其范围召回；主动回顾已结束阶段前请先开启阶段自动总结。</p> : null}
       {selectedError ? <p role="alert" className="text-destructive text-sm">{selectedError}</p> : null}
@@ -268,7 +277,35 @@ export default function MemoriesPage() {
 
       <AlertDialog open={!!deleting} onOpenChange={(open) => { if (!open && !busy) setDeleting(null); }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>删除这条记忆？</AlertDialogTitle><AlertDialogDescription>将删除“{deleting?.title}”并停止后续召回。不会删除原始任务证据、历史聊天、检查点、旧导出或已发送给模型的请求。</AlertDialogDescription></AlertDialogHeader>{deleteError ? <p role="alert" className="text-destructive text-sm">{deleteError}</p> : null}<AlertDialogFooter><AlertDialogCancel disabled={busy}>取消</AlertDialogCancel><AlertDialogAction variant="destructive" disabled={busy} onClick={(event) => { event.preventDefault(); void remove(); }}>{busy ? "删除中…" : "确认删除记忆"}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
 
-      <Dialog open={extractOpen} onOpenChange={(open) => { if (!busy) setExtractOpen(open); }}><DialogContent><DialogHeader><DialogTitle>回顾已结束阶段</DialogTitle><DialogDescription>把符合条件的已结束阶段排队为有界总结任务，会发送择要资料给所选模型并产生额外费用。每阶段最多取 8 段完整事实摘录，可能仅覆盖部分记录；本批排队数不代表所有历史均已扫描。</DialogDescription></DialogHeader><div className="space-y-2"><Label htmlFor="memory-extract-task">来源任务 ID（留空为各任务的已结束阶段）</Label><Input id="memory-extract-task" inputMode="numeric" value={extractTask} disabled={busy} onChange={(event) => setExtractTask(event.target.value)} /></div><p className="text-muted-foreground text-xs">自动学习起点：{memoryTime(settings?.learn_after)}。此操作仅排队阶段总结，不报告已经学习；有限重试也计入调用预算。</p>{extractError ? <p role="alert" className="text-destructive text-sm">{extractError}</p> : null}<DialogFooter><Button variant="outline" disabled={busy} onClick={() => setExtractOpen(false)}>取消</Button><Button disabled={busy || !extractionAvailable} onClick={() => void extract()}>{busy ? "排队中…" : "确认回顾并排队"}</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={extractOpen} onOpenChange={(open) => { if (!busy) setExtractOpen(open); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>回顾已结束阶段</DialogTitle>
+            <DialogDescription>每批检查最多 50 个已结束阶段，只把符合条件的阶段排队总结。后续提炼会发送择要资料给所选模型并产生额外费用，每阶段最多取 8 段完整事实摘录。</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="memory-extract-task">来源任务 ID（留空为各任务的已结束阶段）</Label>
+            <Input id="memory-extract-task" inputMode="numeric" value={extractTask} disabled={busy} onChange={(event) => {
+              setExtractTask(event.target.value); setExtractProgress(null); setExtractConflict(false); setExtractError("");
+            }} />
+          </div>
+          <p className="text-muted-foreground text-xs">自动学习起点：{memoryTime(settings?.learn_after)}。排队不代表已经产生经验，有限重试也计入调用预算。</p>
+          {extractProgress ? <div role="status" className="space-y-1 text-sm">
+            <p>本批已检查 {extractProgress.scanned} 个阶段，排队 {extractProgress.queued} 个。</p>
+            <p>{extractProgress.queue_full ? "总结队列已满；等待后台处理后重试，将从未排队的位置继续。" : extractProgress.has_more ? "后面还有阶段，可以继续下一批；本批没有新增也不会阻挡后续扫描。" : "本轮已扫描到末尾；已排队阶段仍需等待总结，不代表全部已产生经验。"}</p>
+          </div> : null}
+          {extractError ? <p role="alert" className="text-destructive text-sm">{extractError}</p> : null}
+          <DialogFooter>
+            <Button variant="outline" disabled={busy} onClick={() => setExtractOpen(false)}>关闭</Button>
+            {extractProgress || extractConflict ? <Button variant="outline" disabled={busy} onClick={() => {
+              setExtractProgress(null); setExtractConflict(false); setExtractError("");
+            }}>从头重新检查</Button> : null}
+            <Button disabled={busy || !extractionAvailable || extractConflict || (extractProgress !== null && !extractProgress.has_more)} onClick={() => void extract()}>
+              {busy ? "检查并排队中…" : extractProgress?.queue_full ? "重试本批" : extractProgress?.has_more ? "继续下一批" : "确认回顾并排队"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

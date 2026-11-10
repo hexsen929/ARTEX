@@ -85,6 +85,11 @@ func (d *DB) UpdateMemorySettings(ctx context.Context, in MemorySettings, expect
 		WHERE state IN ('queued','running','failed')`); err != nil {
 		return current, err
 	}
+	// Eligibility can change with the epoch even if native source content did
+	// not. Invalidate cached rejections so the new settings are observed promptly.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_discovery_checks`); err != nil {
+		return current, err
+	}
 	in.Epoch, in.LearnAfter = current.Epoch+1, current.LearnAfter
 	return in, tx.Commit()
 }
@@ -147,7 +152,7 @@ func memoryFilterSQL(filter MemoryFilter) (string, []any) {
 		clauses = append(clauses, fmt.Sprintf(expr, len(args)))
 	}
 	if filter.Query != "" {
-		add(`(e.title ILIKE $%[1]d OR e.content ILIKE $%[1]d OR e.applicability ILIKE $%[1]d OR e.target ILIKE $%[1]d)`, memoryLikePattern(filter.Query))
+		add(`(e.title ILIKE $%[1]d OR e.content ILIKE $%[1]d OR e.applicability ILIKE $%[1]d OR e.target ILIKE $%[1]d OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(e.tags) AS tag(value) WHERE tag.value ILIKE $%[1]d))`, memoryLikePattern(filter.Query))
 	}
 	if filter.State != "" {
 		add(`(`+memoryEntryStateSQL+`)=$%d`, filter.State)

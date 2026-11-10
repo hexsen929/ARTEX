@@ -428,7 +428,8 @@ func (s *Server) extractMemoryHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		TaskID int64 `json:"task_id"`
+		TaskID int64  `json:"task_id"`
+		Cursor string `json:"cursor"`
 	}
 	if !decodeMemoryRequest(w, r, &input) {
 		return
@@ -450,24 +451,16 @@ func (s *Server) extractMemoryHistory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "提炼模型不可用；本次未排队")
 		return
 	}
-	sources, err := pg.FindMemoryHistorySources(r.Context(), input.TaskID, 50)
+	progress, err := pg.QueueMemoryHistoryPage(r.Context(), input.TaskID, input.Cursor)
 	if err != nil {
 		memoryAPIError(w, err)
 		return
 	}
-	queued := 0
-	for _, source := range sources {
-		ok, err := pg.QueueMemoryExtraction(r.Context(), source)
-		if err != nil {
-			memoryAPIError(w, err)
-			return
-		}
-		if ok {
-			queued++
-		}
-	}
 	s.wakeMemoryWorker()
-	writeJSON(w, http.StatusAccepted, map[string]any{"queued": queued, "unit": "stages"})
+	writeJSON(w, http.StatusAccepted, struct {
+		db.MemoryHistoryProgress
+		Unit string `json:"unit"`
+	}{progress, "stages"})
 }
 
 func memoryConversationID(session string) int64 {
