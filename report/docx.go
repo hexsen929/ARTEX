@@ -78,7 +78,11 @@ func pictureInfo(raw []byte) (int, int, string, error) {
 	}
 	return cfg.Width, cfg.Height, format, nil
 }
-func xmlText(s string) string { var b bytes.Buffer; _ = xml.EscapeText(&b, s); return b.String() }
+func xmlText(s string) string {
+	var b bytes.Buffer
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
+}
 
 type wordDocument struct {
 	body    strings.Builder

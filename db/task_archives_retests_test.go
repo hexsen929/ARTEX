@@ -478,7 +478,7 @@ func TestTaskArchiveRetestRestoreRejectsForeignSourceAndActivities(t *testing.T)
 }
 
 func TestTaskArchiveRetestFormatRequiresNewHistoryTables(t *testing.T) {
-	if !IsTaskArchiveFormatSupported(5) || TaskArchiveFormatVersion != 6 {
+	if !IsTaskArchiveFormatSupported(5) || !IsTaskArchiveFormatSupported(6) || TaskArchiveFormatVersion != 7 {
 		t.Fatal("archive compatibility boundary changed incorrectly")
 	}
 	for _, table := range []string{"finding_retests", "conversations", "conversation_activities", "intercept_pending", "side_question_sessions", "side_question_requests"} {

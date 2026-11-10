@@ -287,7 +287,7 @@ export default function ReportsPage() {
                     template,
                     findings
                       .filter((f) => selected.includes(f.finding_id || f.id))
-                      .map((f) => ({ id: Number(f.finding_id || f.id), evidence_version: f.evidence_version })),
+                      .map((f) => { if (typeof f.evidence_version !== "number") throw new Error("漏洞证据版本缺失，请刷新列表"); return { id: Number(f.finding_id || f.id), evidence_version: f.evidence_version }; }),
                     include,
                   );
                   toast.success("报告已生成并下载");
