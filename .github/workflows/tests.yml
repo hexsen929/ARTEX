@@ -288,6 +288,15 @@ jobs:
             grep -q -- "^--- PASS: $name " "$handoff_log"
           done
 
+      - name: Verification field handoff
+        run: |
+          set -euo pipefail
+          verification_log="$RUNNER_TEMP/verification-handoff.log"
+          go test -race -p=1 -v ./agent ./db ./server -run '^TestVerificationHandoff' -count=1 -timeout=5m | tee "$verification_log"
+          for name in TestVerificationHandoffActualRejectedUpdatesPreserveFinding TestVerificationHandoffRejectsUnknownOrMixedFaults TestVerificationHandoffPlannerOwnsFieldsWithoutRequeue TestVerificationHandoffKeepsPendingToolsBlocked TestVerificationHandoffLegacyRepairPreservesEvidenceAndGeneration TestVerificationHandoffOutcomePreservesExplicitDiagnosis; do
+            grep -q -- "^--- PASS: $name " "$verification_log"
+          done
+
       - name: Runtime contracts and bounded tool loops
         run: |
           set -euo pipefail

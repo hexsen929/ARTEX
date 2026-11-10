@@ -37,6 +37,11 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 			m["requires_operator"] = false
 			m["automatic_requeue"] = false
 		}
+		if result, ok := p["worker_result"].(map[string]any); ok && result["code"] == db.VerificationHandoffCode {
+			m["next_action"] = "review_saved_verification"
+			m["requires_operator"] = false
+			m["automatic_requeue"] = false
+		}
 		if n.Inherited {
 			m["source_task_id"] = n.SourceTaskID
 			m["inherited"] = true

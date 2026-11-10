@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -65,6 +66,14 @@ func TestRuntimeContractLoopStopIsBlockedAndNotRetried(t *testing.T) {
 func TestReadBudgetOutcomeIsAutomaticHandoff(t *testing.T) {
 	state, code, message := workerOutcome(harness.ReasonMaxTurns, agent.ErrTrafficReadBudget)
 	if state != "exhausted" || code != "traffic_read_budget" || !strings.Contains(message, "Planner") || strings.Contains(message, "等待人工") || retryableWorkerModelError(harness.ReasonMaxTurns, agent.ErrTrafficReadBudget) {
+		t.Fatal(state, code, message)
+	}
+}
+
+func TestVerificationHandoffOutcomePreservesExplicitDiagnosis(t *testing.T) {
+	err := fmt.Errorf("set_finding_verification missing additional_evidence: %w", agent.ErrVerificationHandoff)
+	state, code, message := workerOutcome(harness.ReasonHookStopped, err)
+	if state != "exhausted" || code != "verification_handoff" || !strings.Contains(message, "additional_evidence") || strings.Contains(message, "等待人工") || retryableWorkerModelError(harness.ReasonHookStopped, err) {
 		t.Fatal(state, code, message)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
@@ -24,11 +25,26 @@ var ErrTrafficReadBudget = errors.New("traffic_read_budget")
 
 // Contains only host-selected categories, never target URLs, arguments or
 // provider errors. This is a blocked run, not a completed task or a model fault.
-type toolLoopError struct{ category string }
+type toolLoopError struct {
+	category     string
+	verification *db.VerificationFieldFailure
+}
 
 func (e *toolLoopError) Unwrap() error { return ErrToolLoopGuard }
 func (e *toolLoopError) Error() string {
-	return "tool_loop_guard: 同类参数或恢复条件错误反复出现，本轮已停止；已有记录保留，尚未完成。请先处理明确的缺失字段或人工恢复条件，不重放同一请求。"
+	if e.verification != nil {
+		return fmt.Sprintf("tool_loop_guard: set_finding_verification 更新记录 #%d 缺少 %s；本轮还存在其它工具错误或未返回操作，系统保留各项原因与已有进度，不重放原请求、不要求用户猜测内部字段。", e.verification.FindingID, strings.Join(e.verification.Fields, ", "))
+	}
+	return "tool_loop_guard: 工具请求重复失败，本轮已停止；具体原因保留在最后的工具返回，已有记录保留，尚未完成。系统需核对错误类型与未完成操作，不重放同一请求。"
+}
+
+// Expose only the host-constructed diagnostic, never arbitrary provider text.
+func ToolLoopDiagnostic(err error) string {
+	var stopped *toolLoopError
+	if errors.As(err, &stopped) {
+		return stopped.Error()
+	}
+	return "工具请求重复失败，本轮已停止；具体原因保留在最后的工具返回中，已有进度保留，不自动重派"
 }
 
 type toolLoopGuard struct {
@@ -42,6 +58,7 @@ type toolLoopGuard struct {
 	readBudget                bool
 	handoffTaken              bool
 	handoffText               string
+	hardContractFailure       bool
 }
 
 type toolLoopGuardKey struct{}
@@ -166,7 +183,7 @@ func (g *toolLoopGuard) PostToolUse(ctx context.Context, name string, input, res
 	// events, which also include SDK schema rejections before hooks execute.
 }
 
-func observeToolLoopResult(ctx context.Context, name string, input, result []byte, isErr bool) {
+func observeToolLoopResult(ctx context.Context, name string, input, result []byte, isErr bool, otherToolsPending ...bool) {
 	g, _ := ctx.Value(toolLoopGuardKey{}).(*toolLoopGuard)
 	if g == nil {
 		return
@@ -176,14 +193,40 @@ func observeToolLoopResult(ctx context.Context, name string, input, result []byt
 	}
 	code := contractFailureCode(name, result)
 	if code == "" {
+		if db.IsDeferredLookupRejection(name, input, result) {
+			return
+		}
+		// An earlier permission, approval, transport or unknown tool failure
+		// must not disappear behind a later ordinary field-validation handoff.
+		g.mu.Lock()
+		g.hardContractFailure = true
+		g.mu.Unlock()
 		return
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.failures++
+	var verification *db.VerificationFieldFailure
+	if name == "set_finding_verification" {
+		verification = db.ParseVerificationFieldFailure(input, result)
+	}
+	if verification == nil {
+		g.hardContractFailure = true
+	}
 	key := name + ":" + code + ":" + contractFailureTarget(input)
 	g.repeated[key]++
 	if g.repeated[key] >= repeatedContractFailureLimit || g.failures >= contractFailureLimit {
+		pending := len(otherToolsPending) > 0 && otherToolsPending[0]
+		if verification != nil && !g.hardContractFailure && !pending && g.stopped == nil {
+			g.stopped = &verificationHandoffError{failure: verification}
+			g.cancel(g.stopped)
+			return
+		}
+		if verification != nil && g.stopped == nil {
+			g.stopped = &toolLoopError{category: "mixed_verification_failure", verification: verification}
+			g.cancel(g.stopped)
+			return
+		}
 		g.stopLocked("repeated_contract_failure")
 	}
 }

@@ -61,7 +61,7 @@ func TestReadBudgetLegacyStopReclassifiedWithoutExecuting(t *testing.T) {
 				}
 			}
 			before, _ := s.GetNode(id)
-			n, err := s.ReclassifyLegacyReadBudgetStops(t.Context())
+			n, err := s.ReclassifyLegacyToolStops(t.Context())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -85,7 +85,7 @@ func TestReadBudgetLegacyStopReclassifiedWithoutExecuting(t *testing.T) {
 			if final.State != "exhausted" || string(final.Payload) != string(after.Payload) {
 				t.Fatal("read handoff replayed worker")
 			}
-			if n, err = s.ReclassifyLegacyReadBudgetStops(t.Context()); err != nil || n != 0 {
+			if n, err = s.ReclassifyLegacyToolStops(t.Context()); err != nil || n != 0 {
 				t.Fatal("repair not idempotent", n, err)
 			}
 			var stored string

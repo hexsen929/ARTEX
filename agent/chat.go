@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -316,7 +315,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 			emit(r)
 		}
 	})
-	if errors.Is(err, ErrTrafficReadBudget) {
+	if automaticToolHandoff(err) {
 		err = nil
 	}
 	return text, err
