@@ -13,6 +13,9 @@ import (
 // workerOutcome is intentionally free of raw provider bodies, URLs or tool input.
 // Detailed traces remain in their existing access-controlled activity stream.
 func workerOutcome(reason harness.TerminalReason, err error) (state, code, message string) {
+	if errors.Is(err, agent.ErrToolLoopGuard) {
+		return "blocked", "tool_loop_guard", "连续读取或无效重试达到本轮上限；已有证据和进度保留，未完成部分等待人工核对，不自动重派"
+	}
 	if errors.Is(err, agent.ErrWorkerHistoryUnavailable) {
 		return "blocked", "execution_history_unavailable", "历史执行记录暂不可用；核对并修复后继续，系统未从头重放操作"
 	}

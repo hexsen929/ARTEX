@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/Autumn-27/artex/db"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -24,6 +25,11 @@ func (t *ToolSet) verifyFinding() actool.CoreTool {
 		}
 		f, err := t.ts.VerifyFinding(ctx, pid(a.FindingID), a.Status, a.Note, *a.Version, a.AdditionalEvidence)
 		if err != nil {
+			var missing *db.VerificationMissingFields
+			if errors.As(err, &missing) {
+				raw, _ := json.Marshal(map[string]any{"error": "verification_missing_fields", "missing_fields": missing.Fields, "retryable_without_changes": false, "message": missing.Error()})
+				return actool.Errorf(string(raw)), nil
+			}
 			return actool.Errorf(err.Error()), nil
 		}
 		return jsonResult(map[string]any{"finding_id": f.ID, "verification_status": f.VerificationStatus, "verification_note": f.VerificationNote, "evidence_version": f.EvidenceVersion})

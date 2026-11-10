@@ -40,7 +40,7 @@ func (c CheckIdentity) Normalize(assets []int64) (CheckIdentity, string, error) 
 func (s *ExplorationStore) ContinuePlannerIntent(id int64, note string, limit int) (int64, error) {
 	note = strings.TrimSpace(note)
 	if note == "" || len([]rune(note)) > 2000 {
-		return 0, fmt.Errorf("续接须填写不超过2000字的 continuation_note，说明复用产物和下一步")
+		return 0, fmt.Errorf("intent_missing_fields: 续接须填写不超过2000字的 continuation_note，说明复用产物和下一步；字段未改正前不要重复请求")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -71,7 +71,7 @@ func (s *ExplorationStore) ContinuePlannerIntent(id int64, note string, limit in
 		return 0, err
 	}
 	if state != "exhausted" || (p.Result.Code != "run_budget" && p.Result.Code != "turn_budget") {
-		return 0, fmt.Errorf("意图 #%d 保持 %s (%s)：恢复前置后通过原意图手动继续，不要换编号重派", id, state, p.Result.Code)
+		return 0, fmt.Errorf("continuation_requires_operator: 意图 #%d 保持 %s (%s)，未入队。本工具不能恢复该状态；结束本轮并等待人工处理，恢复前置后通过原意图手动继续，不要换编号重派", id, state, p.Result.Code)
 	}
 	if p.Checkpoint == nil || p.RunToken == "" || p.Checkpoint.RunToken != p.RunToken || p.Checkpoint.Incomplete || len(p.Checkpoint.Pending) != 0 || !p.Checkpoint.Settled {
 		return 0, fmt.Errorf("意图 #%d 的最后工具结果尚不明确，请先核对原执行记录再手动继续", id)

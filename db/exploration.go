@@ -129,6 +129,7 @@ type Node struct {
 	VerificationStatus string          `json:"verification_status,omitempty"`
 	VerificationNote   string          `json:"verification_note,omitempty"`
 	EvidenceVersion    int64           `json:"evidence_version,omitempty"`
+	HasTextEvidence    *bool           `json:"has_text_evidence,omitempty"`
 	FindingID          int64           `json:"finding_id,omitempty"` // populated by finding-aware reads; never inferred from ID
 	FindingNodeID      int64           `json:"finding_node_id,omitempty"`
 	TrafficCount       int             `json:"traffic_count,omitempty"`

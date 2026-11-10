@@ -10,7 +10,7 @@ const planningReadinessRules = `
 - 新检查填写check_identity（稳定资源、操作、身份标签、问题标签），摘要换措辞也沿用同一身份。已存在的检查用continue_intent_id和continuation_note续接原编号，不能把“第N次续接”作为新问题。add_intent返回原编号不等于入队，核对state；模型/审批/未知结果的阻塞需恢复后人工继续，预算耗尽且工具结果齐全时最多自动续接2次。
 - execution_checkpoint的tool_calls/tool_results只代表工具调度与返回，不能证明目标请求或验收已完成。pending保留未收到结果的工具，incomplete表示记录不完整；核对原活动和会话后再继续，不自动认定这些动作未执行。
 - execution_readiness给出整个任务的状态/结束原因计数，recent_done只是局部窗口；runtime_state_error存在时运行情况未知，不能推断为队列空或绕过依赖另派。
-- 每条意图填写 prerequisites、acceptance、stop_condition。前置准备、实际验证、结果确认分别验收。前置还没满足时不并行下发下游；只读来源锚点不等于前置已成功，inferred和待验证发现保持假设身份。
+- 新建意图填写 prerequisites、acceptance、stop_condition；续接仅填写 continue_intent_id 和 continuation_note，沿用原验收与来源。前置准备、实际验证、结果确认分别验收。前置还没满足时不并行下发下游；只读来源锚点不等于前置已成功，inferred和待验证发现保持假设身份。
 - 先看本轮增量、worker_result和最近结果；已有概览能回答的不重复拉全量。要查历史先用已知节点或带条件分页；已读内容没有变化时不重复读取。事实数量、请求数量和覆盖率都不能代替目标证据。
 - 状态码、响应长度或报错相同仅是相似性信号，不能单独推定请求没到应用或方向无漏洞。工具阳性、版本匹配和CVE记录都是待核验线索；用适用前提、真实观测和必要对照判断，避免把工具故障、统一页面或无回显当阴性。
 - 把漏洞发现拆成可证伪的问题：实际业务对象与身份、输入/状态边界、预期正常行为、能区分假设的观察。每次只改变必要条件，已有正常业务基线优先复用。发现具体异常后先安排最小复核，不用重复侦察、堆工具或只查版本代替验证。
@@ -42,6 +42,8 @@ func normalizePlannerReadiness(body string) string {
 			lines[i] = "- **派发前提**：目标未达成且存在尚未覆盖、授权范围内、前置已满足的方向时，应安排下一步；没有可执行方向或只剩人工/环境依赖时允许0意图，并说明恢复条件。"
 		case strings.Contains(line, "纯外部故障没跑成（blocked 常是）→ 直接重派同方向"):
 			lines[i] = "     · **exhausted / blocked**：先核对 worker_result 与最后工具结果。审批、模型和环境问题先恢复对应前提，不能直接换编号重派；有已核实的新证据或恢复条件后才续接，复用已有产物。"
+		case strings.Contains(line, "asset_ids") && strings.Contains(line, "务必传"):
+			lines[i] = "   - 新建检查按任务范围绑定已有资产，填写 check_identity；续接只传 continue_intent_id 与 continuation_note，不传 asset_ids、parent_ids 或 check_identity。恢复条件未满足时结束本轮，不重复请求或换编号。"
 		case strings.Contains(line, "**done（正常跑完）**：已覆盖 → 不原样重派"):
 			lines[i] = "     · **done（本轮结束）**：逐项核对 acceptance 与实际执行证据；没有执行或没有回答的问题仍属未测。已验证的问题不原样重派；前置恢复后可续接原问题，补测未覆盖的身份、对象或条件，无需虚构全新机理。阴性结论仅适用于实际 tested_scope。"
 		case strings.Contains(line, "按顶部硬底线必须另开或续派"):
@@ -51,4 +53,21 @@ func normalizePlannerReadiness(body string) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// This is part of the actual user message, not only the system prompt. Keep all
+// entry paths (heartbeat, explicit changes and final settlement) consistent.
+func plannerRoundInput(hasTriggers, hasActive, final bool, situational, todos string) string {
+	lead := "本轮有具体变动，先核对下面的实际变化和已保存结果。"
+	if !hasTriggers {
+		lead = "本轮没有具体变动信号，先核对现有运行状态；不要把唤醒本身当作新证据。"
+	}
+	if !hasActive {
+		lead += "当前没有可运行意图；先检查恢复条件，队列为空不要求创建新工作。"
+	}
+	decision := "只在授权范围、前置条件和未完成问题都明确时派发。全部路线受阻或需要人工处理时允许0意图，说明缺失条件并结束本轮；不要重复失败调用或换编号重派。目标完成须有实际证据，不以工具绿勾或一轮结束代替验收。"
+	if final {
+		decision = "本轮为终局收尾，只核对并记录已有结果及未完成原因，不创建或续接意图。"
+	}
+	return lead + situational + "\n\n" + decision + todos
 }

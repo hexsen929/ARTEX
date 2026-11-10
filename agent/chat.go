@@ -295,6 +295,8 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		ctx = attachSideCapture(ctx, &opts)
 		ctx = attachMemory(ctx, &opts, agentKey)
 	}
+	ctx, releaseLoopGuard := attachToolLoopGuard(ctx, &opts)
+	defer releaseLoopGuard()
 	s := agentcore.NewSession(opts)
 	defer s.Close()
 	// reload prior conversation so the agent has context across turns (each Chat is

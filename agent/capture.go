@@ -26,6 +26,8 @@ import (
 // contiguous run is coalesced into a single record so the trace shows whole
 // messages, not dozens of fragments.
 func captureRun(ctx context.Context, opts agentcore.Options, input string, emit func(db.Activity)) (string, harness.TerminalReason, error) {
+	ctx, releaseLoopGuard := attachToolLoopGuard(ctx, &opts)
+	defer releaseLoopGuard()
 	s := agentcore.NewSession(opts)
 	defer s.Close() // release the session's background-task manager (temp dir + processes)
 	return captureRunSession(ctx, s, input, emit, opts.MaxDuration)
@@ -49,6 +51,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 		}
 	}
 	toolNames := map[string]string{} // tool_use id -> name, to label results
+	toolInputs := map[string][]byte{}
 
 	var tbuf strings.Builder
 	var tkind string
@@ -83,6 +86,10 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 	for ev, err := range s.Prompt(ctx, input) {
 		if err != nil {
 			flush()
+			if cause := toolLoopCause(ctx); cause != nil {
+				rec(activityWithUsage(db.Activity{Kind: "result", IsError: true, Summary: cause.Error(), Detail: cause.Error()}, lastUsage))
+				return finalText, harness.ReasonHookStopped, cause
+			}
 			if ctx.Err() != nil { // engine/user cancellation, not a provider failure
 				sum, detail := terminalText(ctx, &harness.Terminal{Reason: reason, Err: ctx.Err()}, lastTool)
 				rec(activityWithUsage(db.Activity{Kind: "result", Summary: firstLine(sum, 400), Detail: detail}, lastUsage))
@@ -98,6 +105,9 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			}
 			flush()
 			toolNames[ev.ToolUse.ID] = ev.ToolUse.Name
+			if ev.ToolUse.Name == "add_intent" || ev.ToolUse.Name == "set_finding_verification" || ev.ToolUse.Name == "traffic_search" {
+				toolInputs[ev.ToolUse.ID] = append([]byte(nil), ev.ToolUse.Input...)
+			}
 			in := string(ev.ToolUse.Input)
 			lastTool.start(ev.ToolUse.ID, ev.ToolUse.Name, in)
 			auditTrace.Start(ev.ToolUse.ID, ev.ToolUse.Name, ev.ToolUse.Input)
@@ -117,6 +127,8 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			auditTrace.Complete(ev.ToolResult.ToolUseID, out, ev.ToolResult.IsError)
 			rec(db.Activity{Kind: "tool_result", Tool: toolNames[ev.ToolResult.ToolUseID], ToolUseID: ev.ToolResult.ToolUseID,
 				IsError: ev.ToolResult.IsError, Summary: firstLine(out, 200), Detail: out})
+			observeToolLoopResult(ctx, toolNames[ev.ToolResult.ToolUseID], toolInputs[ev.ToolResult.ToolUseID], []byte(out), ev.ToolResult.IsError)
+			delete(toolInputs, ev.ToolResult.ToolUseID)
 		case harness.KindText:
 			addDelta("text", ev.Text)
 		case harness.KindThinking:
@@ -135,6 +147,9 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			}
 		case harness.KindResult:
 			if ev.Terminal != nil {
+				if cause := toolLoopCause(ctx); cause != nil {
+					ev.Terminal.Reason, ev.Terminal.Err, ev.Terminal.Text = harness.ReasonHookStopped, cause, cause.Error()
+				}
 				ev.Terminal = normalizeCallTimeoutTerminal(ctx, ev.Terminal)
 				if ctx.Err() == nil && (approvalExpired || approvalWait.Expired() || (ev.Terminal.Reason == harness.ReasonTimeout && approvalWait.Pending())) {
 					// An unanswered approval is not a failed test or exhausted
@@ -172,6 +187,9 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 		}
 	}
 	flush() // safety: any unflushed text if the stream ended without KindResult
+	if cause := toolLoopCause(ctx); cause != nil {
+		return finalText, harness.ReasonHookStopped, cause
+	}
 	return finalText, reason, rerr
 }
 
