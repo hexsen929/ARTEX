@@ -1412,13 +1412,15 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		"vulnclass":           str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要"),
 		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
 		"evidence":         str("证据/PoC 文本"),
+		"reproduction":     ReproductionSchema(),
 		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
 		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。",
 			"items": obj(map[string]any{"traffic_id": str("traffic_search 返回的真实流量 ID"), "role": map[string]any{"type": "string", "enum": []string{"baseline", "proof", "verification", "supporting"}}, "note": str("该流量如何支持漏洞结论")}, "traffic_id")},
 	}, "vulnclass", "severity", "summary"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 		var a struct {
-			VerificationStatus                           string `json:"verification_status"`
-			VerificationNote                             string `json:"verification_note"`
+			Reproduction                                 *db.Reproduction `json:"reproduction"`
+			VerificationStatus                           string           `json:"verification_status"`
+			VerificationNote                             string           `json:"verification_note"`
 			VulnClass, Name, Severity, Summary, Evidence string
 			IntentID                                     json.RawMessage   `json:"intent_id"`
 			AssetIDs                                     []json.RawMessage `json:"asset_ids"`
@@ -1438,6 +1440,11 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		// "not_bound" with the "已关闭，可在页面人工关联" note, which is what the caller needs.
 		if !findingTrafficBindingEnabled() {
 			a.TrafficRefs, a.EvidenceHintID = nil, nil
+			if a.Reproduction != nil {
+				for i := range a.Reproduction.Steps {
+					a.Reproduction.Steps[i].TrafficIDs = nil
+				}
+			}
 		}
 		if len(a.EvidenceHintID) > 0 && pid(a.EvidenceHintID) <= 0 {
 			return actool.Errorf("evidence_hint_id 必须为有效的提示节点 ID；无交接提示时省略"), nil
@@ -1467,7 +1474,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			assetIDs = nil
 			assetNote = "发现内容已保留；提供的资产引用未通过当前任务可见性校验，未关联资产。请在页面明确关联资产后补充引用，不要重复上报。"
 		}
-		input := db.RecordFindingInput{VerificationStatus: a.VerificationStatus, VerificationNote: a.VerificationNote, TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: assetIDs}
+		input := db.RecordFindingInput{Reproduction: a.Reproduction, VerificationStatus: a.VerificationStatus, VerificationNote: a.VerificationNote, TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: assetIDs}
 		anchorText := strings.Join([]string{input.Name, input.Summary, input.Evidence}, "\n")
 		if strings.TrimSpace(input.Name) == "" {
 			input.Name = fallbackFindingName(input.VulnClass, anchorText)
@@ -2418,6 +2425,7 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 // PlannerTools is the read + intent-generation + goal-judgement tool set.
 func (t *ToolSet) PlannerTools() []actool.CoreTool {
 	return []actool.CoreTool{
+		t.searchKnowledge(),
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
 		t.expandDigest(),

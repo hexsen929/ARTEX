@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Autumn-27/artex/knowledge"
 	"strings"
 	"testing"
 	"time"
@@ -135,6 +136,10 @@ func TestTaskArchiveDatabaseRoundTrip(t *testing.T) {
 	task, err := d.CreateTaskWithOptions("archive database roundtrip", "restore exact graph", TaskCreateOptions{
 		Name: "cold task", WorkerCount: 7, ShareGlobalAssets: true,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := d.SaveKnowledgeDocument(t.Context(), knowledge.Document{TaskID: task.ID, Title: "archive reference", Content: "ARCHIVE_REFERENCE_CANARY"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,6 +291,10 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	restoredReference, err := d.KnowledgeDocument(t.Context(), reference.ID)
+	if err != nil || restoredReference.Content != "ARCHIVE_REFERENCE_CANARY" || restoredReference.Indexed {
+		t.Fatal("reference document lost or stale index restored", err)
 	}
 	restoredIntel, err := d.GetIntelligence(t.Context(), intel.ID)
 	if err != nil || restoredIntel.Content != "archive-fixture" || restoredIntel.Credentials == nil || len(restoredIntel.Credentials.Accounts) != 1 || len(restoredIntel.Credentials.Traffic) != 1 {

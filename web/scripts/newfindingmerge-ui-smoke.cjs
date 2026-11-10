@@ -25,6 +25,7 @@ const findings = ["unverified", "confirmed"].map((verification_status, index) =>
   report, report_conversation_id: 999, evidence_version: 1, assets: [], traffic_count: 1, inherited: false,
 }));
 const requests = [], unexpected = new Set(), external = new Set(), sideItems = [];
+const reproductionWrites = [];
 // These are saved synthetic packets, never an instruction to contact fixture.invalid.
 // Keep the original query unique; the second double marker deliberately ends the packet.
 const packetRequestBody = "FIXTURE_PACKET_MATCH\nsecond line\nFIXTURE_DOUBLE\nliteral .*[x](a)\nFIXTURE_DOUBLE";
@@ -149,9 +150,20 @@ async function serveAPI(request, response, url) {
     return json(response, 200, { detail: item.detail });
   }
   if (endpoint === "/api/exploration/findings/503/traffic") return json(response, 200, { finding_id: "503", version: 1, report_version: 1, bindings: [] });
+  if (endpoint === "/api/exploration/findings/501/reproduction" && method === "PUT") {
+    let raw = "";
+    for await (const chunk of request) { raw += chunk; assert.ok(raw.length < 16384); }
+    const body = JSON.parse(raw);
+    reproductionWrites.push(body);
+    if (body.evidence_version !== findings[0].evidence_version) return json(response, 409, { error: "UI_FIXTURE_STALE_REPRODUCTION" });
+    findings[0].reproduction = body.reproduction;
+    findings[0].evidence_version += 1;
+    findings[0].report_stale = true;
+    return json(response, 200, { ...findings[0], source_task_id: "101" });
+  }
   if (endpoint === "/api/exploration/findings/501/generate-report" && method === "POST") return json(response, 200, { queued: true, agent_key: "reporter", finding_id: 501, finding_node_id: 501 });
   if (endpoint === "/api/exploration/findings/501") return json(response, 200, { ...findings[0], inherited: url.searchParams.has("context_task") && url.searchParams.get("context_task") !== "101", source_task_id: "101" });
-  if (endpoint === "/api/exploration/findings/503") return json(response, 200, { ...findings[0], id: "503", finding_id: "503", task_id: undefined, source_task_id: undefined, name: "UI_FIXTURE_ORPHAN", report: "" });
+  if (endpoint === "/api/exploration/findings/503") return json(response, 200, { ...findings[0], id: "503", finding_id: "503", task_id: undefined, source_task_id: undefined, name: "UI_FIXTURE_ORPHAN", report: "", reproduction: undefined });
   unexpected.add(`${method} ${endpoint}`);
   return json(response, 404, { error: "Unmocked synthetic endpoint" });
 }
@@ -276,6 +288,7 @@ async function main() {
   assert.equal(await page.getByRole("button", { name: "更新验证", exact: true }).count(), 0);
   assert.equal(await page.getByRole("button", { name: "重新生成步骤与报告", exact: true }).count(), 0);
   assert.equal(await page.getByRole("button", { name: "调整报告", exact: true }).count(), 0, "Inherited view exposed the report editing action");
+  assert.equal(await page.getByRole("button", { name: "编辑结构化步骤", exact: true }).count(), 0, "Inherited view exposed reproduction editing");
   await eventually(() => requests.filter((r) => r.endpoint === "/api/workspace/preview").length > previewsBeforeInherited, "Inherited report did not reload the associated screenshot");
   assert.ok(requests.filter((r) => r.endpoint === "/api/workspace/preview").every((r) => r.query.finding_id === "501"), "Inherited screenshot used context_task instead of source finding identity");
   console.log("PASS inherited detail remains read-only after delayed report refresh");
@@ -291,6 +304,10 @@ async function main() {
   const orphanReportButton = page.getByRole("button", { name: "调整报告", exact: true });
   assert.ok((await orphanReportButton.count()) === 0 || await orphanReportButton.isDisabled(), "Orphan finding exposed executable report editing");
   console.log("PASS inherited analysis uses actual owner; orphan finding has no execution fallback");
+  await page.getByRole("button", { name: "编辑结构化步骤", exact: true }).click();
+  await page.getByRole("textbox", { name: "复现入口", exact: true }).waitFor();
+  await page.getByRole("button", { name: "取消", exact: true }).click();
+  console.log("PASS structured reproduction editor is available without a pre-existing Markdown report");
 
   // Reporter editing is deliberately separate from task-bound read-only Auto Q&A.
   // Neither the stored ID nor the finding DTO's old ID may select the conversation.
@@ -393,6 +410,38 @@ async function main() {
   assert.ok((await requestEditor.innerText()).includes("FIXTURE_PACKET_MATCH"), "Undo erased the original evidence draft");
   assert.equal(requests.filter((r) => r.endpoint === "/api/repeater/send").length, sendsBeforeSeed);
   console.log("PASS evidence prefill never sends; undo survives packet editor reconfiguration");
+
+  // Keep an editor open while a report refresh brings in another user's newer
+  // evidence. The old draft must retain its original CAS version and its text.
+  await page.goto(origin + "/function/findings/detail/?id=501", { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "编辑结构化步骤", exact: true }).click();
+  const stepTitle = page.getByRole("textbox", { name: "步骤 1 动作说明", exact: true });
+  await stepTitle.fill("UI_FIXTURE_OLD_DRAFT");
+  findings[0].evidence_version = 2;
+  findings[0].reproduction = { entry_point: "fixture", prerequisites: [], provenance: "synthetic", steps: [{ title: "UI_FIXTURE_OTHER_EDITOR", request: "GET /fixture", response: "saved", expected: "", proves: "", traffic_ids: [] }] };
+  await page.getByRole("button", { name: "重新生成步骤与报告", exact: true }).click();
+  await page.getByRole("heading", { name: "UI_FIXTURE_OTHER_EDITOR", exact: true }).waitFor();
+  assert.equal(await stepTitle.inputValue(), "UI_FIXTURE_OLD_DRAFT", "Refreshing the parent discarded the open draft");
+  await page.getByRole("button", { name: "保存步骤", exact: true }).click();
+  await page.getByRole("alert").filter({ hasText: "UI_FIXTURE_STALE_REPRODUCTION" }).waitFor();
+  assert.equal(reproductionWrites.at(-1).evidence_version, 1, "Old draft borrowed a newer evidence version");
+  assert.equal(await stepTitle.inputValue(), "UI_FIXTURE_OLD_DRAFT", "Conflict discarded the editable draft");
+  assert.equal(findings[0].reproduction.steps[0].title, "UI_FIXTURE_OTHER_EDITOR", "Conflict overwrote concurrent changes");
+  await page.getByRole("button", { name: "取消", exact: true }).click();
+  await page.getByRole("button", { name: "编辑结构化步骤", exact: true }).click();
+  assert.equal(await stepTitle.inputValue(), "UI_FIXTURE_OTHER_EDITOR", "Reopening did not load the current saved steps");
+  await stepTitle.fill("UI_FIXTURE_SAVED_STEPS");
+  await page.getByRole("button", { name: "保存步骤", exact: true }).click();
+  await page.getByRole("heading", { name: "UI_FIXTURE_SAVED_STEPS", exact: true }).waitFor();
+  await page.getByText("流量证据已变更，详细报告待更新。", { exact: true }).waitFor();
+  assert.equal(reproductionWrites.at(-1).evidence_version, 2);
+  await page.getByRole("button", { name: "编辑结构化步骤", exact: true }).click();
+  await stepTitle.fill("UI_FIXTURE_NEXT_SAVED_STEPS");
+  await page.getByRole("button", { name: "保存步骤", exact: true }).click();
+  await page.getByRole("heading", { name: "UI_FIXTURE_NEXT_SAVED_STEPS", exact: true }).waitFor();
+  assert.equal(reproductionWrites.at(-1).evidence_version, 3, "Successful save did not update the parent evidence version");
+  assert.equal(findings[0].verification_status, "unverified", "Editing steps changed the verification result");
+  console.log("PASS reproduction conflicts retain old version/draft; successful saves update parent evidence and report state");
   assert.deepEqual(errors, [], "Findings UI raised browser exceptions");
   assert.deepEqual([...unexpected], [], "Unexpected API contract calls");
   assert.deepEqual([...external], [], "Fixture attempted an external connection");

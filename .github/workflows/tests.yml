@@ -10,6 +10,51 @@ concurrency:
   group: tests-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 jobs:
+  reference-documents:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: artex_reference
+          POSTGRES_PASSWORD: reference_test_only
+          POSTGRES_DB: artex_reference
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U artex_reference -d artex_reference"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      ARTEX_PG_DSN: postgres://artex_reference:reference_test_only@127.0.0.1:5432/artex_reference?sslmode=disable
+      ARTEX_REQUIRE_PGVECTOR: "1"
+      ARTEX_DOCX_FIXTURE_DIR: /tmp/artex-reference-docx-validation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Prepare optional vector and document rendering fixtures
+        run: |
+          PGPASSWORD=reference_test_only psql -h 127.0.0.1 -U artex_reference -d artex_reference -c 'CREATE EXTENSION vector'
+          sudo apt-get -o Acquire::Languages=none -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends libreoffice-writer fonts-noto-cjk poppler-utils
+      - name: Reference scope, stale index and reproduction regressions
+        run: go test -race -p=1 -v ./knowledge ./db ./report -run 'Test(Knowledge|Extraction|Embed|Reproduction|DOCX)' -count=1 -timeout=4m
+      - name: Render Word fixtures and verify extracted evidence
+        run: |
+          libreoffice -env:UserInstallation=file://$RUNNER_TEMP/lo-reference --headless --convert-to pdf --outdir "$ARTEX_DOCX_FIXTURE_DIR" "$ARTEX_DOCX_FIXTURE_DIR"/*.docx
+          for pdf in "$ARTEX_DOCX_FIXTURE_DIR"/*.pdf; do
+            test -s "$pdf"
+            pdftotext "$pdf" - | grep -q 'synthetic response'
+          done
+          pdftoppm -f 1 -singlefile -scale-to 1400 -png "$ARTEX_DOCX_FIXTURE_DIR/fixture-zh-CN.pdf" "$ARTEX_DOCX_FIXTURE_DIR/preview"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reference-documents-validation
+          path: /tmp/artex-reference-docx-validation
+          if-no-files-found: ignore
+
   browser-isolation:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -319,6 +364,12 @@ jobs:
           ARTEX_UI_ARTIFACTS: ${{ runner.temp }}/credential-ui-artifacts
         run: node scripts/credential-ui-smoke.cjs
         working-directory: web
+      - name: Reference documents and Word report browser regressions
+        env:
+          ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
+        working-directory: web
+        run: node scripts/reference-documents-ui-smoke.cjs
       - name: Merged findings filters and report browser regressions
         env:
           ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright

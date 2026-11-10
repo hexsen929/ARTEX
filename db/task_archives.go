@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	// v6 additionally preserves independent retest conversations and their FK
-	// history. Older binaries must reject it rather than silently drop rows.
-	TaskArchiveFormatVersion       = 6
+	// v7 additionally preserves task reference documents and structured reproduction.
+	// Older binaries must reject it rather than silently drop these records.
+	TaskArchiveFormatVersion       = 7
 	TaskArchiveLegacyFormatVersion = 1
 	TaskArchiveLLMRecordsPath      = "database/llm_records.ndjson"
 )
@@ -596,6 +596,8 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"task_llm_profiles", `SELECT * FROM task_llm_profiles WHERE task_id=$1 ORDER BY position`, []any{taskID}},
 		{"task_scope", `SELECT * FROM task_scope WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"findings", `SELECT * FROM findings WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"knowledge_docs", `SELECT * FROM knowledge_docs WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"knowledge_chunks", `SELECT k.* FROM knowledge_chunks k JOIN knowledge_docs d ON d.id=k.doc_id WHERE d.task_id=$1 ORDER BY k.doc_id,k.chunk_index`, []any{taskID}},
 		{"task_intelligence", `SELECT * FROM task_intelligence WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"credentials", `SELECT * FROM credentials WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"pending_scope", `SELECT * FROM pending_scope WHERE task_id=$1 ORDER BY id`, []any{taskID}},

@@ -15,6 +15,7 @@ import (
 )
 
 func (s *Server) seedFindingWorkflowTools() {
+	s.seedReproductionSchema()
 	const hostSearchDescriptionFlag = "finding_workflow_tools_v3_host_search_description"
 	if value, _, _ := s.m.pg.GetSetting(hostSearchDescriptionFlag); value != "true" {
 		// Only replace the original built-in text. A user-edited description is
@@ -53,6 +54,9 @@ func (s *Server) seedFindingWorkflowTools() {
 		}
 		props := objectProperty(schema, "properties")
 		if key == "report_finding" {
+			if _, exists := props["reproduction"]; !exists {
+				props["reproduction"] = agent.ReproductionSchema()
+			}
 			if _, exists := props["evidence_hint_id"]; !exists {
 				props["evidence_hint_id"] = map[string]any{"type": "integer", "description": "可选：本任务中对应此漏洞的 hint ID；读取该提示保存的 traffic_refs 一并绑定，无提示时省略"}
 			}

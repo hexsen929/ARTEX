@@ -536,7 +536,22 @@ export interface FindingAsset {
   label: string;
 }
 
+export interface StructuredReproduction {
+  entry_point: string;
+  prerequisites: string[];
+  provenance: string;
+  steps: {
+    title: string;
+    request: string;
+    response: string;
+    expected: string;
+    proves: string;
+    traffic_ids: string[];
+  }[];
+}
+
 export interface Finding {
+  reproduction?: StructuredReproduction;
   verification_status?: FindingVerification;
   verification_note?: string;
   case_id?: string;
@@ -1125,10 +1140,18 @@ export interface ProxyProbeProgress {
   succeeded: number;
   failed: number;
   concurrency: number;
-  items: Record<string, { state: string; ok: boolean; error?: string; ip?: string; protocol?: string; latency_ms?: number }>;
+  items: Record<
+    string,
+    { state: string; ok: boolean; error?: string; ip?: string; protocol?: string; latency_ms?: number }
+  >;
 }
 
-export interface ProxySwitchLog { at: string; from: string; to: string; reason: string }
+export interface ProxySwitchLog {
+  at: string;
+  from: string;
+  to: string;
+  reason: string;
+}
 
 export interface ProxyPoolBulkRequest {
   action: "delete" | "disable";

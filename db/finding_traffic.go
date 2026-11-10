@@ -306,6 +306,9 @@ func (d *DB) EditFindingTraffic(ctx context.Context, findingID, bindingID, versi
 			var res sql.Result
 			var err error
 			if remove {
+				if err := checkReproductionUnbind(tx, findingID, bindingID); err != nil {
+					return err
+				}
 				res, err = tx.Exec(`DELETE FROM finding_traffic_bindings WHERE finding_id=$1 AND id=$2`, findingID, bindingID)
 			} else {
 				res, err = tx.Exec(`UPDATE finding_traffic_bindings SET role=COALESCE($3,role),note=COALESCE($4,note) WHERE finding_id=$1 AND id=$2`, findingID, bindingID, role, note)
@@ -326,6 +329,7 @@ func (d *DB) EditFindingTraffic(ctx context.Context, findingID, bindingID, versi
 }
 
 type RecordFindingInput struct {
+	Reproduction                                         *Reproduction
 	VerificationStatus, VerificationNote                 string
 	TaskID, ExplorationID, IntentID                      int64
 	VulnClass, Name, Severity, Summary, Evidence, Worker string
@@ -382,7 +386,7 @@ func RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, pre
 	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM settings WHERE key=$1 AND value IN ('true','1'))`, SettingFindingInlineMerge).Scan(&inlineMerge); err != nil {
 		return nil, err
 	}
-	if inlineMerge {
+	if inlineMerge && in.Reproduction == nil {
 		candidate, err := findMergeCandidateTx(tx, in)
 		if err != nil {
 			return nil, err
@@ -430,6 +434,9 @@ VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`, in.TaskID, o
 		AssetIDs:  assets,
 	})
 	if err := AddFindingTrafficTx(tx, out.FindingID, prepared); err != nil {
+		return nil, err
+	}
+	if err := saveReproductionTx(ctx, tx, out.FindingID, in.Reproduction); err != nil {
 		return nil, err
 	}
 	var err error

@@ -97,6 +97,7 @@ func manualFindingReportMessage(f *db.DBFinding, taskID int64) string {
 		fmt.Fprintf(&b, "来源任务 ID=%d。\n", taskID)
 	}
 	b.WriteString("先读取 get_finding_traffic(finding_id) 的当前证据清单及 version，再读取节点详情和任务执行记录；只使用实际保存的请求、响应和执行证据，不臆造步骤或数据包。\n")
+	b.WriteString("节点若已有 reproduction 结构化步骤，优先直接使用其入口、前置条件、请求/响应和证明内容，保留原文及证据引用；不要用新生成的描述替换原始观测。\n")
 	b.WriteString("报告必须包含“概述”“影响与危害”“受影响范围”“复现步骤”“根因分析”“修复建议”，并在复现步骤中按“步骤 1、步骤 2 …”完整展开。数据包只能引用该漏洞已绑定的真实流量。\n")
 	b.WriteString("最后调用 update_finding_report：finding_id 使用探索节点 ID，evidence_version 使用刚读取的证据版本；报告正文保存为 Markdown。")
 	return b.String()
