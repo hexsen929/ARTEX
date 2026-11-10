@@ -42,10 +42,13 @@ type toolLoopGuard struct {
 	stopped                   error
 }
 
+type toolLoopGuardKey struct{}
+
 func attachToolLoopGuard(ctx context.Context, opts *agentcore.Options) (context.Context, func()) {
 	child, cancel := context.WithCancelCause(ctx)
-	opts.Hooks = &toolLoopGuard{inner: opts.Hooks, cancel: cancel, repeated: make(map[string]int)}
-	return child, func() { cancel(nil) }
+	guard := &toolLoopGuard{inner: opts.Hooks, cancel: cancel, repeated: make(map[string]int)}
+	opts.Hooks = guard
+	return context.WithValue(child, toolLoopGuardKey{}, guard), func() { cancel(nil) }
 }
 
 func toolLoopCause(ctx context.Context) error {
@@ -103,8 +106,11 @@ func (g *toolLoopGuard) PreToolUse(ctx context.Context, name string, input []byt
 }
 
 func contractFailureCode(name string, result []byte) string {
-	if name != "add_intent" && name != "set_finding_verification" {
+	if name != "add_intent" && name != "set_finding_verification" && name != "traffic_search" {
 		return ""
+	}
+	if strings.HasPrefix(string(result), "Error: invalid tool input:") {
+		return "tool_input_invalid"
 	}
 	for _, code := range []string{"verification_missing_fields", "intent_missing_fields", "intent_mixed_modes", "continuation_requires_operator"} {
 		if strings.Contains(string(result), code) {
@@ -134,6 +140,15 @@ func contractFailureTarget(input []byte) string {
 func (g *toolLoopGuard) PostToolUse(ctx context.Context, name string, input, result []byte, isErr bool) {
 	if g.inner != nil {
 		g.inner.PostToolUse(ctx, name, input, result, isErr)
+	}
+	// Contract failures are observed from captureRunSession's actual result
+	// events, which also include SDK schema rejections before hooks execute.
+}
+
+func observeToolLoopResult(ctx context.Context, name string, input, result []byte, isErr bool) {
+	g, _ := ctx.Value(toolLoopGuardKey{}).(*toolLoopGuard)
+	if g == nil {
+		return
 	}
 	if !isErr || ctx.Err() != nil {
 		return

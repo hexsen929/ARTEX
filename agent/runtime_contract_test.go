@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Autumn-27/artex/db"
@@ -196,12 +198,105 @@ func TestRuntimeContractToolLoopStopsRepeatedInvalidEdits(t *testing.T) {
 	defer release()
 	for i := 0; i < 3; i++ {
 		input := []byte(fmt.Sprintf(`{"finding_id":7,"note":"changed prose %d"}`, i))
-		opts.Hooks.PostToolUse(ctx, "set_finding_verification", input, []byte(`verification_missing_fields: additional_evidence`), true)
+		observeToolLoopResult(ctx, "set_finding_verification", input, []byte(`verification_missing_fields: additional_evidence`), true)
 	}
 	if !errors.Is(toolLoopCause(ctx), ErrToolLoopGuard) || t.Context().Err() != nil {
 		t.Fatal("rewriting note bypassed repeated failure limit")
 	}
 	if blocked, _, _ := opts.Hooks.PreToolUse(ctx, "traffic_get", []byte(`{"id":"fixture"}`)); !blocked {
 		t.Fatal("tool ran after terminal guard stop")
+	}
+}
+
+func TestRuntimeContractSDKValidationFailureStopsBeforeHandler(t *testing.T) {
+	calls, executed := 0, 0
+	probe := actool.Build(actool.Spec{Name: "set_finding_verification", Description: "synthetic validation", Schema: map[string]any{"type": "object", "properties": map[string]any{"version": map[string]any{"type": "integer"}}, "required": []string{"version"}}, Run: func(context.Context, json.RawMessage, *actool.ToolContext) (actool.Result, error) {
+		executed++
+		return actool.Text("must not run"), nil
+	}})
+	provider := memoryFixtureProvider{complete: func(context.Context, llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+		calls++
+		if calls > 10 {
+			return llm.Message{}, "", llm.Usage{}, errors.New("fixture limit exceeded")
+		}
+		return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Type: llm.BlockToolUse, ID: fmt.Sprint(calls), Name: probe.Name(), Input: json.RawMessage(`{"finding_id":7,"note":"missing version"}`)}}}, "tool_use", llm.Usage{}, nil
+	}}
+	_, reason, err := captureRun(t.Context(), agentcore.Options{Provider: provider, Tools: []actool.CoreTool{probe}, NonStreaming: true, PermissionMode: permission.ModeBypass}, "fixture", nil)
+	if !errors.Is(err, ErrToolLoopGuard) || reason != harness.ReasonHookStopped || calls != 3 || executed != 0 {
+		t.Fatalf("pre-hook schema failures escaped: calls=%d ran=%d reason=%s err=%v", calls, executed, reason, err)
+	}
+}
+
+func TestRuntimeContractAllChatEntrypointsEnforceReadBudget(t *testing.T) {
+	oldAugment, oldResolve, oldRecall := ToolAugment, ToolResolve, MemoryRecall
+	t.Cleanup(func() { ToolAugment, ToolResolve, MemoryRecall = oldAugment, oldResolve, oldRecall })
+	ToolResolve, MemoryRecall = nil, nil
+	for _, role := range []string{"auto", "mainagent"} {
+		t.Run(role, func(t *testing.T) {
+			calls, executed := 0, 0
+			probe := actool.Build(actool.Spec{Name: "traffic_search", Description: "synthetic index", Schema: map[string]any{"type": "object"}, ReadOnly: func(json.RawMessage) bool { return true }, Run: func(context.Context, json.RawMessage, *actool.ToolContext) (actool.Result, error) {
+				executed++
+				return actool.Text(fmt.Sprint(executed)), nil
+			}})
+			ToolAugment = func(context.Context, string) ([]actool.CoreTool, DeferredInfo, func()) {
+				return []actool.CoreTool{probe}, DeferredInfo{}, func() {}
+			}
+			provider := memoryFixtureProvider{complete: func(context.Context, llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+				calls++
+				if calls > 20 {
+					return llm.Message{}, "", llm.Usage{}, errors.New("fixture exceeded limit")
+				}
+				return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Type: llm.BlockToolUse, ID: fmt.Sprint(calls), Name: probe.Name(), Input: json.RawMessage(fmt.Sprintf(`{"host":"fixture.invalid","page":%d}`, calls))}}}, "tool_use", llm.Usage{}, nil
+			}}
+			var err error
+			if role == "auto" {
+				chat := NewChatAgent(provider, "fixture", t.TempDir(), nil, 32000)
+				chat.SetNonStreaming(func() bool { return true })
+				_, err = chat.Chat(t.Context(), role, "contract-fixture", "read index", 0, 0, false, nil)
+			} else {
+				d := testDB(t)
+				defer d.Close()
+				task, e := d.CreateTask("main contract", "fixture", nil, 0, 0)
+				if e != nil {
+					t.Fatal(e)
+				}
+				defer d.DeleteTask(task.ID)
+				main := NewMainAgent(provider, "fixture", t.TempDir(), nil, 32000, 0)
+				main.SetNonStreaming(func() bool { return true })
+				_, err = main.Chat(t.Context(), task.ID, 0, nil, d.Exploration(task.ExplorationID), "fixture", "read index", nil, nil, nil, nil, nil)
+			}
+			if !errors.Is(err, ErrToolLoopGuard) || executed != broadTrafficCallLimit || calls > broadTrafficCallLimit+1 || t.Context().Err() != nil {
+				t.Fatalf("chat escaped read budget: executed=%d calls=%d err=%v", executed, calls, err)
+			}
+		})
+	}
+}
+
+func TestRuntimeContractParallelAdmissionAndParentCancellation(t *testing.T) {
+	opts := agentcore.Options{}
+	ctx, release := attachToolLoopGuard(t.Context(), &opts)
+	defer release()
+	var admitted atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < 80; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if blocked, _, _ := opts.Hooks.PreToolUse(ctx, "traffic_search", []byte(`{"host":"fixture.invalid"}`)); !blocked {
+				admitted.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if admitted.Load() != broadTrafficCallLimit || !errors.Is(toolLoopCause(ctx), ErrToolLoopGuard) || t.Context().Err() != nil {
+		t.Fatal("parallel budget race", admitted.Load(), context.Cause(ctx))
+	}
+	parent, cancel := context.WithCancelCause(t.Context())
+	other := agentcore.Options{}
+	child, done := attachToolLoopGuard(parent, &other)
+	defer done()
+	cancel(AbortPausedByUser)
+	if blocked, _, _ := other.Hooks.PreToolUse(child, "traffic_search", nil); !blocked || context.Cause(child) != AbortPausedByUser || toolLoopCause(child) != nil {
+		t.Fatal("parent pause was overwritten")
 	}
 }
