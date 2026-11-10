@@ -20,7 +20,7 @@ func workerOutcome(reason harness.TerminalReason, err error) (state, code, messa
 		return "exhausted", "traffic_read_budget", "本轮读取预算结束；已有记录与自动交接保留，由Planner读取结果协调未完成项，不需要人工逐页核对，不原样重派宽查询"
 	}
 	if errors.Is(err, agent.ErrToolLoopGuard) {
-		return "blocked", "tool_loop_guard", "工具请求重复失败，本轮已停止；具体原因保留在最后的工具返回中，已有进度保留，不自动重派"
+		return "blocked", "tool_loop_guard", agent.ToolLoopDiagnostic(err)
 	}
 	if errors.Is(err, agent.ErrWorkerHistoryUnavailable) {
 		return "blocked", "execution_history_unavailable", "历史执行记录暂不可用；核对并修复后继续，系统未从头重放操作"

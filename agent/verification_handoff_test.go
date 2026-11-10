@@ -116,6 +116,9 @@ func TestVerificationHandoffRejectsUnknownOrMixedFaults(t *testing.T) {
 			if errors.Is(toolLoopCause(ctx), ErrVerificationHandoff) != (scenario == "valid" || scenario == "lookup_rejected") {
 				t.Fatal("unsafe fault classification", context.Cause(ctx))
 			}
+			if scenario == "approval_wait" && !strings.Contains(ToolLoopDiagnostic(toolLoopCause(ctx)), "additional_evidence") {
+				t.Fatal("mixed stop lost exact missing field")
+			}
 			if blocked, _, _ := opts.Hooks.PreToolUse(ctx, "set_finding_verification", input); !blocked {
 				t.Fatal("tool was allowed after terminal handoff")
 			}
