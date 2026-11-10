@@ -279,6 +279,15 @@ jobs:
           grep -q -- '^--- PASS: TestMemoryBudgetReleaseWaitsForBothWindowsAndLoweredLimit ' "$memory_log"
           grep -q -- '^--- PASS: TestMemoryThirdExpiredLeaseTerminatesWithoutFourthAttempt ' "$memory_log"
 
+      - name: Memory discovery progress, history pages and literal tag search
+        run: |
+          set -euo pipefail
+          progress_log="$RUNNER_TEMP/memory-progress.log"
+          go test -race -p=1 -v ./db ./server -run '^TestMemory(DiscoveryRejected|HistoryProgress|HistoryHTTP|ManagementSearch)' -count=1 -timeout=5m | tee "$progress_log"
+          for name in TestMemoryDiscoveryRejectedCandidatesDoNotBlockNewStages TestMemoryDiscoveryRejectedCacheRechecksChangedSourceAndSettings TestMemoryDiscoveryRejectedExpiredPrefixDoesNotStarveFresh TestMemoryDiscoveryRejectedSettingsAndSourceUpdateDoNotDeadlock TestMemoryDiscoveryRejectedLateAcknowledgementCannotSurviveSettingsChange TestMemoryHistoryProgressPastCompletedAndEmptyPrefix TestMemoryHistoryProgressRetainsSourceWhenQueueFull TestMemoryHistoryProgressReturnsPartialScanOnDeadline TestMemoryHistoryHTTPContinuesAfterEmptyPage TestMemoryManagementSearchMatchesTagsLiterally; do
+            grep -q -- "^--- PASS: $name " "$progress_log"
+          done
+
       - name: Memory extraction recovery and recall regressions
         run: |
           set -euo pipefail

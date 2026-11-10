@@ -15,9 +15,21 @@ import {
   type MemoryUsageQuery,
 } from "@/lib/memory-types";
 
+export type MemoryHistoryProgress = {
+  queued: number;
+  scanned: number;
+  has_more: boolean;
+  next_cursor: string;
+  queue_full: boolean;
+  interrupted: boolean;
+  unit: "stages";
+};
+
 export const memoryAPI = {
   list: async (query: MemoryQuery = {}, signal?: AbortSignal) => {
-    const result = await http<{ items: MemoryEntry[]; total: number }>(`/memories${memoryQueryString(query)}`, { signal });
+    const result = await http<{ items: MemoryEntry[]; total: number }>(`/memories${memoryQueryString(query)}`, {
+      signal,
+    });
     if (!Array.isArray(result.items) || !Number.isSafeInteger(result.total) || result.total < 0) {
       throw new Error("服务未返回完整的记忆列表");
     }
@@ -64,13 +76,27 @@ export const memoryAPI = {
     assertMemoryLearning(snapshot);
     return snapshot;
   },
-  extract: async (task_id?: number) => {
-    const result = await http<{ queued: number; unit: "stages" }>("/memories/extract", {
+  extract: async (task_id?: number, cursor?: string) => {
+    const result = await http<MemoryHistoryProgress>("/memories/extract", {
       method: "POST",
-      body: JSON.stringify(task_id ? { task_id } : {}),
+      body: JSON.stringify({ ...(task_id ? { task_id } : {}), ...(cursor ? { cursor } : {}) }),
     });
-    if (!Number.isSafeInteger(result.queued) || result.queued < 0 || result.unit !== "stages") {
-      throw new Error("服务未确认已排队阶段数，未报告学习完成");
+    if (
+      !Number.isSafeInteger(result.queued) ||
+      result.queued < 0 ||
+      result.unit !== "stages" ||
+      !Number.isSafeInteger(result.scanned) ||
+      result.scanned < result.queued ||
+      result.scanned > 50 ||
+      typeof result.has_more !== "boolean" ||
+      typeof result.queue_full !== "boolean" ||
+      typeof result.interrupted !== "boolean" ||
+      typeof result.next_cursor !== "string" ||
+      result.next_cursor.length > 1024 ||
+      result.has_more !== Boolean(result.next_cursor) ||
+      ((result.queue_full || result.interrupted) && !result.has_more)
+    ) {
+      throw new Error("服务未确认本批扫描进度，请重新读取；尚未报告学习完成");
     }
     return result;
   },

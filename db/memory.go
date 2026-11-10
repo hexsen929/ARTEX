@@ -79,6 +79,12 @@ func (d *DB) UpdateMemorySettings(ctx context.Context, in MemorySettings, expect
 		in.Enabled, in.AutoExtract, in.GlobalShare, in.ProfileID, in.MaxEntries, in.MaxTokens, in.MaxJobsPerHour, in.RetentionDays); err != nil {
 		return current, err
 	}
+	// Eligibility can change with the epoch even if native source content did
+	// not. Invalidate cached rejections so the new settings are observed promptly.
+	// Checks precede jobs, matching native source invalidation's lock order.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_discovery_checks`); err != nil {
+		return current, err
+	}
 	// Jobs admitted under old settings are not silently carried into new model
 	// or sharing choices. Fresh incremental discovery can queue them anew.
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state='skipped',result='settings_changed',lease_token='',lease_until=NULL,updated_at=now()
@@ -147,7 +153,7 @@ func memoryFilterSQL(filter MemoryFilter) (string, []any) {
 		clauses = append(clauses, fmt.Sprintf(expr, len(args)))
 	}
 	if filter.Query != "" {
-		add(`(e.title ILIKE $%[1]d OR e.content ILIKE $%[1]d OR e.applicability ILIKE $%[1]d OR e.target ILIKE $%[1]d)`, memoryLikePattern(filter.Query))
+		add(`(e.title ILIKE $%[1]d OR e.content ILIKE $%[1]d OR e.applicability ILIKE $%[1]d OR e.target ILIKE $%[1]d OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(e.tags) AS tag(value) WHERE tag.value ILIKE $%[1]d))`, memoryLikePattern(filter.Query))
 	}
 	if filter.State != "" {
 		add(`(`+memoryEntryStateSQL+`)=$%d`, filter.State)

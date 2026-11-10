@@ -30,6 +30,7 @@ const learning = {
   retryable_failed: 0, stopped_failed: 0, entry_count: 1, outcome_counts: {},
 };
 let entries = [{ ...fixture }], nextId = 8;
+let historyCalls = 0;
 const state = { failList: false, conflictEdit: false, conflictSettings: false, failUsage: false, failLearning: false, learningDelay: 0 };
 const requests = [], unexpected = new Set(), external = new Set(), errors = [];
 const json = (response, status, value) => { response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); };
@@ -57,7 +58,18 @@ async function api(request, response, url) {
   if (endpoint === "/api/memories/usage") return state.failUsage
     ? json(response, 503, { error: "fixture usage unavailable" })
     : json(response, 200, { items: [{ id: 1, entry_id: 7, entry_version: 1, task_id: 24, conversation_id: 0, session_id: "intent:31", agent_key: "worker", result: "injected", created_at: "2026-10-30T05:00:00Z" }] });
-  if (endpoint === "/api/memories/extract") return json(response, 202, { queued: 2, unit: "stages" });
+  if (endpoint === "/api/memories/extract") {
+    historyCalls += 1;
+    if (historyCalls === 1) {
+      assert.deepEqual(body, { task_id: 24 });
+      return json(response, 202, { queued: 0, scanned: 50, has_more: true, next_cursor: "fixture-next-page", queue_full: false, interrupted: false, unit: "stages" });
+    }
+    assert.deepEqual(body, { task_id: 24, cursor: historyCalls > 4 ? "fixture-after-timeout" : "fixture-next-page" });
+    if (historyCalls === 2) return json(response, 503, { error: "fixture history retry" });
+    if (historyCalls === 3) return json(response, 202, { queued: 0, scanned: 0, has_more: true, next_cursor: "fixture-next-page", queue_full: true, interrupted: false, unit: "stages" });
+    if (historyCalls === 4) return json(response, 202, { queued: 0, scanned: 1, has_more: true, next_cursor: "fixture-after-timeout", queue_full: false, interrupted: true, unit: "stages" });
+    return json(response, 202, { queued: 2, scanned: 2, has_more: false, next_cursor: "", queue_full: false, interrupted: false, unit: "stages" });
+  }
   if (endpoint === "/api/memories") {
     if (method === "GET") {
       if (state.failList) return json(response, 503, { error: "fixture list unavailable" });
@@ -300,10 +312,27 @@ async function main() {
     await page.getByRole("heading", { name: "回顾已结束阶段", exact: true }).waitFor();
     await page.getByLabel("来源任务 ID（留空为各任务的已结束阶段）", { exact: true }).fill("24");
     await page.getByRole("button", { name: "确认回顾并排队", exact: true }).click();
-    await page.getByText("已排队 2 个已结束阶段，等待后台总结；尚未报告产生经验", { exact: true }).waitFor();
+    await page.getByText("本批已检查 50 个阶段，排队 0 个。", { exact: true }).waitFor();
     assert.equal(writes("POST", "/api/memories/extract").length, 1);
     assert.deepEqual(writes("POST", "/api/memories/extract").at(-1).body, { task_id: 24 });
-    console.log("PASS historical review reports ended-stage queue counts, not completed learning or all historical data");
+    await page.getByRole("button", { name: "继续下一批", exact: true }).click();
+    await page.getByText(/回顾请求失败：.*fixture history retry/).waitFor();
+    await page.getByRole("button", { name: "继续下一批", exact: true }).click();
+    await page.getByText("总结队列已满；等待后台处理后重试，将从未排队的位置继续。", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "重试本批", exact: true }).click();
+    await page.getByText("本批检查因超时或读取失败中断；已保留进度，重试会从尚未检查完的阶段继续。", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "重试本批", exact: true }).click();
+    await page.getByText("本批已检查 2 个阶段，排队 2 个。", { exact: true }).waitFor();
+    await page.getByText("本轮已扫描到末尾；已排队阶段仍需等待总结，不代表全部已产生经验。", { exact: true }).waitFor();
+    assert.equal(writes("POST", "/api/memories/extract").length, 5);
+    assert.ok(writes("POST", "/api/memories/extract").slice(1, 4).every((r) => r.body.cursor === "fixture-next-page"), "Failed/full queue lost history cursor");
+    assert.equal(writes("POST", "/api/memories/extract").at(-1).body.cursor, "fixture-after-timeout");
+    assert.equal(await page.getByRole("button", { name: "确认回顾并排队", exact: true }).isDisabled(), true);
+    await page.getByLabel("来源任务 ID（留空为各任务的已结束阶段）", { exact: true }).fill("25");
+    assert.equal(await page.getByRole("button", { name: "确认回顾并排队", exact: true }).isEnabled(), true);
+    assert.equal(await page.getByRole("button", { name: "继续下一批", exact: true }).count(), 0);
+    await page.getByRole("dialog").getByRole("button", { name: "关闭", exact: true }).click();
+    console.log("PASS history advances after empty pages, retains progress across errors/full queue and resets on scope changes");
     await page.getByRole("button", { name: "删除记忆 8", exact: true }).click();
     await page.getByRole("alertdialog").getByText("删除这条记忆？", { exact: true }).waitFor();
     assert.equal(writes("DELETE", "/api/memories/8").length, 0);

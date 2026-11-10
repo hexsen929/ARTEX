@@ -10,10 +10,11 @@ const memoryDiscoveryTimeout = 5 * time.Second
 
 // Candidate discovery must not expand memory_live_sources: its fingerprints and
 // bounded text are expensive to construct. Select cheap native identities first.
-const memoryDiscoverySQL = `SELECT live.source_kind,live.source_id,live.origin_task_id,
+const memoryDiscoveryFilterSQL = `SELECT live.source_kind,live.source_id,live.origin_task_id,
 	live.source_version,live.native_version,live.source_state,live.source_updated_at
 	FROM memory_stage_metadata live
 	LEFT JOIN memory_sources source ON source.source_kind=live.source_kind AND source.source_id=live.source_id
+	LEFT JOIN memory_discovery_checks inspected ON inspected.source_kind=live.source_kind AND inspected.source_id=live.source_id
 	WHERE ($1 OR live.source_updated_at>$2) AND ($3=0 OR live.origin_task_id=$3)
 	AND source.suppressed_at IS NULL
 	AND ($1 OR source.last_completed_version IS DISTINCT FROM live.source_version)
@@ -25,8 +26,15 @@ const memoryDiscoverySQL = `SELECT live.source_kind,live.source_id,live.origin_t
 	  AND checked.checked_at>now()-interval '15 minutes'))
 	AND NOT EXISTS(SELECT 1 FROM memory_jobs job WHERE job.source_ref=source.id
 	  AND job.source_version=live.source_version AND job.settings_epoch=$4
-	  AND job.extractor_version=1 AND job.state IN ('queued','running'))
-	ORDER BY live.source_updated_at,live.source_kind,live.source_id LIMIT $5`
+	  AND job.extractor_version=1 AND job.state IN ('queued','running'))`
+
+const memoryDiscoveryOrderSQL = ` ORDER BY live.source_updated_at,live.source_kind,live.source_id LIMIT $5`
+
+// Fresh identities precede expired checks; otherwise a large rejected prefix
+// can cycle through the cache TTL faster than the worker reaches later stages.
+const memoryDiscoverySQL = memoryDiscoveryFilterSQL + ` ORDER BY
+	CASE WHEN inspected.checked THEN inspected.checked_at END ASC NULLS FIRST,
+	live.source_updated_at,live.source_kind,live.source_id LIMIT $5`
 
 type memoryCandidate struct {
 	kind, id, state                string
@@ -85,14 +93,40 @@ func (d *DB) discoverMemorySources(ctx context.Context, taskID int64, limit int,
 	}
 	out := []MemorySource{}
 	for _, c := range candidates {
-		var token int64
-		if !historical {
-			// This body-free marker is visible to the existing source invalidation
-			// triggers. Edits that observe the marker delete it, and tokens prevent
-			// stale acknowledgement. A bounded expiry is also necessary: a writer
-			// whose statement snapshot predates marker registration may commit late
-			// without observing it. Negative caching must never hide learning forever.
-			err = d.QueryRowContext(ctx, `INSERT INTO memory_discovery_checks
+		source, err := d.prepareMemoryCandidate(ctx, c, settings, historical)
+		if err != nil {
+			return nil, err
+		}
+		if source != nil {
+			out = append(out, *source)
+		}
+	}
+	return out, nil
+}
+
+// Cache a complete eligibility decision, including a built but ineligible
+// source. Otherwise old pre-admission failures monopolize the candidate LIMIT.
+// The token and existing invalidation triggers prevent a late reader from
+// acknowledging newer content; expiry covers writers with an older snapshot.
+func (d *DB) prepareMemoryCandidate(ctx context.Context, c memoryCandidate, settings MemorySettings, historical bool) (out *MemorySource, err error) {
+	var token int64
+	checked := false
+	defer func() {
+		if token == 0 {
+			return
+		}
+		cacheErr := d.finishMemoryDiscoveryCheck(ctx, token, settings.Epoch, err == nil && checked)
+		if err == nil && cacheErr != nil {
+			out, err = nil, cacheErr
+		}
+	}()
+	if !historical {
+		// This body-free marker is visible to the existing source invalidation
+		// triggers. Edits that observe the marker delete it, and tokens prevent
+		// stale acknowledgement. A bounded expiry is also necessary: a writer
+		// whose statement snapshot predates marker registration may commit late
+		// without observing it. Negative caching must never hide learning forever.
+		err = d.QueryRowContext(ctx, `INSERT INTO memory_discovery_checks
 			  (source_kind,source_id,origin_task_id,source_version,native_version,source_state,source_updated_at)
 			  VALUES($1,$2,$3,$4,$5,$6,$7)
 			  ON CONFLICT(source_kind,source_id) DO UPDATE SET
@@ -100,32 +134,26 @@ func (d *DB) discoverMemorySources(ctx context.Context, taskID int64, limit int,
 			  source_version=EXCLUDED.source_version,native_version=EXCLUDED.native_version,
 			  source_state=EXCLUDED.source_state,source_updated_at=EXCLUDED.source_updated_at,
 			  checked=false,checked_at=now() RETURNING id`, c.kind, c.id, c.taskID, c.version, c.nativeVersion, c.state, c.updated).Scan(&token)
-			if err != nil {
-				return nil, err
-			}
+		if err != nil {
+			return nil, err
 		}
-		source, buildErr := getMemorySource(ctx, d, c.kind, c.id)
-		if errors.Is(buildErr, ErrMemoryUnavailable) {
-			source, buildErr = nil, nil
-		}
-		if token != 0 {
-			if buildErr == nil && source == nil {
-				_, err = d.ExecContext(ctx, `UPDATE memory_discovery_checks SET checked=true,checked_at=now() WHERE id=$1`, token)
-			} else {
-				_, err = d.ExecContext(ctx, `DELETE FROM memory_discovery_checks WHERE id=$1`, token)
-			}
-			if buildErr == nil && err != nil {
-				return nil, err
-			}
-		}
-		if buildErr != nil {
-			return nil, buildErr
-		}
-		if source == nil || source.Version != c.version {
-			continue
-		}
-		var eligible bool
-		err = d.QueryRowContext(ctx, `SELECT NOT EXISTS(SELECT 1 FROM memory_sources source
+	}
+	source, buildErr := getMemorySource(ctx, d, c.kind, c.id)
+	if errors.Is(buildErr, ErrMemoryUnavailable) {
+		source, buildErr = nil, nil
+	}
+	if buildErr != nil {
+		return nil, buildErr
+	}
+	if source == nil {
+		checked = true
+		return nil, nil
+	}
+	if source.Version != c.version {
+		return nil, nil
+	}
+	var eligible bool
+	err = d.QueryRowContext(ctx, `SELECT NOT EXISTS(SELECT 1 FROM memory_sources source
 		  WHERE source.source_kind=$1 AND source.source_id=$2 AND
 		  (source.suppressed_at IS NOT NULL OR (NOT $5 AND
 		    (source.last_completed_version=$3 OR source.last_attempted_version=$3))
@@ -135,14 +163,37 @@ func (d *DB) discoverMemorySources(ctx context.Context, taskID int64, limit int,
 		  AND NOT EXISTS(SELECT 1 FROM memory_jobs job JOIN memory_sources source ON source.id=job.source_ref
 		    WHERE source.source_kind=$1 AND source.source_id=$2 AND job.source_fingerprint=$4
 		    AND job.settings_epoch=$6 AND job.extractor_version=1 AND (NOT $5 OR job.state IN ('queued','running')))`,
-			c.kind, c.id, source.Version, source.Fingerprint, historical, settings.Epoch).Scan(&eligible)
-		if err != nil {
-			return nil, err
-		}
-		if eligible {
-			source.SettingsEpoch, source.Historical = settings.Epoch, historical
-			out = append(out, *source)
-		}
+		c.kind, c.id, source.Version, source.Fingerprint, historical, settings.Epoch).Scan(&eligible)
+	if err != nil {
+		return nil, err
 	}
-	return out, nil
+	if eligible {
+		source.SettingsEpoch, source.Historical = settings.Epoch, historical
+		return source, nil
+	}
+	checked = true
+	return nil, nil
+}
+
+// Serialize acknowledgement with settings invalidation. A snapshot-only epoch
+// check can miss a settings transaction whose DELETE ran before marker INSERT.
+func (d *DB) finishMemoryDiscoveryCheck(ctx context.Context, token, epoch int64, checked bool) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	settings, err := memorySettings(ctx, tx, "FOR SHARE")
+	if err != nil {
+		return err
+	}
+	if checked && settings.Epoch == epoch {
+		_, err = tx.ExecContext(ctx, `UPDATE memory_discovery_checks SET checked=true,checked_at=now() WHERE id=$1`, token)
+	} else {
+		_, err = tx.ExecContext(ctx, `DELETE FROM memory_discovery_checks WHERE id=$1`, token)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
