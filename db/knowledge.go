@@ -71,6 +71,11 @@ func (d *DB) SaveKnowledgeDocument(ctx context.Context, doc knowledge.Document) 
 		return nil, err
 	}
 	defer tx.Rollback()
+	if doc.TaskID > 0 {
+		if err = LockTaskEvidenceTx(tx, doc.TaskID); err != nil {
+			return nil, err
+		}
+	}
 	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(7337741025)`); err != nil {
 		return nil, err
 	}
@@ -150,14 +155,28 @@ func (d *DB) KnowledgeDocuments(ctx context.Context, taskID int64, all bool) ([]
 }
 
 func (d *DB) DeleteKnowledgeDocument(ctx context.Context, id, version int64) error {
-	res, err := d.ExecContext(ctx, `DELETE FROM knowledge_docs WHERE id=$1 AND version=$2`, id, version)
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var taskID int64
+	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(task_id,0) FROM knowledge_docs WHERE id=$1`, id).Scan(&taskID); err != nil {
+		return err
+	}
+	if taskID > 0 {
+		if err = LockTaskEvidenceTx(tx, taskID); err != nil {
+			return err
+		}
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM knowledge_docs WHERE id=$1 AND version=$2`, id, version)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
 		return knowledge.ErrConflict
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (d *DB) KnowledgeChunks(ctx context.Context, id int64) ([]string, error) {
@@ -201,6 +220,11 @@ func (d *DB) PublishKnowledgeVectors(ctx context.Context, doc knowledge.Document
 		return err
 	}
 	defer tx.Rollback()
+	if doc.TaskID > 0 {
+		if err = LockTaskEvidenceTx(tx, doc.TaskID); err != nil {
+			return err
+		}
+	}
 	var epoch, version int64
 	var enabled bool
 	if err = tx.QueryRowContext(ctx, `SELECT epoch,enabled FROM knowledge_config WHERE singleton FOR SHARE`).Scan(&epoch, &enabled); err != nil {

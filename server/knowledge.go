@@ -224,6 +224,10 @@ func (s *Server) indexKnowledge(w http.ResponseWriter, r *http.Request) {
 		knowledgeError(w, err)
 		return
 	}
+	if _, err := s.m.pg.KnowledgeDocuments(ctx, doc.TaskID, false); err != nil {
+		knowledgeError(w, err)
+		return
+	}
 	c, err := s.m.pg.KnowledgeConfig(ctx)
 	if err != nil {
 		knowledgeError(w, err)
