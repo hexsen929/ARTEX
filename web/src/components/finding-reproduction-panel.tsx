@@ -227,12 +227,28 @@ function PacketDisclosure({
   );
 }
 
-export function FindingReproductionPanel({ finding: original, contextTask }: { finding: Finding; contextTask?: string }) {
+export function FindingReproductionPanel({
+  finding: original,
+  contextTask,
+}: {
+  finding: Finding;
+  contextTask?: string;
+}) {
   const [saved, setSaved] = React.useState<Finding | null>(null);
   React.useEffect(() => setSaved(null), [original]);
   const finding = saved && saved.id === original.id && !original.inherited ? saved : original;
   const steps = React.useMemo(
-    () => finding.reproduction?.steps?.length ? finding.reproduction.steps.map((step, i) => ({ number: i + 1, title: step.title, body: [step.expected, step.proves].filter(Boolean).join("\n\n"), trafficIds: step.traffic_ids || [], request: step.request, response: step.response })) : parseSteps(finding.report ?? "", finding.evidence || finding.summary),
+    () =>
+      finding.reproduction?.steps?.length
+        ? finding.reproduction.steps.map((step, i) => ({
+            number: i + 1,
+            title: step.title,
+            body: [step.expected, step.proves].filter(Boolean).join("\n\n"),
+            trafficIds: step.traffic_ids || [],
+            request: step.request,
+            response: step.response,
+          }))
+        : parseSteps(finding.report ?? "", finding.evidence || finding.summary),
     [finding.evidence, finding.report, finding.summary, finding.reproduction],
   );
   const [traffic, setTraffic] = React.useState<FindingTrafficBinding[] | undefined>(undefined);
@@ -272,15 +288,34 @@ export function FindingReproductionPanel({ finding: original, contextTask }: { f
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        <ReproductionEditor key={`${finding.id}-${contextTask || ""}`} finding={finding} contextTask={contextTask} onSaved={setSaved} />
-        {finding.reproduction && <div className="whitespace-pre-wrap rounded border p-3 text-sm">{[finding.reproduction.entry_point, ...(finding.reproduction.prerequisites || []), finding.reproduction.provenance].filter(Boolean).join("\n")}</div>}
+        <ReproductionEditor
+          key={`${finding.id}-${contextTask || ""}`}
+          finding={finding}
+          contextTask={contextTask}
+          onSaved={setSaved}
+        />
+        {finding.reproduction && (
+          <div className="whitespace-pre-wrap rounded border p-3 text-sm">
+            {[
+              finding.reproduction.entry_point,
+              ...(finding.reproduction.prerequisites || []),
+              finding.reproduction.provenance,
+            ]
+              .filter(Boolean)
+              .join("\n")}
+          </div>
+        )}
         {overviewSections.map((section) => (
           <div key={section.heading} className="rounded-lg bg-muted/30 px-3 py-2.5 text-sm">
             <Markdown screenshotFindingId={finding.id} text={`## ${section.heading}\n\n${section.content}`} />
           </div>
         ))}
         {steps.map((step, index) => {
-          const bindings = step.trafficIds ? (traffic || []).filter((item) => step.trafficIds?.includes(item.snapshot.source_traffic_id)) : [traffic?.find((item) => item.position === index) ?? traffic?.[index]].filter((item): item is FindingTrafficBinding => !!item);
+          const bindings = step.trafficIds
+            ? (traffic || []).filter((item) => step.trafficIds?.includes(item.snapshot.source_traffic_id))
+            : [traffic?.find((item) => item.position === index) ?? traffic?.[index]].filter(
+                (item): item is FindingTrafficBinding => !!item,
+              );
           return (
             <div key={`${step.number}-${step.title}`} className="relative rounded-lg border bg-background p-4">
               <div className="min-w-0">
@@ -293,9 +328,28 @@ export function FindingReproductionPanel({ finding: original, contextTask }: { f
                   </div>
                 </div>
                 {step.body ? <Markdown screenshotFindingId={finding.id} text={step.body} /> : null}
-                {step.request && <pre className="mt-2 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">{step.request}</pre>}
-                {step.response && <pre className="mt-2 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">{step.response}</pre>}
-                {bindings.length ? bindings.map((binding) => <PacketDisclosure key={binding.id} findingId={finding.id} bindingId={binding.id} contextTask={contextTask} />) : <PacketDisclosure findingId={finding.id} contextTask={contextTask} />}
+                {step.request && (
+                  <pre className="mt-2 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
+                    {step.request}
+                  </pre>
+                )}
+                {step.response && (
+                  <pre className="mt-2 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
+                    {step.response}
+                  </pre>
+                )}
+                {bindings.length ? (
+                  bindings.map((binding) => (
+                    <PacketDisclosure
+                      key={binding.id}
+                      findingId={finding.id}
+                      bindingId={binding.id}
+                      contextTask={contextTask}
+                    />
+                  ))
+                ) : (
+                  <PacketDisclosure findingId={finding.id} contextTask={contextTask} />
+                )}
               </div>
             </div>
           );
