@@ -62,12 +62,13 @@ async function api(request, response, url) {
     historyCalls += 1;
     if (historyCalls === 1) {
       assert.deepEqual(body, { task_id: 24 });
-      return json(response, 202, { queued: 0, scanned: 50, has_more: true, next_cursor: "fixture-next-page", queue_full: false, unit: "stages" });
+      return json(response, 202, { queued: 0, scanned: 50, has_more: true, next_cursor: "fixture-next-page", queue_full: false, interrupted: false, unit: "stages" });
     }
-    assert.deepEqual(body, { task_id: 24, cursor: "fixture-next-page" });
+    assert.deepEqual(body, { task_id: 24, cursor: historyCalls > 4 ? "fixture-after-timeout" : "fixture-next-page" });
     if (historyCalls === 2) return json(response, 503, { error: "fixture history retry" });
-    if (historyCalls === 3) return json(response, 202, { queued: 0, scanned: 0, has_more: true, next_cursor: "fixture-next-page", queue_full: true, unit: "stages" });
-    return json(response, 202, { queued: 2, scanned: 2, has_more: false, next_cursor: "", queue_full: false, unit: "stages" });
+    if (historyCalls === 3) return json(response, 202, { queued: 0, scanned: 0, has_more: true, next_cursor: "fixture-next-page", queue_full: true, interrupted: false, unit: "stages" });
+    if (historyCalls === 4) return json(response, 202, { queued: 0, scanned: 1, has_more: true, next_cursor: "fixture-after-timeout", queue_full: false, interrupted: true, unit: "stages" });
+    return json(response, 202, { queued: 2, scanned: 2, has_more: false, next_cursor: "", queue_full: false, interrupted: false, unit: "stages" });
   }
   if (endpoint === "/api/memories") {
     if (method === "GET") {
@@ -319,10 +320,13 @@ async function main() {
     await page.getByRole("button", { name: "继续下一批", exact: true }).click();
     await page.getByText("总结队列已满；等待后台处理后重试，将从未排队的位置继续。", { exact: true }).waitFor();
     await page.getByRole("button", { name: "重试本批", exact: true }).click();
+    await page.getByText("本批检查因超时或读取失败中断；已保留进度，重试会从尚未检查完的阶段继续。", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "重试本批", exact: true }).click();
     await page.getByText("本批已检查 2 个阶段，排队 2 个。", { exact: true }).waitFor();
     await page.getByText("本轮已扫描到末尾；已排队阶段仍需等待总结，不代表全部已产生经验。", { exact: true }).waitFor();
-    assert.equal(writes("POST", "/api/memories/extract").length, 4);
-    assert.ok(writes("POST", "/api/memories/extract").slice(1).every((r) => r.body.cursor === "fixture-next-page"), "Failed/full queue lost history cursor");
+    assert.equal(writes("POST", "/api/memories/extract").length, 5);
+    assert.ok(writes("POST", "/api/memories/extract").slice(1, 4).every((r) => r.body.cursor === "fixture-next-page"), "Failed/full queue lost history cursor");
+    assert.equal(writes("POST", "/api/memories/extract").at(-1).body.cursor, "fixture-after-timeout");
     assert.equal(await page.getByRole("button", { name: "确认回顾并排队", exact: true }).isDisabled(), true);
     await page.getByLabel("来源任务 ID（留空为各任务的已结束阶段）", { exact: true }).fill("25");
     assert.equal(await page.getByRole("button", { name: "确认回顾并排队", exact: true }).isEnabled(), true);

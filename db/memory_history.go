@@ -25,11 +25,12 @@ type memoryHistoryCursor struct {
 }
 
 type MemoryHistoryProgress struct {
-	Queued     int    `json:"queued"`
-	Scanned    int    `json:"scanned"`
-	HasMore    bool   `json:"has_more"`
-	NextCursor string `json:"next_cursor"`
-	QueueFull  bool   `json:"queue_full"`
+	Queued      int    `json:"queued"`
+	Scanned     int    `json:"scanned"`
+	HasMore     bool   `json:"has_more"`
+	NextCursor  string `json:"next_cursor"`
+	QueueFull   bool   `json:"queue_full"`
+	Interrupted bool   `json:"interrupted"`
 }
 
 func decodeMemoryHistoryCursor(raw string, taskID, epoch int64) (memoryHistoryCursor, error) {
@@ -107,6 +108,10 @@ func (d *DB) QueueMemoryHistoryPage(ctx context.Context, taskID int64, rawCursor
 	for _, c := range candidates {
 		source, err := d.prepareMemoryCandidate(ctx, c, settings, true)
 		if err != nil {
+			if progress.Scanned > 0 {
+				progress.HasMore, progress.Interrupted = true, true
+				break // Return useful progress even if the page's time budget expired.
+			}
 			return progress, err
 		}
 		if source != nil {
@@ -116,6 +121,10 @@ func (d *DB) QueueMemoryHistoryPage(ctx context.Context, taskID int64, rawCursor
 				break // Keep the cursor before this unqueued source.
 			}
 			if err != nil {
+				if progress.Scanned > 0 && !errors.Is(err, ErrMemoryStale) && !errors.Is(err, ErrMemoryConflict) && !errors.Is(err, ErrMemoryInput) {
+					progress.HasMore, progress.Interrupted = true, true
+					break // Retry this source; earlier successful queues remain durable.
+				}
 				return progress, err
 			}
 			if queued {

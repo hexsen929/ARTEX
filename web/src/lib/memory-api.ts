@@ -21,6 +21,7 @@ export type MemoryHistoryProgress = {
   has_more: boolean;
   next_cursor: string;
   queue_full: boolean;
+  interrupted: boolean;
   unit: "stages";
 };
 
@@ -89,10 +90,11 @@ export const memoryAPI = {
       result.scanned > 50 ||
       typeof result.has_more !== "boolean" ||
       typeof result.queue_full !== "boolean" ||
+      typeof result.interrupted !== "boolean" ||
       typeof result.next_cursor !== "string" ||
       result.next_cursor.length > 1024 ||
       result.has_more !== Boolean(result.next_cursor) ||
-      (result.queue_full && !result.has_more)
+      ((result.queue_full || result.interrupted) && !result.has_more)
     ) {
       throw new Error("服务未确认本批扫描进度，请重新读取；尚未报告学习完成");
     }

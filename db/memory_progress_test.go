@@ -1,8 +1,10 @@
 package db
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -165,5 +167,53 @@ func TestMemoryHistoryProgressRetainsSourceWhenQueueFull(t *testing.T) {
 	retry, err := d.QueueMemoryHistoryPage(t.Context(), task.ID, full.NextCursor)
 	if err != nil || retry.Queued != 1 || retry.HasMore {
 		t.Fatalf("full-queue retry skipped source %s: %+v %v", fresh.ID, retry, err)
+	}
+}
+
+func TestMemoryHistoryProgressReturnsPartialScanOnDeadline(t *testing.T) {
+	d := memoryFixtureDB(t)
+	task := memoryFixtureTask(t, d)
+	for range 50 {
+		memoryEmptyEndedStage(t, d, task)
+	}
+	fresh := memoryFixtureSource(t, d, task)
+	var original string
+	if err := d.QueryRow(`SELECT pg_get_functiondef('memory_build_stage_source(text,text)'::regprocedure)`).Scan(&original); err != nil {
+		t.Fatal(err)
+	}
+	copySQL := strings.Replace(original, "FUNCTION public.memory_build_stage_source(", "FUNCTION public.memory_progress_original_stage_source(", 1)
+	if copySQL == original {
+		t.Fatal("unexpected fixture function definition")
+	}
+	if _, err := d.Exec(copySQL); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := d.Exec(original); err != nil {
+			t.Error(err)
+		}
+		if _, err := d.Exec(`DROP FUNCTION IF EXISTS memory_progress_original_stage_source(text,text)`); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := d.Exec(`CREATE OR REPLACE FUNCTION memory_build_stage_source(kind_arg text,id_arg text)
+	 RETURNS TABLE(source_kind text,source_id text,source_version bigint,source_fingerprint text,
+	 origin_task_id bigint,origin_conversation_id bigint,agent_key text,session_id text,
+	 source_state text,source_updated_at timestamptz,content_text text)
+	 LANGUAGE plpgsql STABLE ROWS 1 SET search_path=public,pg_temp AS $$ BEGIN
+	 PERFORM pg_sleep(0.03);
+	 RETURN QUERY SELECT * FROM memory_progress_original_stage_source(kind_arg,id_arg);
+	 END $$`); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 450*time.Millisecond)
+	first, err := d.QueueMemoryHistoryPage(ctx, task.ID, "")
+	cancel()
+	if err != nil || !first.Interrupted || !first.HasMore || first.Scanned <= 0 || first.Scanned >= 50 || first.NextCursor == "" {
+		t.Fatalf("deadline discarded completed checks: %+v %v", first, err)
+	}
+	next, err := d.QueueMemoryHistoryPage(t.Context(), task.ID, first.NextCursor)
+	if err != nil || next.Interrupted || next.HasMore || next.Queued != 1 || first.Scanned+next.Scanned != 51 {
+		t.Fatalf("partial scan did not reach %s: first=%+v next=%+v err=%v", fresh.ID, first, next, err)
 	}
 }

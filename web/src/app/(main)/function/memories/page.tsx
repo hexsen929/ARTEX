@@ -292,7 +292,7 @@ export default function MemoriesPage() {
           <p className="text-muted-foreground text-xs">自动学习起点：{memoryTime(settings?.learn_after)}。排队不代表已经产生经验，有限重试也计入调用预算。</p>
           {extractProgress ? <div role="status" className="space-y-1 text-sm">
             <p>本批已检查 {extractProgress.scanned} 个阶段，排队 {extractProgress.queued} 个。</p>
-            <p>{extractProgress.queue_full ? "总结队列已满；等待后台处理后重试，将从未排队的位置继续。" : extractProgress.has_more ? "后面还有阶段，可以继续下一批；本批没有新增也不会阻挡后续扫描。" : "本轮已扫描到末尾；已排队阶段仍需等待总结，不代表全部已产生经验。"}</p>
+            <p>{extractProgress.interrupted ? "本批检查因超时或读取失败中断；已保留进度，重试会从尚未检查完的阶段继续。" : extractProgress.queue_full ? "总结队列已满；等待后台处理后重试，将从未排队的位置继续。" : extractProgress.has_more ? "后面还有阶段，可以继续下一批；本批没有新增也不会阻挡后续扫描。" : "本轮已扫描到末尾；已排队阶段仍需等待总结，不代表全部已产生经验。"}</p>
           </div> : null}
           {extractError ? <p role="alert" className="text-destructive text-sm">{extractError}</p> : null}
           <DialogFooter>
@@ -301,7 +301,7 @@ export default function MemoriesPage() {
               setExtractProgress(null); setExtractConflict(false); setExtractError("");
             }}>从头重新检查</Button> : null}
             <Button disabled={busy || !extractionAvailable || extractConflict || (extractProgress !== null && !extractProgress.has_more)} onClick={() => void extract()}>
-              {busy ? "检查并排队中…" : extractProgress?.queue_full ? "重试本批" : extractProgress?.has_more ? "继续下一批" : "确认回顾并排队"}
+              {busy ? "检查并排队中…" : extractProgress?.queue_full || extractProgress?.interrupted ? "重试本批" : extractProgress?.has_more ? "继续下一批" : "确认回顾并排队"}
             </Button>
           </DialogFooter>
         </DialogContent>

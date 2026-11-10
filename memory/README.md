@@ -16,7 +16,8 @@ the server owns administrator endpoints and provider selection; `agent` and
   Administrators can explicitly inspect at most 50 historical stages at a time,
   then continue using the returned cursor even when the batch queues nothing.
   The cursor is bound to the task scope and settings epoch. A full queue retains
-  the position before the unqueued stage; starting over rechecks changed history.
+  the position before the unqueued stage; interrupted batches retain completed
+  scan progress and retry the unread stage. Starting over rechecks changed history.
 - Briefs, ordinary chat, assistant repetitions, untracked digests, raw evidence,
   traffic, credentials and reports are not automatic sources. Task-level fallback
   includes only facts not already owned by worker stages.
