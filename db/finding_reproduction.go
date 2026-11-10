@@ -82,7 +82,14 @@ func saveReproductionTx(ctx context.Context, tx *sql.Tx, id int64, r *Reproducti
 		}
 	}
 	raw, _ := json.Marshal(r)
-	_, err := tx.ExecContext(ctx, `UPDATE findings SET reproduction=$2::jsonb,evidence_version=evidence_version+1 WHERE id=$1`, id, string(raw))
+	var nodeID sql.NullInt64
+	err := tx.QueryRowContext(ctx, `UPDATE findings SET reproduction=$2::jsonb,evidence_version=evidence_version+1 WHERE id=$1 RETURNING node_id`, id, string(raw)).Scan(&nodeID)
+	if err != nil {
+		return err
+	}
+	if nodeID.Valid {
+		_, err = tx.ExecContext(ctx, `UPDATE exploration_nodes SET payload=jsonb_set(payload,'{reproduction}',$2::jsonb),updated_at=now() WHERE id=$1 AND kind='finding'`, nodeID.Int64, string(raw))
+	}
 	return err
 }
 

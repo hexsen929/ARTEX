@@ -134,6 +134,7 @@ export function ReproductionEditor({
             setBusy(true);
             setError("");
             try {
+              if (typeof finding.evidence_version !== "number") throw new Error("证据版本缺失，请刷新漏洞详情");
               const saved = await http<Finding>(
                 `/exploration/findings/${finding.finding_id || finding.id}/reproduction${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
                 {

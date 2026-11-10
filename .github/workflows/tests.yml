@@ -363,13 +363,13 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
           ARTEX_UI_ARTIFACTS: ${{ runner.temp }}/credential-ui-artifacts
         run: node scripts/credential-ui-smoke.cjs
+        working-directory: web
       - name: Reference documents and Word report browser regressions
         env:
           ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
         working-directory: web
         run: node scripts/reference-documents-ui-smoke.cjs
-        working-directory: web
       - name: Merged findings filters and report browser regressions
         env:
           ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright

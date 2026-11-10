@@ -4,6 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/xml"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,12 +18,25 @@ import (
 )
 
 func TestDOCXUsesSavedEvidenceAndValidOOXML(t *testing.T) {
+	canvas := image.NewRGBA(image.Rect(0, 0, 640, 180))
+	for y := 0; y < 180; y++ {
+		for x := 0; x < 640; x++ {
+			canvas.Set(x, y, color.RGBA{36, 67, 91, 255})
+			if y > 40 && y < 140 && x > 40 && x < 600 {
+				canvas.Set(x, y, color.RGBA{230, 238, 242, 255})
+			}
+		}
+	}
+	var picture bytes.Buffer
+	if err := png.Encode(&picture, canvas); err != nil {
+		t.Fatal(err)
+	}
 	f := &db.DBFinding{ID: 123, Name: "权限核对 <fixture>", Severity: "high", VerificationStatus: "unverified", EvidenceVersion: 4, ReportEvidenceVersion: 3, Summary: "合成内容，不执行目标请求", Evidence: "GET /fixture\nHTTP/1.1 200", Report: "## 结论\n需要人工复核。", Reproduction: &db.Reproduction{EntryPoint: "fixture.invalid", Prerequisites: []string{"本地合成环境"}, Steps: []db.ReproductionStep{{Title: "核对响应", Request: "GET /fixture", Response: "synthetic response", Expected: "只读测试", Proves: "无真实漏洞结论"}}}}
 	for _, locale := range []string{"zh-CN", "zh-TW", "en-US"} {
 		t.Run(locale, func(t *testing.T) {
 			var out bytes.Buffer
 			template := Template{Name: "fixture", Title: "安全评估报告", Company: "Fixture & Co", Client: "Example", Project: "Synthetic only", Locale: locale, Footer: "Confidential fixture"}
-			if err := WriteDOCX(&out, template, []DocxFinding{{Finding: f}}, time.Unix(0, 0)); err != nil {
+			if err := WriteDOCX(&out, template, []DocxFinding{{Finding: f, Images: []ReportImage{{Data: picture.Bytes(), Caption: "Synthetic evidence image"}}}}, time.Unix(0, 0)); err != nil {
 				t.Fatal(err)
 			}
 			z, err := zip.NewReader(bytes.NewReader(out.Bytes()), int64(out.Len()))
