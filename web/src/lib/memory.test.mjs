@@ -129,7 +129,9 @@ test("learning snapshots distinguish classified outcomes from legacy records wit
   assert.match(memoryLearningOutcome("saved"), /曾保存.*以记忆列表为准/);
   assert.match(memoryLearningOutcome("output_invalid"), /输出格式不合格/);
   assert.match(memoryLearningOutcome("output_truncated"), /输出被截断/);
-  assert.match(memoryLearningOutcome("budget_deferred"), /本轮未发送请求/);
+  assert.match(memoryLearningOutcome("budget_deferred"), /被拦截的请求未发送/);
+  assert.match(memoryLearningOutcome("budget_deferred"), /已有请求发出仍计入尝试/);
+  assert.doesNotMatch(memoryLearningOutcome("budget_deferred"), /本轮未发送/);
   assert.doesNotMatch(memoryLearningOutcome(undefined), /已保存经验|已经学习|已学会/);
   for (const result of ["output_invalid", "output_truncated", "provider_error", "timeout", "storage_error", "lease_expired", "failed"]) assert.equal(memoryLearningOutcomeIsError(result), true, result);
   for (const result of [undefined, "saved", "empty", "duplicate", "input_sensitive", "output_sensitive", "output_rejected", "budget_deferred", "no_experience", "legacy_unknown"]) assert.equal(memoryLearningOutcomeIsError(result), false, String(result));

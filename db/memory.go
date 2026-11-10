@@ -577,6 +577,11 @@ func (d *DB) SearchMemory(ctx context.Context, in MemorySearchInput) ([]MemoryEn
 	if limit < 1 || limit > settings.MaxEntries {
 		limit = settings.MaxEntries
 	}
+	if in.ForRecall {
+		// Filtering happens after retrieval: duplicate, newly sensitive or
+		// oversized top hits must not monopolize the final injection slots.
+		limit = min(40, limit*4)
+	}
 	args := []any{in.TaskID, in.ConversationID}
 	visibility := `(e.origin_task_id=$1 AND $1>0) OR ((` + memoryShareScopeSQL + `)='global_experience' AND e.origin_conversation_id=$2 AND $2>0)`
 	if settings.GlobalShare {

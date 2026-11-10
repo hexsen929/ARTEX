@@ -18,7 +18,7 @@ func TestMemoryLearningOutcomeMessagesDoNotClaimInvalidOutputIsEmpty(t *testing.
 		{"output_invalid", "格式不合格"}, {"output_truncated", "截断"},
 		{"output_rejected", "完整适用条件"}, {"output_sensitive", "敏感"},
 		{"provider_error", "请求失败"}, {"timeout", "超时"}, {"storage_error", "存储"},
-		{"lease_expired", "租约过期"}, {"budget_deferred", "本轮未发送"},
+		{"lease_expired", "租约过期"}, {"budget_deferred", "被拦截的请求未发送"},
 		{"source_changed", "来源、设置变化"}, {"settings_changed", "来源、设置变化"},
 		{"cleared", "清空"}, {"failed", "失败"}, {"skipped", "未采纳"},
 	} {
