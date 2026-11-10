@@ -12,6 +12,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 export default function ReportsPage() {
   const [templates, setTemplates] = React.useState<ReportTemplate[]>([]),
     [edit, setEdit] = React.useState<ReportTemplate>({ ...blankTemplate });
+  const [page, setPage] = React.useState(1);
   const [templateID, setTemplateID] = React.useState(0),
     [tasks, setTasks] = React.useState<{ id: string; name: string }[]>([]),
     [task, setTask] = React.useState("");
@@ -39,7 +40,7 @@ export default function ReportsPage() {
     if (!task) return;
     const c = new AbortController();
     http<{ items: Finding[]; total: number }>(
-      `/exploration/findings?task_id=${encodeURIComponent(task)}&limit=100&page=1${include ? "" : "&verification=confirmed"}`,
+      `/exploration/findings?task_id=${encodeURIComponent(task)}&limit=100&page=${page}${include ? "" : "&verification=confirmed"}`,
       { signal: c.signal },
     )
       .then((v) => {
@@ -50,7 +51,7 @@ export default function ReportsPage() {
         if (!c.signal.aborted) setError(e.message);
       });
     return () => c.abort();
-  }, [task, include]);
+  }, [task, include, page]);
   async function action(fn: () => Promise<unknown>) {
     setBusy(true);
     setError("");
@@ -68,6 +69,7 @@ export default function ReportsPage() {
       {label}
       <Input
         aria-label={label}
+        disabled={busy}
         value={String(edit[name])}
         onChange={(e) => setEdit({ ...edit, [name]: e.target.value })}
       />
@@ -231,7 +233,10 @@ export default function ReportsPage() {
                 className="w-full rounded border bg-background p-2"
                 value={task}
                 disabled={busy}
-                onChange={(e) => setTask(e.target.value)}
+                onChange={(e) => {
+                  setPage(1);
+                  setTask(e.target.value);
+                }}
               >
                 <option value="">请选择任务</option>
                 {tasks.map((t) => (
@@ -242,7 +247,15 @@ export default function ReportsPage() {
               </select>
             </label>
             <label className="flex gap-2 text-sm">
-              <input type="checkbox" checked={include} disabled={busy} onChange={(e) => setInclude(e.target.checked)} />
+              <input
+                type="checkbox"
+                checked={include}
+                disabled={busy}
+                onChange={(e) => {
+                  setPage(1);
+                  setInclude(e.target.checked);
+                }}
+              />
               包含待验证、受阻等其他状态（报告会标明）
             </label>
             <p className="text-xs text-muted-foreground">
@@ -255,6 +268,16 @@ export default function ReportsPage() {
             >
               选择本页全部
             </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" disabled={busy || page <= 1} onClick={() => setPage(page - 1)}>
+                上一页
+              </Button>
+              <span className="text-sm">第 {page} 页</span>
+              <Button variant="outline" disabled={busy || page * 100 >= total} onClick={() => setPage(page + 1)}>
+                下一页
+              </Button>
+              <span className="text-xs text-muted-foreground">翻页会清空本页选择</span>
+            </div>
             <div className="max-h-96 space-y-2 overflow-auto">
               {findings.map((f) => {
                 const id = f.finding_id || f.id;
