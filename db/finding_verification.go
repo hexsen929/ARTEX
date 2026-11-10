@@ -19,6 +19,22 @@ const (
 
 var ErrVerificationInput = errors.New("invalid finding verification")
 
+type VerificationMissingFields struct{ Fields []string }
+
+func (e *VerificationMissingFields) Error() string {
+	message := "验证字段缺失: " + strings.Join(e.Fields, ", ") + "。"
+	for _, field := range e.Fields {
+		if field == "additional_evidence" {
+			message += "原记录无文本 evidence；需要实际观测证据，note及绑定数据包不会自动代填。没有真实证据时保持待验证或受阻，不要仅改写note重试。"
+		}
+		if field == "note" {
+			message += "note需说明确认、排除或受阻的依据。"
+		}
+	}
+	return message
+}
+func (e *VerificationMissingFields) Unwrap() error { return ErrVerificationInput }
+
 func ValidVerificationStatus(s string) bool {
 	switch s {
 	case VerificationConfirmed, VerificationUnverified, VerificationBlocked, VerificationRejected, VerificationLegacy:
@@ -47,11 +63,15 @@ func ValidateVerification(status, note, evidence string) error {
 	if utf8.RuneCountInString(note) > 4000 {
 		return errors.Join(ErrVerificationInput, errors.New("验证说明最多4000字符，请精简 note 并将原始输出放入证据"))
 	}
-	if status == VerificationConfirmed && (strings.TrimSpace(evidence) == "" || strings.TrimSpace(note) == "") {
-		return errors.Join(ErrVerificationInput, errors.New("确认漏洞需提供证据和确认依据"))
+	var missing []string
+	if (status == VerificationConfirmed || status == VerificationBlocked || status == VerificationRejected) && strings.TrimSpace(note) == "" {
+		missing = append(missing, "note")
 	}
-	if (status == VerificationBlocked || status == VerificationRejected) && strings.TrimSpace(note) == "" {
-		return errors.Join(ErrVerificationInput, errors.New("请说明验证受阻或排除的依据"))
+	if status == VerificationConfirmed && strings.TrimSpace(evidence) == "" {
+		missing = append(missing, "additional_evidence")
+	}
+	if len(missing) > 0 {
+		return &VerificationMissingFields{Fields: missing}
 	}
 	return nil
 }

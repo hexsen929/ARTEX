@@ -473,7 +473,7 @@ func (s *ExplorationStore) PopulateFindingTrafficIDs(nodes []*Node) error {
 	if len(args) == 0 {
 		return nil
 	}
-	rows, err := s.db.Query(`SELECT f.id,f.node_id,(SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id),f.verification_status,f.verification_note,f.evidence_version FROM findings f WHERE f.node_id IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	rows, err := s.db.Query(`SELECT f.id,f.node_id,(SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id),f.verification_status,f.verification_note,f.evidence_version,(btrim(f.evidence)<>'') FROM findings f WHERE f.node_id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return err
 	}
@@ -483,12 +483,14 @@ func (s *ExplorationStore) PopulateFindingTrafficIDs(nodes []*Node) error {
 		var count int
 		var status, note string
 		var version int64
-		if err := rows.Scan(&findingID, &nodeID, &count, &status, &note, &version); err != nil {
+		var hasEvidence bool
+		if err := rows.Scan(&findingID, &nodeID, &count, &status, &note, &version, &hasEvidence); err != nil {
 			return err
 		}
 		n := byID[nodeID]
 		n.FindingID, n.FindingNodeID, n.TrafficCount = findingID, nodeID, count
 		n.VerificationStatus, n.VerificationNote, n.EvidenceVersion = status, note, version
+		n.HasTextEvidence = &hasEvidence
 	}
 	return rows.Err()
 }

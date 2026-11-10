@@ -2375,6 +2375,10 @@ func (t *Traffic) legacyBlobRefs(refs map[string]struct{}) error {
 // substring. Default page size is intentionally small (3) to keep tool results
 // lightweight and capped at 10; page is 0-based (page*limit offset).
 func (t *Traffic) query(host, contains, bodyContains string, page, limit int) ([]ExchangeMeta, error) {
+	return t.queryWindow(host, contains, bodyContains, page, limit, false)
+}
+
+func (t *Traffic) queryWindow(host, contains, bodyContains string, page, limit int, lookahead bool) ([]ExchangeMeta, error) {
 	if limit <= 0 {
 		limit = 3
 	}
@@ -2421,8 +2425,15 @@ func (t *Traffic) query(host, contains, bodyContains string, page, limit int) ([
 		q += ` AND ` + cond
 		args = append(args, arg)
 	}
-	q += ` ORDER BY ts DESC LIMIT ? OFFSET ?`
-	args = append(args, limit, page*limit)
+	if page > int(^uint(0)>>1)/limit {
+		return nil, fmt.Errorf("page 超出支持范围")
+	}
+	readLimit := limit
+	if lookahead {
+		readLimit++
+	}
+	q += ` ORDER BY ts DESC,id DESC LIMIT ? OFFSET ?`
+	args = append(args, readLimit, page*limit)
 	rows, err := t.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -2506,16 +2517,28 @@ func (t *Traffic) Tools() []actool.CoreTool {
 				Limit          int
 				Page           int
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("traffic_search 参数格式无效"), nil
+			}
 			if strings.TrimSpace(a.Host) == "" {
 				return actool.Errorf("host 为必填参数：请指定裸主机、主机:端口或完整 URL，避免全库扫描。"), nil
 			}
-			rows, err := t.query(a.Host, a.Contains, a.BodyContains, a.Page, a.Limit)
+			if a.Limit <= 0 {
+				a.Limit = 3
+			}
+			if a.Limit > 10 {
+				a.Limit = 10
+			}
+			if a.Page < 0 {
+				a.Page = 0
+			}
+			rows, err := t.queryWindow(a.Host, a.Contains, a.BodyContains, a.Page, a.Limit, true)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			if len(rows) == 0 {
-				return actool.Text("无匹配流量。"), nil
+			hasMore := len(rows) > a.Limit
+			if hasMore {
+				rows = rows[:a.Limit]
 			}
 			// 精简为最小索引：仅保留定位所需字段 + 响应码/长度，不带任何响应内容。
 			type liteRow struct {
@@ -2529,7 +2552,19 @@ func (t *Traffic) Tools() []actool.CoreTool {
 			for _, r := range rows {
 				lite = append(lite, liteRow{ID: r.ID, Method: r.Method, URL: r.URL, Status: r.Status, RespLen: r.RespLen})
 			}
-			b, _ := json.Marshal(lite)
+			var next *int
+			if hasMore {
+				page := a.Page + 1
+				next = &page
+			}
+			b, _ := json.Marshal(struct {
+				Items    []liteRow `json:"items"`
+				Page     int       `json:"page"`
+				Limit    int       `json:"limit"`
+				HasMore  bool      `json:"has_more"`
+				NextPage *int      `json:"next_page"`
+				Notice   string    `json:"notice"`
+			}{lite, a.Page, a.Limit, hasMore, next, "这是已有流量索引，非验证结论；has_more=false时停止翻页，达到读取上限时保留未完成状态。"})
 			return actool.Text(string(b)), nil
 		},
 	})

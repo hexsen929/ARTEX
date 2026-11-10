@@ -953,6 +953,9 @@ func compactFinding(n *db.Node) map[string]any {
 	if n.FindingID > 0 {
 		m["evidence_version"] = n.EvidenceVersion
 	}
+	if n.HasTextEvidence != nil {
+		m["has_text_evidence"] = *n.HasTextEvidence
+	}
 	if vc, ok := p["vulnclass"]; ok && vc != nil && vc != "" {
 		m["vulnclass"] = vc
 	}
@@ -1138,7 +1141,7 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 			return 0, fmt.Errorf("continue_intent_id 必须是正整数")
 		}
 		if it.CheckIdentity != nil || len(it.AssetIDs) != 0 || len(it.ParentIDs) != 0 {
-			return 0, fmt.Errorf("续接只填 continue_intent_id 和 continuation_note；原目标、身份与来源保持不变")
+			return 0, fmt.Errorf("intent_mixed_modes: 续接只填 continue_intent_id 和 continuation_note；原目标、身份与来源保持不变，不传 check_identity/asset_ids/parent_ids")
 		}
 		return t.ts.ContinuePlannerIntent(id, it.ContinuationNote, MaxOpenIntents)
 	}
@@ -1279,7 +1282,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			createdAny := false
 			for i, it := range items {
 				if t.worker == "planner" && it.CheckIdentity == nil && pid(it.ContinueIntentID) <= 0 {
-					errs[strconv.Itoa(i)] = "新检查必须填写check_identity；已有检查请用continue_intent_id续接原编号"
+					errs[strconv.Itoa(i)] = "intent_missing_fields: 新检查必须填写check_identity；已有检查请用continue_intent_id与continuation_note续接原编号"
 					continue
 				}
 				id, err := t.addOneIntent(it)
@@ -1295,6 +1298,11 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 				}
 				states[i] = compactIntents([]*db.Node{node}, nil, nil)[0]
 				states[i]["intent_id"] = id
+				states[i]["queued"] = node.State == "open"
+				states[i]["running"] = node.State == "running"
+				if node.State != "open" && node.State != "running" {
+					states[i]["notice"] = "复用已有记录，没有入队；先核对当前状态与恢复条件，不重复调用或另建等价意图。"
+				}
 				if node.State == "open" || node.State == "running" {
 					createdAny = true
 				}
@@ -1318,7 +1326,9 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			if len(errs) > 0 {
 				out["errors"] = errs
 			}
-			return jsonResult(out)
+			result, err := jsonResult(out)
+			result.IsError = len(errs) == len(items)
+			return result, err
 		})
 }
 

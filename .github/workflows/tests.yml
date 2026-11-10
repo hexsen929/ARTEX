@@ -279,6 +279,15 @@ jobs:
           grep -q -- '^--- PASS: TestMemoryBudgetReleaseWaitsForBothWindowsAndLoweredLimit ' "$memory_log"
           grep -q -- '^--- PASS: TestMemoryThirdExpiredLeaseTerminatesWithoutFourthAttempt ' "$memory_log"
 
+      - name: Runtime contracts and bounded tool loops
+        run: |
+          set -euo pipefail
+          contract_log="$RUNNER_TEMP/runtime-contracts.log"
+          go test -race -p=1 -v ./agent ./server ./traffic -run '^(TestRuntimeContract|TestTrafficSearchProgress)' -count=1 -timeout=5m | tee "$contract_log"
+          for name in TestRuntimeContractPlannerFinalRequestAllowsWaiting TestRuntimeContractMetadataPreservesCustomSchema TestRuntimeContractVerificationExplainsMissingEvidence TestRuntimeContractToolLoopStopsUniqueSuccessfulPages TestRuntimeContractToolLoopStopsRepeatedInvalidEdits TestRuntimeContractPersistedDescriptionsAreUpdatedAtAssembly TestRuntimeContractLoopStopIsBlockedAndNotRetried TestTrafficSearchProgressSignalsEndAndStableTies; do
+            grep -q -- "^--- PASS: $name " "$contract_log"
+          done
+
       - name: Memory discovery progress, history pages and literal tag search
         run: |
           set -euo pipefail

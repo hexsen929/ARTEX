@@ -484,7 +484,11 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 			if len(row.Schema) > 0 {
 				_ = json.Unmarshal(row.Schema, &schema)
 			}
-			return meterTool(agent.DecorateTool(t, row.Description, schema), pg, row.Key, agentKey, runInfo), nil
+			decorated := agent.DecorateTool(t, row.Description, schema)
+			if row.System && row.Kind == "builtin" {
+				decorated = agent.RuntimeToolContract(decorated)
+			}
+			return meterTool(decorated, pg, row.Key, agentKey, runInfo), nil
 		}
 		if agentKey == "asset_mapper" {
 			// The mapper is a read-only database view, not an execution role.

@@ -26,6 +26,8 @@ import (
 // contiguous run is coalesced into a single record so the trace shows whole
 // messages, not dozens of fragments.
 func captureRun(ctx context.Context, opts agentcore.Options, input string, emit func(db.Activity)) (string, harness.TerminalReason, error) {
+	ctx, releaseLoopGuard := attachToolLoopGuard(ctx, &opts)
+	defer releaseLoopGuard()
 	s := agentcore.NewSession(opts)
 	defer s.Close() // release the session's background-task manager (temp dir + processes)
 	return captureRunSession(ctx, s, input, emit, opts.MaxDuration)
@@ -83,6 +85,10 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 	for ev, err := range s.Prompt(ctx, input) {
 		if err != nil {
 			flush()
+			if cause := toolLoopCause(ctx); cause != nil {
+				rec(activityWithUsage(db.Activity{Kind: "result", IsError: true, Summary: cause.Error(), Detail: cause.Error()}, lastUsage))
+				return finalText, harness.ReasonHookStopped, cause
+			}
 			if ctx.Err() != nil { // engine/user cancellation, not a provider failure
 				sum, detail := terminalText(ctx, &harness.Terminal{Reason: reason, Err: ctx.Err()}, lastTool)
 				rec(activityWithUsage(db.Activity{Kind: "result", Summary: firstLine(sum, 400), Detail: detail}, lastUsage))
@@ -135,6 +141,9 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			}
 		case harness.KindResult:
 			if ev.Terminal != nil {
+				if cause := toolLoopCause(ctx); cause != nil {
+					ev.Terminal.Reason, ev.Terminal.Err, ev.Terminal.Text = harness.ReasonHookStopped, cause, cause.Error()
+				}
 				ev.Terminal = normalizeCallTimeoutTerminal(ctx, ev.Terminal)
 				if ctx.Err() == nil && (approvalExpired || approvalWait.Expired() || (ev.Terminal.Reason == harness.ReasonTimeout && approvalWait.Pending())) {
 					// An unanswered approval is not a failed test or exhausted
@@ -172,6 +181,9 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 		}
 	}
 	flush() // safety: any unflushed text if the stream ended without KindResult
+	if cause := toolLoopCause(ctx); cause != nil {
+		return finalText, harness.ReasonHookStopped, cause
+	}
 	return finalText, reason, rerr
 }
 
