@@ -21,6 +21,7 @@ export function ReproductionEditor({
   onSaved: (f: Finding) => void;
 }) {
   const [open, setOpen] = React.useState(false),
+    [version, setVersion] = React.useState<number | undefined>(undefined),
     [value, setValue] = React.useState<StructuredReproduction>(empty),
     [busy, setBusy] = React.useState(false),
     [error, setError] = React.useState("");
@@ -36,6 +37,8 @@ export function ReproductionEditor({
         size="sm"
         onClick={() => {
           setValue(structuredClone(finding.reproduction || empty()));
+          setVersion(finding.evidence_version);
+          setError("");
           setOpen(true);
         }}
       >
@@ -134,12 +137,12 @@ export function ReproductionEditor({
             setBusy(true);
             setError("");
             try {
-              if (typeof finding.evidence_version !== "number") throw new Error("证据版本缺失，请刷新漏洞详情");
+              if (typeof version !== "number") throw new Error("证据版本缺失，请刷新漏洞详情");
               const saved = await http<Finding>(
                 `/exploration/findings/${finding.finding_id || finding.id}/reproduction${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
                 {
                   method: "PUT",
-                  body: JSON.stringify({ evidence_version: finding.evidence_version, reproduction: value }),
+                  body: JSON.stringify({ evidence_version: version, reproduction: value }),
                 },
               );
               onSaved(saved);

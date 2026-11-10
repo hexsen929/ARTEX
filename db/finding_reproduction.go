@@ -27,6 +27,49 @@ type ReproductionStep struct {
 }
 
 var ErrReproduction = errors.New("复现步骤无效、过大或包含未绑定的流量 ID")
+var ErrReproductionInUse = errors.New("复现步骤仍引用该数据包，请先编辑步骤移除引用")
+
+// Called while the finding is locked by LockFindingEvidenceTx, so saving steps
+// and removing their last bound source cannot race each other.
+func checkReproductionUnbind(tx *sql.Tx, findingID, bindingID int64) error {
+	var raw []byte
+	var source string
+	err := tx.QueryRow(`SELECT f.reproduction,s.source_traffic_id
+FROM findings f JOIN finding_traffic_bindings b ON b.finding_id=f.id
+JOIN traffic_evidence_snapshots s ON s.id=b.snapshot_id
+WHERE f.id=$1 AND b.id=$2`, findingID, bindingID).Scan(&raw, &source)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrEvidenceNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	var reproduction Reproduction
+	if json.Unmarshal(raw, &reproduction) != nil {
+		return ErrReproduction
+	}
+	for _, step := range reproduction.Steps {
+		for _, id := range step.TrafficIDs {
+			if id != source {
+				continue
+			}
+			var other bool
+			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM finding_traffic_bindings b
+JOIN traffic_evidence_snapshots s ON s.id=b.snapshot_id
+WHERE b.finding_id=$1 AND b.id<>$2 AND s.source_traffic_id=$3)`, findingID, bindingID, source).Scan(&other); err != nil {
+				return err
+			}
+			if !other {
+				return ErrReproductionInUse
+			}
+			return nil
+		}
+	}
+	return nil
+}
 
 func (r *Reproduction) Validate() error {
 	if r == nil {

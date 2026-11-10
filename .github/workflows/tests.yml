@@ -36,8 +36,8 @@ jobs:
       - name: Prepare optional vector and document rendering fixtures
         run: |
           PGPASSWORD=reference_test_only psql -h 127.0.0.1 -U artex_reference -d artex_reference -c 'CREATE EXTENSION vector'
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libreoffice-writer fonts-noto-cjk poppler-utils
+          sudo apt-get -o Acquire::Languages=none -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends libreoffice-writer fonts-noto-cjk poppler-utils
       - name: Reference scope, stale index and reproduction regressions
         run: go test -race -p=1 -v ./knowledge ./db ./report -run 'Test(Knowledge|Extraction|Embed|Reproduction|DOCX)' -count=1 -timeout=4m
       - name: Render Word fixtures and verify extracted evidence

@@ -306,6 +306,9 @@ func (d *DB) EditFindingTraffic(ctx context.Context, findingID, bindingID, versi
 			var res sql.Result
 			var err error
 			if remove {
+				if err := checkReproductionUnbind(tx, findingID, bindingID); err != nil {
+					return err
+				}
 				res, err = tx.Exec(`DELETE FROM finding_traffic_bindings WHERE finding_id=$1 AND id=$2`, findingID, bindingID)
 			} else {
 				res, err = tx.Exec(`UPDATE finding_traffic_bindings SET role=COALESCE($3,role),note=COALESCE($4,note) WHERE finding_id=$1 AND id=$2`, findingID, bindingID, role, note)

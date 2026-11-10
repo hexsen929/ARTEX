@@ -49,12 +49,6 @@ function fmtTime(ts: string) {
   return new Date(ts).toLocaleString("zh-CN");
 }
 
-function usesStructuredReproduction(report: string) {
-  return (
-    /^##\s+(?:复现步骤|测试过程|复现过程)\s*$/im.test(report) && /^\s*(?:###\s*)?步骤\s*\d+[.、:：)）]/im.test(report)
-  );
-}
-
 // FieldRow is one label/value line in the right-hand status panel.
 function FieldRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -111,7 +105,10 @@ function FindingDetailInner() {
     return () => { loadSequence.current++; };
   }, [load]);
   const updateFinding = React.useCallback((updated: Finding) => {
-    if (activeScope.current === scopeKey) setFinding(updated);
+    if (activeScope.current === scopeKey) {
+      loadSequence.current++;
+      setFinding(updated);
+    }
   }, [scopeKey]);
 
   const changeSeverity = React.useCallback(
@@ -182,7 +179,6 @@ function FindingDetailInner() {
     );
   }
 
-  const structuredReproduction = usesStructuredReproduction(finding.report || "");
   // Inherited viewing context is not an execution/analysis grant. Bind the
   // read-only question to the finding's actual source task, checked by the server.
   const analysisTaskId = finding.source_task_id || finding.task_id || "";
@@ -266,9 +262,12 @@ function FindingDetailInner() {
                   findingId={finding.finding_id}
                 />
               ) : null}
-              {structuredReproduction ? (
-                <FindingReproductionPanel key={`reproduction:${scopeKey}`} finding={finding} contextTask={contextTaskId || undefined} />
-              ) : null}
+              <FindingReproductionPanel
+                key={`reproduction:${scopeKey}`}
+                finding={finding}
+                contextTask={contextTaskId || undefined}
+                onSaved={updateFinding}
+              />
               {/* 结构化步骤是辅助视图，原始证据、流量管理和完整报告始终保留。 */}
               <Card>
                 <CardHeader>

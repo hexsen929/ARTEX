@@ -228,15 +228,14 @@ function PacketDisclosure({
 }
 
 export function FindingReproductionPanel({
-  finding: original,
+  finding,
   contextTask,
+  onSaved,
 }: {
   finding: Finding;
   contextTask?: string;
+  onSaved: (finding: Finding) => void;
 }) {
-  const [saved, setSaved] = React.useState<Finding | null>(null);
-  React.useEffect(() => setSaved(null), [original]);
-  const finding = saved && saved.id === original.id && !original.inherited ? saved : original;
   const steps = React.useMemo(
     () =>
       finding.reproduction?.steps?.length
@@ -292,7 +291,7 @@ export function FindingReproductionPanel({
           key={`${finding.id}-${contextTask || ""}`}
           finding={finding}
           contextTask={contextTask}
-          onSaved={setSaved}
+          onSaved={onSaved}
         />
         {finding.reproduction && (
           <div className="whitespace-pre-wrap rounded border p-3 text-sm">

@@ -95,7 +95,7 @@ func (s *Server) registerFindingTraffic(mux *http.ServeMux) {
 
 func evidenceError(w http.ResponseWriter, err error) {
 	status := http.StatusUnprocessableEntity
-	if errors.Is(err, db.ErrEvidenceConflict) || errors.Is(err, db.ErrTaskArchiveState) {
+	if errors.Is(err, db.ErrEvidenceConflict) || errors.Is(err, db.ErrTaskArchiveState) || errors.Is(err, db.ErrReproductionInUse) {
 		status = http.StatusConflict
 	}
 	if errors.Is(err, db.ErrFindingNotFound) || errors.Is(err, db.ErrEvidenceNotFound) {
