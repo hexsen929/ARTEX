@@ -14,6 +14,7 @@ const memoryDiscoveryFilterSQL = `SELECT live.source_kind,live.source_id,live.or
 	live.source_version,live.native_version,live.source_state,live.source_updated_at
 	FROM memory_stage_metadata live
 	LEFT JOIN memory_sources source ON source.source_kind=live.source_kind AND source.source_id=live.source_id
+	LEFT JOIN memory_discovery_checks inspected ON inspected.source_kind=live.source_kind AND inspected.source_id=live.source_id
 	WHERE ($1 OR live.source_updated_at>$2) AND ($3=0 OR live.origin_task_id=$3)
 	AND source.suppressed_at IS NULL
 	AND ($1 OR source.last_completed_version IS DISTINCT FROM live.source_version)
@@ -28,7 +29,12 @@ const memoryDiscoveryFilterSQL = `SELECT live.source_kind,live.source_id,live.or
 	  AND job.extractor_version=1 AND job.state IN ('queued','running'))`
 
 const memoryDiscoveryOrderSQL = ` ORDER BY live.source_updated_at,live.source_kind,live.source_id LIMIT $5`
-const memoryDiscoverySQL = memoryDiscoveryFilterSQL + memoryDiscoveryOrderSQL
+
+// Fresh identities precede expired checks; otherwise a large rejected prefix
+// can cycle through the cache TTL faster than the worker reaches later stages.
+const memoryDiscoverySQL = memoryDiscoveryFilterSQL + ` ORDER BY
+	CASE WHEN inspected.checked THEN inspected.checked_at END ASC NULLS FIRST,
+	live.source_updated_at,live.source_kind,live.source_id LIMIT $5`
 
 type memoryCandidate struct {
 	kind, id, state                string
@@ -109,13 +115,7 @@ func (d *DB) prepareMemoryCandidate(ctx context.Context, c memoryCandidate, sett
 		if token == 0 {
 			return
 		}
-		var cacheErr error
-		if err == nil && checked {
-			_, cacheErr = d.ExecContext(ctx, `UPDATE memory_discovery_checks SET checked=true,checked_at=now() WHERE id=$1
-			  AND EXISTS(SELECT 1 FROM memory_settings WHERE singleton AND epoch=$2)`, token, settings.Epoch)
-		} else {
-			_, cacheErr = d.ExecContext(ctx, `DELETE FROM memory_discovery_checks WHERE id=$1`, token)
-		}
+		cacheErr := d.finishMemoryDiscoveryCheck(ctx, token, settings.Epoch, err == nil && checked)
 		if err == nil && cacheErr != nil {
 			out, err = nil, cacheErr
 		}
@@ -173,4 +173,27 @@ func (d *DB) prepareMemoryCandidate(ctx context.Context, c memoryCandidate, sett
 	}
 	checked = true
 	return nil, nil
+}
+
+// Serialize acknowledgement with settings invalidation. A snapshot-only epoch
+// check can miss a settings transaction whose DELETE ran before marker INSERT.
+func (d *DB) finishMemoryDiscoveryCheck(ctx context.Context, token, epoch int64, checked bool) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	settings, err := memorySettings(ctx, tx, "FOR SHARE")
+	if err != nil {
+		return err
+	}
+	if checked && settings.Epoch == epoch {
+		_, err = tx.ExecContext(ctx, `UPDATE memory_discovery_checks SET checked=true,checked_at=now() WHERE id=$1`, token)
+	} else {
+		_, err = tx.ExecContext(ctx, `DELETE FROM memory_discovery_checks WHERE id=$1`, token)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }

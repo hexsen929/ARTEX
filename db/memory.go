@@ -79,15 +79,16 @@ func (d *DB) UpdateMemorySettings(ctx context.Context, in MemorySettings, expect
 		in.Enabled, in.AutoExtract, in.GlobalShare, in.ProfileID, in.MaxEntries, in.MaxTokens, in.MaxJobsPerHour, in.RetentionDays); err != nil {
 		return current, err
 	}
+	// Eligibility can change with the epoch even if native source content did
+	// not. Invalidate cached rejections so the new settings are observed promptly.
+	// Checks precede jobs, matching native source invalidation's lock order.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_discovery_checks`); err != nil {
+		return current, err
+	}
 	// Jobs admitted under old settings are not silently carried into new model
 	// or sharing choices. Fresh incremental discovery can queue them anew.
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_jobs SET state='skipped',result='settings_changed',lease_token='',lease_until=NULL,updated_at=now()
 		WHERE state IN ('queued','running','failed')`); err != nil {
-		return current, err
-	}
-	// Eligibility can change with the epoch even if native source content did
-	// not. Invalidate cached rejections so the new settings are observed promptly.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_discovery_checks`); err != nil {
 		return current, err
 	}
 	in.Epoch, in.LearnAfter = current.Epoch+1, current.LearnAfter
