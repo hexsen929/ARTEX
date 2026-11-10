@@ -168,7 +168,7 @@ func (g *toolLoopGuard) PostToolUse(ctx context.Context, name string, input, res
 	// events, which also include SDK schema rejections before hooks execute.
 }
 
-func observeToolLoopResult(ctx context.Context, name string, input, result []byte, isErr bool) {
+func observeToolLoopResult(ctx context.Context, name string, input, result []byte, isErr bool, otherToolsPending ...bool) {
 	g, _ := ctx.Value(toolLoopGuardKey{}).(*toolLoopGuard)
 	if g == nil {
 		return
@@ -178,6 +178,9 @@ func observeToolLoopResult(ctx context.Context, name string, input, result []byt
 	}
 	code := contractFailureCode(name, result)
 	if code == "" {
+		if db.IsDeferredLookupRejection(name, input, result) {
+			return
+		}
 		// An earlier permission, approval, transport or unknown tool failure
 		// must not disappear behind a later ordinary field-validation handoff.
 		g.mu.Lock()
@@ -198,7 +201,8 @@ func observeToolLoopResult(ctx context.Context, name string, input, result []byt
 	key := name + ":" + code + ":" + contractFailureTarget(input)
 	g.repeated[key]++
 	if g.repeated[key] >= repeatedContractFailureLimit || g.failures >= contractFailureLimit {
-		if verification != nil && !g.hardContractFailure && g.stopped == nil {
+		pending := len(otherToolsPending) > 0 && otherToolsPending[0]
+		if verification != nil && !g.hardContractFailure && !pending && g.stopped == nil {
 			g.stopped = &verificationHandoffError{failure: verification}
 			g.cancel(g.stopped)
 			return

@@ -11,7 +11,7 @@ func TestVerificationHandoffLegacyRepairPreservesEvidenceAndGeneration(t *testin
 	d := memoryFixtureDB(t)
 	task := memoryFixtureTask(t, d)
 	s := d.Exploration(task.ExplorationID)
-	for _, scenario := range []string{"valid", "already_updated", "missing_result", "foreign_token", "pending_write", "unknown_field", "different_finding", "old_result", "second_run", "incomplete", "approval", "earlier_permission"} {
+	for _, scenario := range []string{"valid", "lookup_rejected", "lookup_mismatch", "already_updated", "missing_result", "foreign_token", "pending_write", "unknown_field", "different_finding", "old_result", "second_run", "incomplete", "approval", "earlier_permission"} {
 		t.Run(scenario, func(t *testing.T) {
 			f, err := s.RecordFinding(t.Context(), RecordFindingInput{TaskID: task.ID, Summary: "synthetic lead", Severity: "low"})
 			if err != nil {
@@ -32,6 +32,23 @@ func TestVerificationHandoffLegacyRepairPreservesEvidenceAndGeneration(t *testin
 				meta, _ := json.Marshal(map[string]string{"worker_run_token": token})
 				for _, kind := range []string{"tool_use", "tool_result"} {
 					if _, err := s.AppendActivity(Activity{NodeID: &id, Kind: kind, Tool: "set_finding_verification", ToolUseID: "earlier-denied", IsError: kind == "tool_result", Detail: "Tool call was not permitted", Metadata: meta}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if scenario == "lookup_rejected" || scenario == "lookup_mismatch" {
+				meta, _ := json.Marshal(map[string]string{"worker_run_token": token})
+				input := `{"tool_name":"missing-local-tool"}`
+				output := "Error: unknown tool missing-local-tool"
+				if scenario == "lookup_mismatch" {
+					output = "Error: unknown tool another-name"
+				}
+				for _, kind := range []string{"tool_use", "tool_result"} {
+					detail := input
+					if kind == "tool_result" {
+						detail = output
+					}
+					if _, err := s.AppendActivity(Activity{NodeID: &id, Kind: kind, Tool: "ExecuteExtraTool", ToolUseID: "earlier-lookup", IsError: kind == "tool_result", Detail: detail, Metadata: meta}); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -103,7 +120,7 @@ func TestVerificationHandoffLegacyRepairPreservesEvidenceAndGeneration(t *testin
 				t.Fatal(err)
 			}
 			after, _ := s.GetNode(id)
-			eligible := scenario == "valid" || scenario == "already_updated"
+			eligible := scenario == "valid" || scenario == "already_updated" || scenario == "lookup_rejected"
 			if !eligible {
 				if n != 0 || after.State != before.State || string(after.Payload) != string(before.Payload) {
 					t.Fatal("ambiguous record reclassified", n)

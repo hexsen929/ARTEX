@@ -54,3 +54,15 @@ func ParseVerificationFieldFailure(input, result []byte) *VerificationFieldFailu
 	slices.Sort(failure.Fields)
 	return &VerificationFieldFailure{FindingID: id, Fields: slices.Compact(failure.Fields)}
 }
+
+// Norma rejects an unknown deferred name before calling any tool. Match the
+// complete local lookup diagnostic, never an arbitrary substring or MCP error.
+func IsDeferredLookupRejection(tool string, input, result []byte) bool {
+	if tool != "ExecuteExtraTool" {
+		return false
+	}
+	var args struct {
+		Name string `json:"tool_name"`
+	}
+	return json.Unmarshal(input, &args) == nil && args.Name != "" && len(args.Name) <= 512 && !strings.ContainsAny(args.Name, "\r\n") && string(result) == "Error: unknown tool "+args.Name
+}

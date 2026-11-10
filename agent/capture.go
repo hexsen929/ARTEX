@@ -52,6 +52,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 	}
 	toolNames := map[string]string{} // tool_use id -> name, to label results
 	toolInputs := map[string][]byte{}
+	pendingTools := map[string]bool{}
 
 	var tbuf strings.Builder
 	var tkind string
@@ -105,7 +106,8 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			}
 			flush()
 			toolNames[ev.ToolUse.ID] = ev.ToolUse.Name
-			if ev.ToolUse.Name == "add_intent" || ev.ToolUse.Name == "set_finding_verification" || ev.ToolUse.Name == "traffic_search" {
+			pendingTools[ev.ToolUse.ID] = true
+			if ev.ToolUse.Name == "add_intent" || ev.ToolUse.Name == "set_finding_verification" || ev.ToolUse.Name == "traffic_search" || ev.ToolUse.Name == "ExecuteExtraTool" {
 				toolInputs[ev.ToolUse.ID] = append([]byte(nil), ev.ToolUse.Input...)
 			}
 			in := string(ev.ToolUse.Input)
@@ -127,7 +129,8 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			auditTrace.Complete(ev.ToolResult.ToolUseID, out, ev.ToolResult.IsError)
 			rec(db.Activity{Kind: "tool_result", Tool: toolNames[ev.ToolResult.ToolUseID], ToolUseID: ev.ToolResult.ToolUseID,
 				IsError: ev.ToolResult.IsError, Summary: firstLine(out, 200), Detail: out})
-			observeToolLoopResult(ctx, toolNames[ev.ToolResult.ToolUseID], toolInputs[ev.ToolResult.ToolUseID], []byte(out), ev.ToolResult.IsError)
+			delete(pendingTools, ev.ToolResult.ToolUseID)
+			observeToolLoopResult(ctx, toolNames[ev.ToolResult.ToolUseID], toolInputs[ev.ToolResult.ToolUseID], []byte(out), ev.ToolResult.IsError, len(pendingTools) != 0)
 			delete(toolInputs, ev.ToolResult.ToolUseID)
 		case harness.KindText:
 			addDelta("text", ev.Text)
