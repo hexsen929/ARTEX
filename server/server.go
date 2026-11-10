@@ -412,6 +412,13 @@ func (s *Server) restoreTaskRuntimes() {
 	// reload tasks persisted on disk so the task list survives a restart, and
 	// restore persisted paused state (so a task paused before restart stays paused).
 	for _, t := range m.LoadExisting() {
+		repairCtx, repairCancel := context.WithTimeout(s.ctx, 5*time.Second)
+		if n, err := t.Store.ReclassifyLegacyReadBudgetStops(repairCtx); err != nil {
+			log.Printf("[runtime] task %s read-budget classification pending", t.ID)
+		} else if n > 0 {
+			log.Printf("[runtime] task %s reclassified %d saved read-budget stops without executing work", t.ID, n)
+		}
+		repairCancel()
 		lifecycle := t.lifecycleSnapshot()
 		if lifecycle.Paused {
 			s.engine.Pause(t.ID, agent.AbortPausedOnReload)

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/Autumn-27/artex/db"
@@ -230,5 +231,8 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 			emit(r)
 		}
 	})
+	if errors.Is(err, ErrTrafficReadBudget) {
+		err = nil
+	}
 	return text, err
 }

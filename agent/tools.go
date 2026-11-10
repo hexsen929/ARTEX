@@ -32,6 +32,11 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 		if n.BlockedReason != "" {
 			m["blocked_reason"] = n.BlockedReason
 		}
+		if result, ok := p["worker_result"].(map[string]any); ok && result["code"] == "traffic_read_budget" {
+			m["next_action"] = "review_saved_results"
+			m["requires_operator"] = false
+			m["automatic_requeue"] = false
+		}
 		if n.Inherited {
 			m["source_task_id"] = n.SourceTaskID
 			m["inherited"] = true
@@ -1302,6 +1307,9 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 				states[i]["running"] = node.State == "running"
 				if node.State != "open" && node.State != "running" {
 					states[i]["notice"] = "复用已有记录，没有入队；先核对当前状态与恢复条件，不重复调用或另建等价意图。"
+					if states[i]["next_action"] == "review_saved_results" {
+						states[i]["notice"] = "读取批次已结束，直接读取自动交接和已有结果整理未完成项，无需人工核对；没有重新入队。"
+					}
 				}
 				if node.State == "open" || node.State == "running" {
 					createdAny = true

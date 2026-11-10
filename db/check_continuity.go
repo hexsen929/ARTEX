@@ -70,6 +70,11 @@ func (s *ExplorationStore) ContinuePlannerIntent(id int64, note string, limit in
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return 0, err
 	}
+	if state == "exhausted" && p.Result.Code == "traffic_read_budget" {
+		// The work has already handed its saved results back to the Planner.
+		// Do not turn coordination into replay of the same bounded read loop.
+		return id, tx.Commit()
+	}
 	if state != "exhausted" || (p.Result.Code != "run_budget" && p.Result.Code != "turn_budget") {
 		return 0, fmt.Errorf("continuation_requires_operator: 意图 #%d 保持 %s (%s)，未入队。本工具不能恢复该状态；结束本轮并等待人工处理，恢复前置后通过原意图手动继续，不要换编号重派", id, state, p.Result.Code)
 	}

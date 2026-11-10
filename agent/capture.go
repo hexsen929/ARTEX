@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -159,6 +160,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 					ev.Terminal.Err = intercept.ErrApprovalWait
 					ev.Terminal.Text = intercept.ErrApprovalWait.Error()
 				}
+				ev.Terminal = readBudgetTerminal(ctx, ev.Terminal)
 				if ev.Terminal.Reason != harness.ReasonAbortedStreaming {
 					sidequestion.Finish(ctx, ev.Terminal.Messages)
 				}
@@ -176,7 +178,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 					sum, detail = terminalText(ctx, ev.Terminal, lastTool)
 				}
 				u := ev.Terminal.Usage // cumulative token usage for this session
-				rec(db.Activity{Kind: "result", IsError: ev.Terminal.Err != nil,
+				rec(db.Activity{Kind: "result", IsError: ev.Terminal.Err != nil && !errors.Is(ev.Terminal.Err, ErrTrafficReadBudget),
 					Summary: firstLine(sum, 400), Detail: detail,
 					InputTokens: &u.InputTokens, OutputTokens: &u.OutputTokens,
 					CacheReadTokens: &u.CacheReadTokens, CacheWriteTokens: &u.CacheWriteTokens})

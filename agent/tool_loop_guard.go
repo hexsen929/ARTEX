@@ -20,6 +20,7 @@ const repeatedContractFailureLimit = 3
 const contractFailureLimit = 8
 
 var ErrToolLoopGuard = errors.New("tool_loop_guard")
+var ErrTrafficReadBudget = errors.New("traffic_read_budget")
 
 // Contains only host-selected categories, never target URLs, arguments or
 // provider errors. This is a blocked run, not a completed task or a model fault.
@@ -27,9 +28,6 @@ type toolLoopError struct{ category string }
 
 func (e *toolLoopError) Unwrap() error { return ErrToolLoopGuard }
 func (e *toolLoopError) Error() string {
-	if e.category == "traffic_read_budget" {
-		return "tool_loop_guard: 本轮流量检索达到读取上限，已停止继续翻页；已有记录保留，尚未查完，不表示任务完成。请人工核对检索目的与进度后再处理。"
-	}
 	return "tool_loop_guard: 同类参数或恢复条件错误反复出现，本轮已停止；已有记录保留，尚未完成。请先处理明确的缺失字段或人工恢复条件，不重放同一请求。"
 }
 
@@ -40,6 +38,10 @@ type toolLoopGuard struct {
 	searches, broad, failures int
 	repeated                  map[string]int
 	stopped                   error
+	broadDenied               int
+	readBudget                bool
+	handoffTaken              bool
+	handoffText               string
 }
 
 type toolLoopGuardKey struct{}
@@ -48,6 +50,7 @@ func attachToolLoopGuard(ctx context.Context, opts *agentcore.Options) (context.
 	child, cancel := context.WithCancelCause(ctx)
 	guard := &toolLoopGuard{inner: opts.Hooks, cancel: cancel, repeated: make(map[string]int)}
 	opts.Hooks = guard
+	guard.wrapModelCalls(opts)
 	return context.WithValue(child, toolLoopGuardKey{}, guard), func() { cancel(nil) }
 }
 
@@ -71,6 +74,12 @@ func (g *toolLoopGuard) PreToolUse(ctx context.Context, name string, input []byt
 	if ctx.Err() != nil {
 		return true, "本轮已停止，工具未执行。", nil
 	}
+	g.mu.Lock()
+	settling := g.readBudget
+	g.mu.Unlock()
+	if settling {
+		return true, readHandoffNotice, nil
+	}
 	var rewritten []byte
 	if g.inner != nil {
 		blocked, message, changed := g.inner.PreToolUse(ctx, name, input)
@@ -87,6 +96,9 @@ func (g *toolLoopGuard) PreToolUse(ctx context.Context, name string, input []byt
 	if g.stopped != nil {
 		return true, g.stopped.Error(), nil
 	}
+	if g.readBudget {
+		return true, readHandoffNotice, nil
+	}
 	if name == "traffic_search" {
 		var args struct {
 			Contains string `json:"contains"`
@@ -94,8 +106,17 @@ func (g *toolLoopGuard) PreToolUse(ctx context.Context, name string, input []byt
 		}
 		_ = json.Unmarshal(input, &args)
 		broad := strings.TrimSpace(args.Contains) == "" && strings.TrimSpace(args.Body) == ""
-		if g.searches >= trafficCallLimit || (broad && g.broad >= broadTrafficCallLimit) {
-			return true, g.stopLocked("traffic_read_budget"), nil
+		if g.searches >= trafficCallLimit {
+			g.readBudget = true
+			return true, readHandoffNotice, nil
+		}
+		if broad && g.broad >= broadTrafficCallLimit {
+			g.broadDenied++
+			if g.broadDenied >= 3 {
+				g.readBudget = true
+				return true, readHandoffNotice, nil
+			}
+			return true, "traffic_query_limit: 本轮宽泛流量翻页已停止；由系统自动整理已读结果。已有记录详情仍可读取，有明确筛选条件时可在本轮剩余预算内查询；不要继续仅改变页码、换主机重试，也不需要用户逐页核对。", nil
 		}
 		g.searches++
 		if broad {
@@ -169,6 +190,12 @@ func observeToolLoopResult(ctx context.Context, name string, input, result []byt
 
 func (g *toolLoopGuard) Stop(ctx context.Context, messages []llm.Message) (bool, []string, string) {
 	if ctx.Err() != nil {
+		return false, nil, ""
+	}
+	g.mu.Lock()
+	settling := g.readBudget
+	g.mu.Unlock()
+	if settling {
 		return false, nil, ""
 	}
 	if g.inner != nil {

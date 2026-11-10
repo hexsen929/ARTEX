@@ -13,6 +13,9 @@ import (
 // workerOutcome is intentionally free of raw provider bodies, URLs or tool input.
 // Detailed traces remain in their existing access-controlled activity stream.
 func workerOutcome(reason harness.TerminalReason, err error) (state, code, message string) {
+	if errors.Is(err, agent.ErrTrafficReadBudget) {
+		return "exhausted", "traffic_read_budget", "本轮读取预算结束；已有记录与自动交接保留，由Planner读取结果协调未完成项，不需要人工逐页核对，不原样重派宽查询"
+	}
 	if errors.Is(err, agent.ErrToolLoopGuard) {
 		return "blocked", "tool_loop_guard", "连续读取或无效重试达到本轮上限；已有证据和进度保留，未完成部分等待人工核对，不自动重派"
 	}

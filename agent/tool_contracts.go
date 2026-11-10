@@ -9,7 +9,7 @@ import (
 
 const intentCallContract = "【当前调用契约】新建检查：summary 与 check_identity 必填；续接：仅传 continue_intent_id 和非空 continuation_note，沿用原身份、资产、来源与验收，不传 asset_ids/parent_ids/check_identity。blocked、审批等待、模型故障或未知结果需人工恢复；模型不得反复调用或新建等价检查绕过。返回 state=blocked 或 queued=false 表示没有入队，不能称为成功派发。"
 const verificationCallContract = "【当前验证契约】note 是判断依据，不是证据正文。status=confirmed 要求原记录 evidence 非空，或通过 additional_evidence 追加已实际取得的证据；已绑定数据包不自动填写文本 evidence。缺少真实证据时保持 unverified/blocked，不编造输出、不只改写 note 重试。"
-const trafficReadContract = "【读取边界】traffic_search 返回 items、page、limit、has_more、next_page；has_more=false 时停止翻页。仅按主机宽查询每轮最多12次，全部流量搜索每轮最多40次。达到上限说明未查完并等待处理，不改页码、换主机或新建意图规避。绿勾只说明查询成功，不证明任务有进展。"
+const trafficReadContract = "【读取边界】traffic_search 返回 items、page、limit、has_more、next_page；has_more=false 时停止翻页。仅按主机宽查询每轮最多12次，之后停止该类翻页，已知记录读取与明确条件的查询仍可在原预算内进行；全部搜索最多40次。持续重复被拒或总预算耗尽时自动整理已读结果并交回Planner，无需用户逐页核对。不得换主机或新建等价意图重置额度。绿勾只说明查询成功，不证明任务有进展。"
 
 // Called only for authorized built-in rows, after persisted metadata overrides.
 // Never change stored custom descriptions, bindings, enablement or constraints.
