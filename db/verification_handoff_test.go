@@ -11,7 +11,7 @@ func TestVerificationHandoffLegacyRepairPreservesEvidenceAndGeneration(t *testin
 	d := memoryFixtureDB(t)
 	task := memoryFixtureTask(t, d)
 	s := d.Exploration(task.ExplorationID)
-	for _, scenario := range []string{"valid", "already_updated", "missing_result", "foreign_token", "pending_write", "unknown_field", "different_finding", "old_result", "second_run", "incomplete", "approval"} {
+	for _, scenario := range []string{"valid", "already_updated", "missing_result", "foreign_token", "pending_write", "unknown_field", "different_finding", "old_result", "second_run", "incomplete", "approval", "earlier_permission"} {
 		t.Run(scenario, func(t *testing.T) {
 			f, err := s.RecordFinding(t.Context(), RecordFindingInput{TaskID: task.ID, Summary: "synthetic lead", Severity: "low"})
 			if err != nil {
@@ -27,6 +27,14 @@ func TestVerificationHandoffLegacyRepairPreservesEvidenceAndGeneration(t *testin
 			token, err := s.BindIntentRun(t.Context(), id)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if scenario == "earlier_permission" {
+				meta, _ := json.Marshal(map[string]string{"worker_run_token": token})
+				for _, kind := range []string{"tool_use", "tool_result"} {
+					if _, err := s.AppendActivity(Activity{NodeID: &id, Kind: kind, Tool: "set_finding_verification", ToolUseID: "earlier-denied", IsError: kind == "tool_result", Detail: "Tool call was not permitted", Metadata: meta}); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			for i := range 3 {
 				findingID := f.FindingID

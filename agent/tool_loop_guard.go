@@ -178,6 +178,11 @@ func observeToolLoopResult(ctx context.Context, name string, input, result []byt
 	}
 	code := contractFailureCode(name, result)
 	if code == "" {
+		// An earlier permission, approval, transport or unknown tool failure
+		// must not disappear behind a later ordinary field-validation handoff.
+		g.mu.Lock()
+		g.hardContractFailure = true
+		g.mu.Unlock()
 		return
 	}
 	g.mu.Lock()

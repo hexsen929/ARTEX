@@ -70,7 +70,7 @@ func TestVerificationHandoffActualRejectedUpdatesPreserveFinding(t *testing.T) {
 }
 
 func TestVerificationHandoffRejectsUnknownOrMixedFaults(t *testing.T) {
-	for _, scenario := range []string{"valid", "raw_text", "unknown_field", "mixed_operator", "parent_pause"} {
+	for _, scenario := range []string{"valid", "raw_text", "unknown_field", "mixed_operator", "approval_wait", "permission_denied", "authentication", "unknown_tool_error", "parent_pause"} {
 		t.Run(scenario, func(t *testing.T) {
 			parent, cancel := context.WithCancelCause(t.Context())
 			defer cancel(nil)
@@ -87,6 +87,11 @@ func TestVerificationHandoffRejectsUnknownOrMixedFaults(t *testing.T) {
 			}
 			if scenario == "mixed_operator" {
 				observeToolLoopResult(ctx, "add_intent", []byte(`{"continue_intent_id":2}`), []byte("continuation_requires_operator"), true)
+			}
+			for name, prior := range map[string]string{"approval_wait": "approval_wait", "permission_denied": "Tool call was not permitted: operator denied", "authentication": "401 authentication failed", "unknown_tool_error": "unclassified failed operation"} {
+				if scenario == name {
+					observeToolLoopResult(ctx, "set_finding_verification", input, []byte(prior), true)
+				}
 			}
 			if scenario == "parent_pause" {
 				cancel(AbortPausedByUser)

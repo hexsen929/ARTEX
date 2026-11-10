@@ -10,6 +10,15 @@ import (
 // Only three terminal, matching, completed built-in validation rejections can
 // explain the old generic guard. Never infer this from a user/provider message.
 func legacyVerificationFailure(ctx context.Context, tx *sql.Tx, expID, nodeID, taskID, resultID int64, token string, start, end time.Time) (*VerificationFieldFailure, error) {
+	var errorCount int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM (
+SELECT id FROM activity WHERE exploration_id=$1 AND node_id=$2 AND kind='tool_result' AND is_error=true
+AND created_at >= $3 AND created_at <= $4 AND id<$5 LIMIT 4) failures`, expID, nodeID, start, end, resultID).Scan(&errorCount); err != nil {
+		return nil, err
+	}
+	if errorCount != 3 {
+		return nil, nil
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT r.tool,r.is_error,r.detail,coalesce(r.metadata->>'worker_run_token',''),r.created_at,
 coalesce(u.detail,''),coalesce(u.metadata->>'worker_run_token',''),u.created_at
 FROM activity r LEFT JOIN LATERAL (
