@@ -12,9 +12,9 @@ import (
 
 func TestMemoryManagementSearchMatchesTagsLiterally(t *testing.T) {
 	f := newMemoryHTTPFixture(t)
-	tag := "tagonly-" + t.Name() + "_%"
+	tag := "onlytag_%_fixture"
 	entry := f.create(t, "-tag", map[string]any{"tags": []string{tag}})
-	f.create(t, "-decoy", map[string]any{"tags": []string{"tagonly-" + t.Name() + "-xx"}})
+	f.create(t, "-decoy", map[string]any{"tags": []string{"onlytag-xx-fixture"}})
 	w := f.request(t, http.MethodGet, "/api/memories?q="+url.QueryEscape(tag), nil)
 	var result struct {
 		Items []db.MemoryEntry `json:"items"`
