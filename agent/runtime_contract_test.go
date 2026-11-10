@@ -30,6 +30,9 @@ func TestRuntimeContractPlannerFinalRequestAllowsWaiting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if ok, err := es.ClaimIntent(id, "fixture"); err != nil || !ok {
+		t.Fatal("fixture intent was not running", ok, err)
+	}
 	if err = es.SetIntentOutcome(id, "blocked", "authentication", "fixture provider unavailable"); err != nil {
 		t.Fatal(err)
 	}

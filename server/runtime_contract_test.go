@@ -32,8 +32,8 @@ func TestRuntimeContractPersistedDescriptionsAreUpdatedAtAssembly(t *testing.T) 
 	probe := actool.Build(actool.Spec{Name: "add_intent", Description: "code default", Schema: map[string]any{"type": "object"}, Run: func(context.Context, json.RawMessage, *actool.ToolContext) (actool.Result, error) {
 		return actool.Text("fixture"), nil
 	}})
-	resolved := agent.ToolResolve(t.Context(), "planner", []actool.CoreTool{probe})
-	if len(resolved) != 1 || !strings.Contains(resolved[0].Description(), "continuation_note") || !strings.Contains(resolved[0].Description(), "CUSTOM persisted description") {
+	resolved := names(agent.ToolResolve(t.Context(), "planner", []actool.CoreTool{probe}))
+	if resolved["add_intent"] == nil || !strings.Contains(resolved["add_intent"].Description(), "continuation_note") || !strings.Contains(resolved["add_intent"].Description(), "CUSTOM persisted description") {
 		t.Fatal("real resolver still exposes legacy-only contract")
 	}
 	stored, _ := f.pg.GetTool("add_intent")
@@ -43,14 +43,14 @@ func TestRuntimeContractPersistedDescriptionsAreUpdatedAtAssembly(t *testing.T) 
 	if stored.Description != "CUSTOM persisted description" || !reflect.DeepEqual(got, want) {
 		t.Fatal("runtime decoration rewrote stored customization")
 	}
-	props := resolved[0].InputSchema()["properties"].(map[string]any)
+	props := resolved["add_intent"].InputSchema()["properties"].(map[string]any)
 	if props["continuation_note"] == nil || props["check_identity"] == nil {
 		t.Fatal("stale tool schema omitted current fields")
 	}
 	if err = f.pg.UpdateTool("add_intent", stored.Description, stored.Schema, json.RawMessage(`["planner"]`), false); err != nil {
 		t.Fatal(err)
 	}
-	if got := agent.ToolResolve(t.Context(), "planner", []actool.CoreTool{probe}); len(got) != 0 {
+	if got := names(agent.ToolResolve(t.Context(), "planner", []actool.CoreTool{probe})); got["add_intent"] != nil {
 		t.Fatal("contract overlay resurrected disabled tool")
 	}
 }
