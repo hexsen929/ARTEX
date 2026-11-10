@@ -61,3 +61,10 @@ func TestRuntimeContractLoopStopIsBlockedAndNotRetried(t *testing.T) {
 		t.Fatal(state, code)
 	}
 }
+
+func TestReadBudgetOutcomeIsAutomaticHandoff(t *testing.T) {
+	state, code, message := workerOutcome(harness.ReasonMaxTurns, agent.ErrTrafficReadBudget)
+	if state != "exhausted" || code != "traffic_read_budget" || !strings.Contains(message, "Planner") || strings.Contains(message, "等待人工") || retryableWorkerModelError(harness.ReasonMaxTurns, agent.ErrTrafficReadBudget) {
+		t.Fatal(state, code, message)
+	}
+}

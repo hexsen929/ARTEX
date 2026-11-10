@@ -176,17 +176,17 @@ func TestRuntimeContractToolLoopStopsUniqueSuccessfulPages(t *testing.T) {
 			if filtered {
 				want = trafficCallLimit
 			}
-			if !errors.Is(err, ErrToolLoopGuard) || reason != harness.ReasonHookStopped || toolCalls != want || modelCalls > want+1 || t.Context().Err() != nil {
+			if !errors.Is(err, ErrTrafficReadBudget) || reason != harness.ReasonMaxTurns || toolCalls != want || modelCalls > want+4 || t.Context().Err() != nil {
 				t.Fatalf("loop not bounded: calls=%d models=%d reason=%s err=%v", toolCalls, modelCalls, reason, err)
 			}
 			found := false
 			for _, e := range events {
-				if e.Kind == "result" && e.IsError && strings.Contains(e.Detail, "tool_loop_guard") {
+				if e.Kind == "result" && !e.IsError && strings.Contains(e.Detail, "自动交接") {
 					found = true
 				}
 			}
 			if !found {
-				t.Fatal("guard stop did not leave an explicit failed/unfinished result")
+				t.Fatal("read budget did not leave an automatic unfinished handoff")
 			}
 		})
 	}
@@ -268,7 +268,7 @@ func TestRuntimeContractAllChatEntrypointsEnforceReadBudget(t *testing.T) {
 				main.SetNonStreaming(func() bool { return true })
 				_, err = main.Chat(t.Context(), task.ID, 0, nil, d.Exploration(task.ExplorationID), "fixture", "read index", nil, nil, nil, nil, nil)
 			}
-			if !errors.Is(err, ErrToolLoopGuard) || executed != broadTrafficCallLimit || calls > broadTrafficCallLimit+1 || t.Context().Err() != nil {
+			if err != nil || executed != broadTrafficCallLimit || calls > broadTrafficCallLimit+4 || t.Context().Err() != nil {
 				t.Fatalf("chat escaped read budget: executed=%d calls=%d err=%v", executed, calls, err)
 			}
 		})
@@ -291,7 +291,7 @@ func TestRuntimeContractParallelAdmissionAndParentCancellation(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if admitted.Load() != broadTrafficCallLimit || !errors.Is(toolLoopCause(ctx), ErrToolLoopGuard) || t.Context().Err() != nil {
+	if admitted.Load() != broadTrafficCallLimit || !readBudgetReached(ctx) || ctx.Err() != nil || t.Context().Err() != nil {
 		t.Fatal("parallel budget race", admitted.Load(), context.Cause(ctx))
 	}
 	parent, cancel := context.WithCancelCause(t.Context())
