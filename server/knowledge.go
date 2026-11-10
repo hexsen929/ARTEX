@@ -89,7 +89,15 @@ func (s *Server) putKnowledgeConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, c)
 }
 func (s *Server) listKnowledge(w http.ResponseWriter, r *http.Request) {
-	task, err := memoryQueryID(r, "task_id")
+	var task int64
+	var err error
+	// Zero is the explicit global-library scope, unlike a memory origin ID.
+	if raw := r.URL.Query().Get("task_id"); raw != "" && raw != "0" {
+		task, err = strconv.ParseInt(raw, 10, 64)
+		if task <= 0 {
+			err = knowledge.ErrInput
+		}
+	}
 	if err != nil {
 		knowledgeError(w, knowledge.ErrInput)
 		return

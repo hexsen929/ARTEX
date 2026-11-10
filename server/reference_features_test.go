@@ -13,6 +13,12 @@ import (
 
 func TestReferenceFeaturesHTTPDocumentsReproductionAndWord(t *testing.T) {
 	s, finding, request := trafficEvidenceServer(t)
+	for _, path := range []string{"/api/knowledge", "/api/knowledge?task_id=0"} {
+		w := request("GET", path, "")
+		if w.Code != 200 {
+			t.Fatalf("global listing %s: %d %s", path, w.Code, w.Body)
+		}
+	}
 	docBody := fmt.Sprintf(`{"title":"HTTP reference fixture","content":"REFERENCE_HTTP_CANARY","task_id":%d}`, findingTaskID(t, s, finding.FindingID))
 	w := request("POST", "/api/knowledge", docBody)
 	if w.Code != 200 {
@@ -23,6 +29,10 @@ func TestReferenceFeaturesHTTPDocumentsReproductionAndWord(t *testing.T) {
 		t.Fatal(w.Body)
 	}
 	t.Cleanup(func() { s.m.pg.Exec(`DELETE FROM knowledge_docs WHERE id=$1`, doc.ID) })
+	w = request("GET", "/api/knowledge?task_id=0", "")
+	if w.Code != 200 || bytes.Contains(w.Body.Bytes(), []byte(`HTTP reference fixture`)) {
+		t.Fatal("global list included task-owned document", w.Code, w.Body)
+	}
 	w = request("POST", "/api/knowledge/search", fmt.Sprintf(`{"query":"REFERENCE_HTTP_CANARY","task_id":%d}`, doc.TaskID))
 	if w.Code != 200 || !bytes.Contains(w.Body.Bytes(), []byte("REFERENCE_HTTP_CANARY")) {
 		t.Fatal(w.Code, w.Body)
