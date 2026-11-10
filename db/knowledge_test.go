@@ -14,7 +14,7 @@ func TestKnowledgeScopeVersionsAndRetrieval(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { _ = d.Close() })
 	a, err := d.CreateTask("kb A", "fixture", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestKnowledgeVectorPublicationRejectsStaleDocumentsAndSettings(t *testing.T
 	if err != nil {
 		t.Skip(err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { _ = d.Close() })
 	old, err := d.KnowledgeConfig(t.Context())
 	if err != nil {
 		t.Fatal(err)

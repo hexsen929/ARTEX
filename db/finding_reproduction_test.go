@@ -11,7 +11,7 @@ func TestReproductionAtomicRecordingAndVersionedEditing(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { _ = d.Close() })
 	task, err := d.CreateTask("repro fixture", "fixture", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)

@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	// v6 additionally preserves independent retest conversations and their FK
-	// history. Older binaries must reject it rather than silently drop rows.
+	// v7 additionally preserves task reference documents and structured reproduction.
+	// Older binaries must reject it rather than silently drop these records.
 	TaskArchiveFormatVersion       = 7
 	TaskArchiveLegacyFormatVersion = 1
 	TaskArchiveLLMRecordsPath      = "database/llm_records.ndjson"

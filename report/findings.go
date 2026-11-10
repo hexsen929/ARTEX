@@ -92,6 +92,7 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 			b.WriteString(rep)
 			b.WriteString("\n\n")
 		}
+		b.WriteString(reproductionMarkdown(f.Reproduction))
 		b.WriteString(findingTrafficMarkdown(f, false))
 		b.WriteString("---\n\n")
 	}
@@ -124,6 +125,7 @@ func SingleFindingMarkdown(f *db.DBFinding, generatedAt time.Time) string {
 		b.WriteString(rep)
 		b.WriteString("\n")
 	}
+	b.WriteString(reproductionMarkdown(f.Reproduction))
 	b.WriteString(findingTrafficMarkdown(f, true))
 	return b.String()
 }

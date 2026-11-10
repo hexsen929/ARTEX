@@ -120,7 +120,7 @@ func (s *Server) exportReportDOCX(w http.ResponseWriter, r *http.Request) {
 	}
 	items := []report.DocxFinding{}
 	seen := map[int64]bool{}
-	textBytes, imageBytes, imageCount := 0, 0
+	textBytes, imageBytes, imageCount := 0, 0, 0
 	for _, ref := range in.Findings {
 		if ref.ID <= 0 || seen[ref.ID] {
 			writeErr(w, 400, "漏洞 ID 无效或重复")

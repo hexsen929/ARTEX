@@ -14,7 +14,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
       sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
     fi \
     && apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates ripgrep curl wget vim git jq unzip \
+      ca-certificates ripgrep curl wget vim git jq unzip poppler-utils \
       tzdata \
       dnsutils iputils-ping netcat-openbsd inetutils-telnet whois nmap \
     && rm -rf /var/lib/apt/lists/*
