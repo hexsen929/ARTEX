@@ -9,7 +9,7 @@ func TestReadBudgetLegacyStopReclassifiedWithoutExecuting(t *testing.T) {
 	d := memoryFixtureDB(t)
 	task := memoryFixtureTask(t, d)
 	s := d.Exploration(task.ExplorationID)
-	for _, scenario := range []string{"read", "contract", "authentication", "incomplete", "old_result"} {
+	for _, scenario := range []string{"read", "pending_read", "pending_write", "contract", "authentication", "incomplete", "old_result", "foreign_token", "missing_token_second_run"} {
 		t.Run(scenario, func(t *testing.T) {
 			id, err := s.AddIntent(map[string]any{"summary": "fixture"}, 5, nil, "fixture")
 			if err != nil {
@@ -22,11 +22,25 @@ func TestReadBudgetLegacyStopReclassifiedWithoutExecuting(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if scenario == "pending_read" || scenario == "pending_write" {
+				tool := "traffic_search"
+				if scenario == "pending_write" {
+					tool = "Bash"
+				}
+				meta, _ := json.Marshal(map[string]string{"worker_run_token": token})
+				if _, err := s.AppendActivity(Activity{NodeID: &id, Kind: "tool_use", Tool: tool, ToolUseID: "pending-fixture", Metadata: meta}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			result := LegacyTrafficReadBudgetMessage
 			if scenario == "contract" {
 				result = "tool_loop_guard: repeated missing fields"
 			}
-			if _, err := s.AppendActivity(Activity{NodeID: &id, Kind: "result", IsError: true, Summary: result, Detail: result}); err != nil {
+			var resultMetadata json.RawMessage
+			if scenario == "foreign_token" {
+				resultMetadata = json.RawMessage(`{"worker_run_token":"different-generation"}`)
+			}
+			if _, err := s.AppendActivity(Activity{NodeID: &id, Kind: "result", IsError: true, Summary: result, Detail: result, Metadata: resultMetadata}); err != nil {
 				t.Fatal(err)
 			}
 			code := "tool_loop_guard"
@@ -41,13 +55,18 @@ func TestReadBudgetLegacyStopReclassifiedWithoutExecuting(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if scenario == "missing_token_second_run" {
+				if _, err := d.Exec(`UPDATE exploration_nodes SET payload=jsonb_set(payload,'{execution_attempt}','2'::jsonb) WHERE id=$1`, id); err != nil {
+					t.Fatal(err)
+				}
+			}
 			before, _ := s.GetNode(id)
 			n, err := s.ReclassifyLegacyReadBudgetStops(t.Context())
 			if err != nil {
 				t.Fatal(err)
 			}
 			after, _ := s.GetNode(id)
-			if scenario != "read" {
+			if scenario != "read" && scenario != "pending_read" {
 				if n != 0 || after.State != before.State || string(after.Payload) != string(before.Payload) {
 					t.Fatal("non-read or incomplete work was rewritten", n)
 				}
