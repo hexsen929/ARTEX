@@ -214,6 +214,9 @@ func TestRuntimeContractSDKValidationFailureStopsBeforeHandler(t *testing.T) {
 		executed++
 		return actool.Text("must not run"), nil
 	}})
+	if err := actool.ValidateInput(probe.InputSchema(), json.RawMessage(`{"finding_id":7,"note":"missing version"}`)); err == nil {
+		t.Fatal("fixture did not activate SDK schema validation")
+	}
 	provider := memoryFixtureProvider{complete: func(context.Context, llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 		calls++
 		if calls > 10 {
