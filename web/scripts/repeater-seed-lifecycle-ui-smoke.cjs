@@ -43,7 +43,7 @@ async function serveAPI(request, response, url) {
   if (endpoint === "/api/llm/profiles") return json(response, { profiles: [] });
   if (endpoint === "/api/stats") return json(response, { active_task: null, tasks: 2, traffic: 0, llm_configured: false, engine_mode: "idle" });
   if (endpoint === "/api/report") { response.writeHead(200, { "Content-Type": "text/markdown" }); return response.end("# SYNTHETIC_REPORT_VIEW"); }
-  if (endpoint === "/api/traffic") { const current = url.searchParams.get("task_id") === "202" ? [flows[2]] : flows; return json(response, { enabled: false, count: current.length, total: current.length, page: 0, size: 50, exchanges: current, proxy: "" }); }
+  if (endpoint === "/api/traffic") { const scoped = url.searchParams.get("task_id") === "202" ? [flows[2]] : flows; const query = url.searchParams.get("q"); const current = query ? scoped.filter((flow) => flow.id.includes(query)) : scoped; return json(response, { enabled: false, count: current.length, total: current.length, page: 0, size: 50, exchanges: current, proxy: "" }); }
   if (endpoint === "/api/traffic/hosts") return json(response, { hosts: flows.map((flow) => ({ host: flow.host, count: 1 })) });
   if (endpoint === "/api/traffic/exchange") { const id = url.searchParams.get("id"); assert.ok(flows.some((item) => item.id === id)); return delayedJSON(`traffic:${id}`, response, packet(id)); }
   const record = endpoint.match(/^\/api\/exploration\/findings\/(501|503)$/);
@@ -70,6 +70,14 @@ async function main() {
   await context.addInitScript(({ token, storageKey, baseline }) => {
     localStorage.setItem("artex_token", token); localStorage.setItem(storageKey, JSON.stringify(baseline)); document.cookie = "artex_session=1; path=/; SameSite=Lax"; document.cookie = "sidebar_state=false; path=/; SameSite=Lax";
     window.__fixtureDocument = Math.random(); window.__seedSignalAborts = [];
+    // Exercise the HTTP clipboard fallback without touching the system clipboard.
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    window.__copiedTrafficID = null;
+    document.execCommand = (command) => {
+      if (command !== "copy") return false;
+      window.__copiedTrafficID = document.activeElement?.value;
+      return true;
+    };
     // Simulate a transport that completes despite cancellation: generation
     // guards, not cancellation alone, must prevent stale global side effects.
     const original = window.fetch.bind(window);
@@ -90,6 +98,18 @@ async function main() {
   console.log("PASS finding change ignores delayed evidence without losing the current import or sending a request");
 
   delayed.add("traffic:601"); await page.goto(origin + "/function/tasks/detail?id=101&tab=traffic", { waitUntil: "networkidle" }); await page.getByRole("checkbox", { name: "选择本页流量", exact: true }).waitFor();
+  const readsBeforeCopy = requests.filter((item) => item.endpoint === "/api/traffic/exchange").length;
+  await page.getByRole("button", { name: "复制流量 ID 601", exact: true }).click();
+  await eventually(async () => await page.evaluate(() => window.__copiedTrafficID) === "601", "HTTP clipboard fallback lost the full traffic ID");
+  assert.equal(requests.filter((item) => item.endpoint === "/api/traffic/exchange").length, readsBeforeCopy, "Copying an ID unexpectedly opened the packet");
+  const trafficSearch = page.getByPlaceholder("搜索全部（ID / URL / 方法 / 类型 / 状态码…）", { exact: true });
+  await trafficSearch.fill("603");
+  await eventually(() => requests.some((item) => item.endpoint === "/api/traffic" && item.query.q === "603" && item.query.task_id === "101"), "Traffic ID search lost task scope");
+  await page.getByRole("button", { name: "复制流量 ID 601", exact: true }).waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: "复制流量 ID 603", exact: true }).waitFor();
+  await trafficSearch.fill("");
+  await page.getByRole("button", { name: "复制流量 ID 601", exact: true }).waitFor();
+  console.log("PASS full traffic IDs copy through the HTTP fallback and search retains task scope");
   await page.evaluate(() => { window.__ignoreSeedAbort = true; }); const taskDocument = await page.evaluate(() => window.__fixtureDocument);
   await page.getByRole("checkbox", { name: "选择本页流量", exact: true }).check(); await page.getByRole("button", { name: "送入请求重发", exact: true }).click(); await eventually(() => held.has("traffic:601"), "Task import did not reach delay barrier");
   await page.evaluate(() => history.pushState(null, "", "/function/tasks/detail?id=202&tab=traffic")); await page.getByText("已选 0 条流量", { exact: true }).waitFor(); await page.getByText(flows[2].url, { exact: true }).waitFor();

@@ -9,6 +9,7 @@ import {
   ArrowUpNarrowWideIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  CopyIcon,
   EraserIcon,
   FilterXIcon,
   ListChecksIcon,
@@ -47,7 +48,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { api } from "@/lib/api";
 import { useStoredSortPreference } from "@/lib/sort-preference";
 import type { TrafficDetail, TrafficExchange, TrafficHost, TrafficResp } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, copyText } from "@/lib/utils";
 
 function fmtTime(ts: string) {
   return new Date(ts).toLocaleString("zh-CN", {
@@ -79,6 +80,29 @@ function statusTone(status: number) {
 
 function MethodBadge({ method }: { method: string }) {
   return <Badge className="shrink-0 font-mono">{method}</Badge>;
+}
+
+function TrafficID({ id }: { id: string }) {
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="h-7 gap-1 px-1 font-mono text-xs"
+      title="复制流量 ID，可用于搜索或交给报告 Agent"
+      aria-label={`复制流量 ID ${id}`}
+      onClick={async (event) => {
+        event.stopPropagation();
+        if (await copyText(id)) {
+          toast.success("已复制流量 ID");
+        } else {
+          toast.error("复制失败，请手动选择流量 ID");
+        }
+      }}
+    >
+      {id}
+      <CopyIcon className="size-3 shrink-0" />
+    </Button>
+  );
 }
 
 // Older captures may predate Host persistence because net/http keeps Host
@@ -280,7 +304,22 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
       alive = false;
       clearInterval(t);
     };
-  }, [page, size, hostQ, method, queryQ, bodyQ, pathQ, statusFilter, respMinQ, respMaxQ, sort, reloadTick, taskId, taskScoped]);
+  }, [
+    page,
+    size,
+    hostQ,
+    method,
+    queryQ,
+    bodyQ,
+    pathQ,
+    statusFilter,
+    respMinQ,
+    respMaxQ,
+    sort,
+    reloadTick,
+    taskId,
+    taskScoped,
+  ]);
 
   // Delete traffic for the current host filter (substring) or the checked
   // hosts (exact batch), then refetch.
@@ -581,7 +620,7 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
         <div className="relative max-w-sm flex-1">
           <SearchIcon className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder="搜索全部（URL / 方法 / 类型 / 状态码…）"
+            placeholder="搜索全部（ID / URL / 方法 / 类型 / 状态码…）"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             className="h-8 pl-8"
@@ -743,6 +782,7 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
                       }
                     />
                   </TableHead>
+                  <TableHead className="w-44">流量 ID</TableHead>
                   <SortableHead
                     field="ts"
                     label="时间"
@@ -796,6 +836,9 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
                         }
                       />
                     </TableCell>
+                    <TableCell>
+                      <TrafficID id={e.id} />
+                    </TableCell>
                     <TableCell className="text-xs text-muted-foreground tabular-nums">{fmtTime(e.ts)}</TableCell>
                     <TableCell className="font-mono text-xs">{e.host}</TableCell>
                     <TableCell>
@@ -815,7 +858,7 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
                 ))}
                 {exchanges.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={8} className="py-12 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={9} className="py-12 text-center text-sm text-muted-foreground">
                       {traffic === null ? "加载中…" : "没有匹配的流量。"}
                     </TableCell>
                   </TableRow>
@@ -847,6 +890,10 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
                 </div>
                 <SheetTitle className="break-all font-mono">{selected.host}</SheetTitle>
                 <SheetDescription className="break-all font-mono">{selected.url}</SheetDescription>
+                <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                  流量 ID：
+                  <TrafficID id={selected.id} />
+                </div>
                 <Button
                   variant="outline"
                   size="sm"

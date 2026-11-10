@@ -183,3 +183,45 @@ test("demo report generation never pretends that a model job was queued", async 
   await assert.rejects(mockHandle("POST", "/exploration/findings/2/generate-report", "{}"), /演示模式不执行 Reporter/);
   await assert.rejects(mockHandle("POST", "/exploration/findings/missing/generate-report", "{}"), /finding not found/);
 });
+
+test("finding statistics follow combined filters and retain global choices", async () => {
+  const route = { path: "/exploration/findings/stats" };
+  const all = await read(route);
+  const filtered = await read(route, {
+    task_id: "10",
+    severity: "high",
+    status: "pending",
+    vulnclass: "Demo",
+    q: "needle",
+    from: "2026-01-04T00:00:00Z",
+    to: "2026-01-04T23:59:59Z",
+    page: "2",
+    limit: "1",
+  });
+  assert.equal(filtered.total, 1);
+  assert.equal(filtered.distinct.total, 1);
+  assert.equal(filtered.high, 1);
+  assert.equal(filtered.critical, 0);
+  assert.deepEqual(filtered.tasks, all.tasks);
+  assert.deepEqual(filtered.vulnclasses, all.vulnclasses);
+  const empty = await read(route, { q: "no matching fixture" });
+  assert.equal(empty.total, 0);
+  assert.equal(empty.distinct.total, 0);
+  assert.equal(empty.high + empty.medium + empty.low + empty.critical, 0);
+  assert.deepEqual(empty.tasks, all.tasks);
+});
+
+test("finding statistics include verification and zero every counter on no match", async () => {
+  const route = { path: "/exploration/findings/stats" };
+  const all = await read(route);
+  const query = { task_id: "2", verification: "unverified", from: "2026-01-04T00:00:00Z" };
+  const result = await read(route, query);
+  assert.equal(result.total, 1);
+  assert.equal(result.distinct.total, 1);
+  assert.equal(result.unverified, 1);
+  assert.equal(result.verified + result.verification_blocked + result.rejected + result.legacy, 0);
+  assert.deepEqual(result.tasks, all.tasks);
+  assert.deepEqual(result.vulnclasses, all.vulnclasses);
+  const empty = await read(route, { ...query, verification: "confirmed" });
+  assert.equal(empty.total + empty.verified + empty.unverified + empty.verification_blocked + empty.rejected + empty.legacy, 0);
+});

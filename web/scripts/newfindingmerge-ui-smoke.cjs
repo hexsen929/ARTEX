@@ -79,11 +79,17 @@ async function serveAPI(request, response, url) {
   if (endpoint === "/api/agents") return json(response, 200, { agents: [] });
   if (endpoint === "/api/skills/missing") return json(response, 200, { missing: [] });
   if (endpoint === "/api/exploration/findings/retests/active") return json(response, 200, { retests: [] });
-  if (endpoint === "/api/exploration/findings/stats") return json(response, 200, {
-    total: 2, pending: 2, critical: 0, high: 2, medium: 0, low: 0, verified: 1, unverified: 1,
-    verification_blocked: 0, rejected: 0, legacy: 0, vulnclasses: ["Synthetic"],
-    tasks: [{ id: "101", name: taskName, description: taskName, count: 2 }],
-  });
+  if (endpoint === "/api/exploration/findings/stats") {
+    const matches = selected(url);
+    return json(response, 200, {
+      total: matches.length, pending: matches.length, critical: 0, high: matches.length, medium: 0, low: 0,
+      verified: matches.filter((f) => f.verification_status === "confirmed").length,
+      unverified: matches.filter((f) => f.verification_status === "unverified").length,
+      distinct: { total: matches.length, reports: matches.length },
+      verification_blocked: 0, rejected: 0, legacy: 0, vulnclasses: ["Synthetic"],
+      tasks: [{ id: "101", name: taskName, description: taskName, count: 2 }],
+    });
+  }
   if (endpoint === "/api/exploration/finding-case-suggestions" || endpoint === "/api/exploration/finding-case-review") return json(response, 200, []);
   if (endpoint === "/api/exploration/finding-cases") {
     return json(response, 200, pageValue(url, selected(url).map((finding) => ({ finding, matched_ids: [Number(finding.id)] })), {
@@ -206,6 +212,11 @@ async function main() {
   await eventually(() => Boolean(last("/api/exploration/finding-cases")?.query.from), "Flat view did not submit the selected date");
   const from = last("/api/exploration/finding-cases").query.from;
   assertFilters("/api/exploration/finding-cases", from);
+  await eventually(() => last("/api/exploration/findings/stats")?.query.from === from, "Statistics omitted shared date filter");
+  assertFilters("/api/exploration/findings/stats", from);
+  assert.equal(last("/api/exploration/findings/stats").query.page, undefined);
+  assert.equal(last("/api/exploration/findings/stats").query.limit, undefined);
+  await page.getByRole("region", { name: "当前筛选验证状态统计" }).getByText("当前筛选，不受分页影响", { exact: true }).waitFor();
   console.log("PASS flat date + verification + task filters survive merge");
   await page.getByRole("tab", { name: "按任务分组", exact: true }).click();
   await eventually(() => last("/api/exploration/findings/groups")?.query.from === from, "Groups omitted shared date filter");
