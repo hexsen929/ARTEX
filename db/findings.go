@@ -15,6 +15,7 @@ import (
 // DBFinding is a row in the standalone findings table. It persists across task
 // deletion unless the caller explicitly requests related finding cleanup.
 type DBFinding struct {
+	Reproduction    *Reproduction
 	ExportCaseID    int64 // transient unified-export identity, never a finding handle
 	ExportMemberIDs []int64
 
@@ -502,7 +503,7 @@ RETURNING id, created_at`, s.expID, audit.NodeID, utf8Clean(audit.Worker), utf8C
 // 再按时间倒序,与「导出汇总报告」的分组顺序一致。
 func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, error) {
 	const order = `ORDER BY CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, f.created_at DESC`
-	cols := findingSelectCols + `, COALESCE(f.report, '')`
+	cols := findingSelectCols + `, COALESCE(f.report, ''), f.reproduction`
 
 	var q string
 	var args []any
@@ -540,12 +541,18 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 	for rows.Next() {
 		f := &DBFinding{}
 		var aidsJSON string
+		var reproduction []byte
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.VerificationStatus, &f.VerificationNote, &f.Report); err != nil {
+			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.VerificationStatus, &f.VerificationNote, &f.Report, &reproduction); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+		if len(reproduction) > 0 {
+			if err := json.Unmarshal(reproduction, &f.Reproduction); err != nil {
+				return nil, err
+			}
+		}
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -719,13 +726,14 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 	f := &DBFinding{}
 	var aidsJSON string
 	var reportConv sql.NullInt64
-	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, ''), f.report_conversation_id
+	var reproduction []byte
+	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, ''), f.report_conversation_id, f.reproduction
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
 		WHERE f.id = $1`, id).Scan(
 		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.VerificationStatus, &f.VerificationNote, &f.Report, &reportConv)
+		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.VerificationStatus, &f.VerificationNote, &f.Report, &reportConv, &reproduction)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -735,6 +743,11 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 	_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
 	if reportConv.Valid {
 		f.ReportConversationID = &reportConv.Int64
+	}
+	if len(reproduction) > 0 {
+		if err := json.Unmarshal(reproduction, &f.Reproduction); err != nil {
+			return nil, err
+		}
 	}
 	return f, nil
 }

@@ -536,7 +536,10 @@ export interface FindingAsset {
   label: string;
 }
 
+export interface StructuredReproduction { entry_point: string; prerequisites: string[]; provenance: string; steps: { title: string; request: string; response: string; expected: string; proves: string; traffic_ids: string[] }[]; }
+
 export interface Finding {
+  reproduction?: StructuredReproduction;
   verification_status?: FindingVerification;
   verification_note?: string;
   case_id?: string;

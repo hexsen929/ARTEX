@@ -90,6 +90,9 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 			return err
 		}
 	}
+	if _, err := tx.Exec(`DELETE FROM knowledge_docs WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM findings WHERE task_id=$1`, taskID); err != nil {
 		return err
 	}
@@ -294,6 +297,9 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
 	}
+	if err := restoreKnowledgeArchive(tx, snapshot); err != nil {
+		return nil, err
+	}
 	retestWarnings, err := restoreRetestArchiveRows(tx, taskID, expID, remappedTables, snapshot.FormatVersion >= 6)
 	if err != nil {
 		return nil, fmt.Errorf("restore retest history: %w", err)
@@ -436,6 +442,7 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		}
 	}
 	allowed := map[string]bool{
+		"knowledge_docs": true, "knowledge_chunks": true,
 		"credentials": true, "pending_scope": true, "task_session_bindings": true, "finding_checks": true,
 		"finding_retests": true, "conversations": true, "conversation_activities": true,
 		"finding_verification_events": true, "finding_inline_merge_events": true,

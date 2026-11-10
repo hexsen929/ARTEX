@@ -2482,3 +2482,44 @@ END; $$;
 DROP TRIGGER IF EXISTS trg_memory_stage_fact_inserted ON exploration_nodes;
 CREATE TRIGGER trg_memory_stage_fact_inserted AFTER INSERT ON exploration_nodes
   FOR EACH ROW EXECUTE PROCEDURE memory_stage_fact_inserted();
+
+-- Reference documents (separate from learned experiences). Uploads are not retained.
+CREATE TABLE IF NOT EXISTS knowledge_config (
+ singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
+ enabled boolean NOT NULL DEFAULT false,
+ base_url text NOT NULL DEFAULT '', model text NOT NULL DEFAULT '',
+ dimension integer NOT NULL DEFAULT 1024 CHECK(dimension BETWEEN 1 AND 2048),
+ api_key text NOT NULL DEFAULT '', epoch bigint NOT NULL DEFAULT 1
+);
+INSERT INTO knowledge_config(singleton) VALUES(true) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS knowledge_docs (
+ id bigserial PRIMARY KEY, task_id bigint REFERENCES tasks(id) ON DELETE CASCADE,
+ title text NOT NULL, category text NOT NULL DEFAULT '', content text NOT NULL,
+ file_name text NOT NULL DEFAULT '', version bigint NOT NULL DEFAULT 1,
+ chunks integer NOT NULL, indexed_epoch bigint NOT NULL DEFAULT 0,
+ retrievals bigint NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK(octet_length(content)<=262144), CHECK(chunks BETWEEN 1 AND 128)
+);
+CREATE INDEX IF NOT EXISTS knowledge_docs_task ON knowledge_docs(task_id);
+CREATE TABLE IF NOT EXISTS knowledge_chunks (
+ doc_id bigint REFERENCES knowledge_docs(id) ON DELETE CASCADE,
+ chunk_index integer NOT NULL, content text NOT NULL,
+ PRIMARY KEY(doc_id,chunk_index)
+);
+-- The operator installs pgvector explicitly; keyword retrieval works without it.
+DO $knowledge$ BEGIN
+ IF EXISTS(SELECT 1 FROM pg_extension WHERE extname='vector') THEN
+  EXECUTE 'CREATE TABLE IF NOT EXISTS knowledge_vectors (
+   doc_id bigint NOT NULL, chunk_index integer NOT NULL, epoch bigint NOT NULL,
+   embedding vector NOT NULL,
+   PRIMARY KEY(doc_id,chunk_index),
+   FOREIGN KEY(doc_id,chunk_index) REFERENCES knowledge_chunks(doc_id,chunk_index) ON DELETE CASCADE)';
+ END IF;
+END $knowledge$;
+
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS reproduction jsonb;
+
+CREATE TABLE IF NOT EXISTS report_templates (
+ id bigserial PRIMARY KEY, version bigint NOT NULL DEFAULT 1, body jsonb NOT NULL,
+ CHECK(octet_length(body::text)<=400000)
+);

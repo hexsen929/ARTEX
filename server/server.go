@@ -358,6 +358,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
 	}
 	s.wireMemoryRecall()
+	s.wireKnowledge()
 	s.restoreTaskRuntimes()
 	s.ensureProxySupervisor()
 	s.proxyPoolWG.Add(1)
@@ -975,6 +976,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/logs/history", s.getLogsHistory)
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
 	s.registerMemoryRoutes(mux)
+	s.registerKnowledgeRoutes(mux)
+	s.registerReportTemplateRoutes(mux)
 
 	// 页面一键更新。走的是默认的 JWT 鉴权（auth.go 只放行 /api/auth/* 和
 	// /api/health），所以这几个改动程序自身的接口天然需要登录。
@@ -1115,6 +1118,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/findings/{id}/lineage", s.findingLineage)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/deepen", s.deepenFinding)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/generate-report", s.generateFindingReport)
+	mux.HandleFunc("PUT /api/exploration/findings/{id}/reproduction", s.saveFindingReproduction)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/report-conversation", s.findingReportConversation)
 	mux.HandleFunc("GET /api/exploration/findings/{id}/retests", s.listFindingRetests)
 	mux.HandleFunc("GET /api/exploration/findings/retests/active", s.listActiveFindingRetests)
