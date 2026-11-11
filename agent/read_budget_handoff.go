@@ -77,7 +77,7 @@ func (g *toolLoopGuard) wrapModelCalls(opts *agentcore.Options) {
 	opts.Deps.CallModel = func(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
 		return func(yield func(llm.StreamEvent, error) bool) {
 			if !g.wrappingUp() {
-				for event, err := range stream(ctx, req) {
+				for event, err := range committedToolStream(ctx, stream(ctx, req)) {
 					if !yield(event, err) {
 						return
 					}
