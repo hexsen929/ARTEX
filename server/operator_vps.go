@@ -242,6 +242,9 @@ func (w *boundedOperatorOutput) Write(p []byte) (int, error) {
 	return n, nil
 }
 func (s *Server) runOperatorVPS(ctx context.Context, id int64, command string) (map[string]any, error) {
+	return s.runOperatorVPSTimeout(ctx, id, command, 120*time.Second)
+}
+func (s *Server) runOperatorVPSTimeout(ctx context.Context, id int64, command string, timeout time.Duration) (map[string]any, error) {
 	v, err := scanOperatorVPS(s.m.pg.QueryRowContext(ctx, "SELECT "+vpsColumns+" FROM vps_hosts WHERE id=$1", id))
 	if err != nil {
 		return nil, err
@@ -281,14 +284,14 @@ func (s *Server) runOperatorVPS(ctx context.Context, id int64, command string) (
 		}
 		return nil
 	}}
-	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	conn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(v.Host, strconv.Itoa(v.Port)))
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(120 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(timeout))
 	go func() { <-ctx.Done(); conn.Close() }()
 	cc, ch, rq, err := ssh.NewClientConn(conn, net.JoinHostPort(v.Host, strconv.Itoa(v.Port)), cfg)
 	if err != nil {
@@ -356,18 +359,50 @@ func (s *Server) operatorVPSExec(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 func (s *Server) operatorVPSTool() actool.CoreTool {
-	return actool.Build(actool.Spec{Name: "vps_exec", Description: "在操作员预先登记并启用的 SSH VPS 上执行命令；使用已固定的主机密钥和加密保存的凭据。仅接受已登记 ID，不能临时指定任意主机。", Schema: map[string]any{"type": "object", "properties": map[string]any{"vps_id": map[string]any{"type": "integer"}, "command": strParam("命令")}, "required": []string{"vps_id", "command"}}, Permissions: sessionPerm, ReadOnly: func(json.RawMessage) bool { return false }, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+	return actool.Build(actool.Spec{Name: "vps_exec", Description: "在操作员预先登记并启用的 SSH VPS 上执行命令；使用已固定的主机密钥和加密保存的凭据。仅接受已登记 ID，不能临时指定任意主机。", Schema: operatorSchema("vps_exec", map[string]any{}), Permissions: sessionPerm, ReadOnly: func(json.RawMessage) bool { return false }, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
 		if agent.RunInfoFrom(ctx).TaskID <= 0 {
 			return actool.Errorf("task context required"), nil
 		}
 		var v struct {
-			ID      int64  `json:"vps_id"`
-			Command string `json:"command"`
+			ID        int64  `json:"vps_id"`
+			Command   string `json:"command"`
+			VPS       string `json:"vps"`
+			TimeoutMS int    `json:"timeout_ms"`
 		}
 		if err := json.Unmarshal(b, &v); err != nil {
 			return actool.Errorf("invalid input"), nil
 		}
-		out, err := s.runOperatorVPS(ctx, v.ID, v.Command)
+		if v.ID == 0 {
+			rows, err := s.m.pg.QueryContext(ctx, "SELECT id FROM vps_hosts WHERE enabled AND kind='ssh' AND ($1='' OR id::text=$1 OR label=$1) ORDER BY id LIMIT 2", v.VPS)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			ids := []int64{}
+			for rows.Next() {
+				var id int64
+				if rows.Scan(&id) == nil {
+					ids = append(ids, id)
+				}
+			}
+			rows.Close()
+			if len(ids) != 1 {
+				return actool.Errorf("choose exactly one registered VPS by id or name"), nil
+			}
+			v.ID = ids[0]
+		}
+		if v.Command == "" || len(v.Command) > 32<<10 {
+			return actool.Errorf("command required, at most 32 KiB"), nil
+		}
+		timeout := v.TimeoutMS
+		if timeout <= 0 {
+			timeout = 60000
+		}
+		if timeout > 600000 {
+			timeout = 600000
+		}
+		ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
+		defer cancel()
+		out, err := s.runOperatorVPSTimeout(ctx, v.ID, v.Command, time.Duration(timeout)*time.Millisecond)
 		if err != nil && out == nil {
 			return actool.Errorf(err.Error()), nil
 		}

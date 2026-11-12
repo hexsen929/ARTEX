@@ -15,6 +15,8 @@ const MaxContent = 256 << 10
 var Categories = []string{"rce", "deserialization", "file-upload", "sqli", "unauthorized", "auth-bypass", "weak-password", "ssrf", "xxe", "path-traversal", "file-read", "info-leak", "privesc", "tunnel", "methodology", "recon", "frontend-reverse", "app-audit", "env", "waf", "protocol"}
 
 type Entry struct {
+	Filename        string `json:"filename,omitempty"`
+	Manual          bool   `json:"manual,omitempty"`
 	Score           int    `json:"score,omitempty"`
 	ID              int64  `json:"id"`
 	Code            string `json:"code"`
@@ -49,11 +51,15 @@ type Entry struct {
 	SourceFindingID int64  `json:"source_finding_id,omitempty"`
 }
 type Query struct {
-	Q        string `json:"q"`
-	Category string `json:"category"`
-	Kind     string `json:"kind"`
-	Polarity string `json:"polarity"`
-	Limit    int    `json:"limit"`
+	CVE       string `json:"cve"`
+	Tag       string `json:"tag"`
+	Component string `json:"component"`
+	Verified  *bool  `json:"verified,omitempty"`
+	Q         string `json:"q"`
+	Category  string `json:"category"`
+	Kind      string `json:"kind"`
+	Polarity  string `json:"polarity"`
+	Limit     int    `json:"limit"`
 }
 type Result struct {
 	Q        string         `json:"q"`
@@ -169,7 +175,19 @@ func Rank(entries []Entry, q Query) Result {
 	var rs []ranked
 	terms := Terms(q.Q)
 	for _, e := range entries {
-		if q.Category != "" && q.Category != e.Category || q.Kind != "" && q.Kind != e.Kind || q.Polarity != "" && q.Polarity != e.Polarity {
+		if q.Verified != nil && *q.Verified && !e.Verified {
+			continue
+		}
+		if q.CVE != "" && !strings.Contains(strings.ToLower(e.CVE), strings.ToLower(q.CVE)) {
+			continue
+		}
+		if q.Tag != "" && !strings.Contains(strings.ToLower(e.Tags), strings.ToLower(q.Tag)) {
+			continue
+		}
+		if q.Component != "" && !strings.Contains(strings.ToLower(e.Component), strings.ToLower(q.Component)) {
+			continue
+		}
+		if q.Category != "" && !categoryMatches(q.Category, e.Category) || q.Kind != "" && q.Kind != e.Kind || q.Polarity != "" && q.Polarity != e.Polarity {
 			continue
 		}
 		n := e.Score
@@ -190,8 +208,8 @@ func Rank(entries []Entry, q Query) Result {
 	if n <= 0 {
 		n = 20
 	}
-	if n > 100 {
-		n = 100
+	if n > 200 {
+		n = 200
 	}
 	for _, r := range rs {
 		out.Stats[r.e.Polarity]++
@@ -236,4 +254,13 @@ func first(es []Entry, n int) []map[string]string {
 		out = append(out, map[string]string{"code": e.Code, "title": e.Title, "conditions": d, "versions": e.Versions, "polarity": e.Polarity})
 	}
 	return out
+}
+
+func categoryMatches(filter, category string) bool {
+	for _, c := range strings.Split(filter, ",") {
+		if strings.TrimSpace(c) == category {
+			return true
+		}
+	}
+	return false
 }

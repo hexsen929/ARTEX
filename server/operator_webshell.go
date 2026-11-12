@@ -367,7 +367,7 @@ func (s *Server) operatorWebshellAsset(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) operatorSessionTools() []actool.CoreTool {
 	return []actool.CoreTool{
-		actool.Build(actool.Spec{Name: "list_sessions", Description: "列出当前任务可控制的会话；不暴露连接密码。", Schema: map[string]any{"type": "object", "properties": map[string]any{}}, ReadOnly: func(json.RawMessage) bool { return true }, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+		actool.Build(actool.Spec{Name: "list_sessions", Description: "列出当前任务可控制的会话；不暴露连接密码。", Schema: operatorSchema("list_sessions", map[string]any{}), ReadOnly: func(json.RawMessage) bool { return true }, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
 			id := agent.RunInfoFrom(ctx).TaskID
 			if id <= 0 {
 				return actool.Errorf("task context required"), nil
@@ -383,14 +383,20 @@ func (s *Server) operatorSessionTools() []actool.CoreTool {
 			out, _ := json.Marshal(items)
 			return actool.Text(string(out)), nil
 		}}),
-		actool.Build(actool.Spec{Name: "session_eval", Description: "通过当前任务绑定的 PHP 会话执行原生 PHP 片段。使用已有任务会话授权，不创建任意远程连接。", Schema: map[string]any{"type": "object", "properties": map[string]any{"session_id": map[string]any{"type": "integer"}, "code": strParam("PHP 代码")}, "required": []string{"session_id", "code"}}, Permissions: sessionPerm, ReadOnly: func(json.RawMessage) bool { return false }, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+		actool.Build(actool.Spec{Name: "session_eval", Description: "通过当前任务绑定的 PHP 会话执行原生 PHP 片段。使用已有任务会话授权，不创建任意远程连接。", Schema: operatorSchema("session_eval", map[string]any{}), Permissions: sessionPerm, ReadOnly: func(json.RawMessage) bool { return false }, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
 			var v struct {
-				ID   int64  `json:"session_id"`
-				Code string `json:"code"`
+				ID      int64  `json:"session_id"`
+				Code    string `json:"code"`
+				Timeout int    `json:"timeout"`
 			}
 			if json.Unmarshal(b, &v) != nil {
 				return actool.Errorf("invalid input"), nil
 			}
+			done, err := s.beginIntranetTaskOperation(agent.RunInfoFrom(ctx).TaskID)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			defer done()
 			ss, err := s.lookupTaskSession(ctx, v.ID)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
@@ -399,7 +405,14 @@ func (s *Server) operatorSessionTools() []actool.CoreTool {
 			if !ok {
 				return actool.Errorf("PHP HTTP session required"), nil
 			}
-			out, err := sh.Eval(ctx, v.Code, 30*time.Second)
+			timeout := v.Timeout
+			if timeout <= 0 {
+				timeout = 15
+			}
+			if timeout > 300 {
+				timeout = 300
+			}
+			out, err := sh.Eval(ctx, v.Code, time.Duration(timeout)*time.Second)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}

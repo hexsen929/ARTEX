@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -58,6 +59,14 @@ func (d *DB) KBGet(ctx context.Context, code string, count bool, usedOn string) 
 	var id, h int64
 	var p, u string
 	if err := row.Scan(&id, &b, &p, &h, &u, &c, &m); err != nil {
+		if err == sql.ErrNoRows {
+			if n, er := strconv.ParseInt(code, 10, 64); er == nil && n > 0 {
+				var resolved string
+				if d.QueryRowContext(ctx, "SELECT code FROM kb_entries WHERE id=$1", n).Scan(&resolved) == nil && resolved != code {
+					return d.KBGet(ctx, resolved, count, usedOn)
+				}
+			}
+		}
 		return e, err
 	}
 	if err := json.Unmarshal(b, &e); err != nil {
@@ -239,7 +248,29 @@ func (d *DB) KBSearchEntries(ctx context.Context, q kb.Query) ([]kb.Entry, error
 			if f.field == "polarity" {
 				expr = "polarity"
 			}
-			where = append(where, fmt.Sprintf("%s=$%d", expr, len(args)))
+			if f.field == "category" && strings.Contains(f.value, ",") {
+				args = args[:len(args)-1]
+				ors := []string{}
+				for i, v := range strings.Split(f.value, ",") {
+					if i == 24 {
+						break
+					}
+					args = append(args, strings.TrimSpace(v))
+					ors = append(ors, fmt.Sprintf("%s=$%d", expr, len(args)))
+				}
+				where = append(where, "("+strings.Join(ors, " OR ")+")")
+			} else {
+				where = append(where, fmt.Sprintf("%s=$%d", expr, len(args)))
+			}
+		}
+	}
+	if q.Verified != nil && *q.Verified {
+		where = append(where, "body->>'verified'='true'")
+	}
+	for _, f := range []struct{ field, value string }{{"cve", q.CVE}, {"tags", q.Tag}, {"component", q.Component}} {
+		if f.value != "" {
+			args = append(args, "%"+escapeLikeOperator(strings.ToLower(f.value))+"%")
+			where = append(where, fmt.Sprintf("lower(COALESCE(body->>'%s','')) LIKE $%d ESCAPE '\\'", f.field, len(args)))
 		}
 	}
 	query := `SELECT id,code,jsonb_build_object('title',left(body->>'title',1000),'category',body->>'category','kind',body->>'kind','cve',body->>'cve','component',left(body->>'component',1000),'versions',left(body->>'versions',1000),'description',left(body->>'description',2000),'tags',left(body->>'tags',1000),'verified',COALESCE((body->>'verified')::boolean,false),'has_content',COALESCE(body->>'content','')!=''),polarity,hit_count,used_on,rank FROM (SELECT *,(` + score + `) AS rank FROM kb_entries WHERE ` + strings.Join(where, " AND ") + `) c WHERE rank>0 ORDER BY rank DESC,code LIMIT 400`

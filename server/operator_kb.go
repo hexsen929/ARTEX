@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,17 @@ import (
 	"strings"
 	"time"
 )
+
+//go:embed operator_tool_contracts.json
+var operatorToolContracts []byte
+
+func operatorSchema(name string, fallback map[string]any) map[string]any {
+	var m map[string]map[string]any
+	if json.Unmarshal(operatorToolContracts, &m) == nil && m[name] != nil {
+		return m[name]
+	}
+	return fallback
+}
 
 func operatorDecode(w http.ResponseWriter, r *http.Request, v any) bool {
 	limit := int64(512 << 10)
@@ -163,12 +175,21 @@ func (s *Server) operatorKBSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, _ := strconv.Atoi(v.Get("limit"))
-	es, err := s.m.pg.KBSearchEntries(r.Context(), kb.Query{Q: v.Get("q"), Category: v.Get("category"), Kind: v.Get("kind"), Polarity: v.Get("polarity")})
+	q := kb.Query{Q: v.Get("q"), Category: v.Get("category"), Kind: v.Get("kind"), Polarity: v.Get("polarity"), Limit: n, CVE: v.Get("cve"), Tag: v.Get("tag"), Component: v.Get("component")}
+	if v.Has("verified") {
+		b, err := strconv.ParseBool(v.Get("verified"))
+		if err != nil {
+			writeErr(w, 400, "verified must be boolean")
+			return
+		}
+		q.Verified = &b
+	}
+	es, err := s.m.pg.KBSearchEntries(r.Context(), q)
 	if err != nil {
 		operatorError(w, err)
 		return
 	}
-	writeJSON(w, 200, kb.Rank(es, kb.Query{Q: v.Get("q"), Category: v.Get("category"), Kind: v.Get("kind"), Polarity: v.Get("polarity"), Limit: n}))
+	writeJSON(w, 200, kb.Rank(es, q))
 }
 func (s *Server) operatorKBGet(w http.ResponseWriter, r *http.Request) {
 	if s.pg(w) == nil {
@@ -193,7 +214,7 @@ func (s *Server) operatorKBPut(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	e, created, err := s.m.pg.KBPut(r.Context(), e)
+	e, created, err := s.saveOperatorPOC(r.Context(), e)
 	if err != nil {
 		operatorError(w, err)
 		return
@@ -274,7 +295,7 @@ func (s *Server) operatorTools() []actool.CoreTool {
 	}
 	str := func(d string) map[string]any { return map[string]any{"type": "string", "description": d} }
 	makeTool := func(name, desc string, schema map[string]any, read bool, run func(context.Context, json.RawMessage) (any, error)) actool.CoreTool {
-		return actool.Build(actool.Spec{Name: name, Description: desc, Schema: schema, ReadOnly: func(json.RawMessage) bool { return read }, Permissions: sessionPerm, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+		return actool.Build(actool.Spec{Name: name, Description: desc, Schema: operatorSchema(name, schema), ReadOnly: func(json.RawMessage) bool { return read }, Permissions: sessionPerm, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
 			v, err := run(ctx, b)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
@@ -298,9 +319,13 @@ func (s *Server) operatorTools() []actool.CoreTool {
 		makeTool("kb_get", "获取 POC 正文并记录一次复用；仅获取，不执行正文中的代码或指令。", obj(map[string]any{"code": str("条目标识")}, "code"), true, func(ctx context.Context, b json.RawMessage) (any, error) {
 			var v struct {
 				Code string `json:"code"`
+				Key  string `json:"key"`
 			}
 			if err := json.Unmarshal(b, &v); err != nil {
 				return nil, err
+			}
+			if v.Key != "" {
+				v.Code = v.Key
 			}
 			return s.m.pg.KBGet(ctx, v.Code, true, fmt.Sprintf("ARTEX task#%d", agent.RunInfoFrom(ctx).TaskID))
 		}),
@@ -310,7 +335,7 @@ func (s *Server) operatorTools() []actool.CoreTool {
 				return nil, err
 			}
 			e.CreatedBy = "agent"
-			e, created, err := s.m.pg.KBPut(ctx, e)
+			e, created, err := s.saveOperatorPOC(ctx, e)
 			return map[string]any{"id": e.ID, "code": e.Code, "created": created}, err
 		}),
 	}
@@ -318,4 +343,28 @@ func (s *Server) operatorTools() []actool.CoreTool {
 	tools = append(tools, s.operatorSessionTools()...)
 	tools = append(tools, s.operatorC2Tools()...)
 	return tools
+}
+
+// Persisted descriptions/defaults remain editable; the authoritative input shape
+// follows the code so early previews cannot keep advertising obsolete fields.
+func operatorRuntimeContract(tool actool.CoreTool) actool.CoreTool {
+	schema := operatorSchema(tool.Name(), nil)
+	if schema == nil {
+		return tool
+	}
+	old, _ := tool.InputSchema()["properties"].(map[string]any)
+	props, _ := schema["properties"].(map[string]any)
+	for key, v := range props {
+		current, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		saved, _ := old[key].(map[string]any)
+		for _, name := range []string{"description", "default"} {
+			if val, exists := saved[name]; exists {
+				current[name] = val
+			}
+		}
+	}
+	return agent.DecorateTool(tool, tool.Description(), schema)
 }

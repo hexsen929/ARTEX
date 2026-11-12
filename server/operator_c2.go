@@ -801,7 +801,7 @@ func (s *Server) operatorC2Chat(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) operatorC2Tools() []actool.CoreTool {
 	tool := func(name, desc string, props map[string]any, required []string, read bool, fn func(context.Context, json.RawMessage) (any, error)) actool.CoreTool {
-		return actool.Build(actool.Spec{Name: name, Description: desc, Schema: map[string]any{"type": "object", "properties": props, "required": required}, Permissions: sessionPerm, ReadOnly: func(json.RawMessage) bool { return read }, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+		return actool.Build(actool.Spec{Name: name, Description: desc, Schema: operatorSchema(name, map[string]any{"type": "object", "properties": props, "required": required}), Permissions: sessionPerm, ReadOnly: func(json.RawMessage) bool { return read }, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
 			v, e := fn(ctx, b)
 			if e != nil {
 				return actool.Errorf(e.Error()), nil
@@ -837,19 +837,30 @@ func (s *Server) operatorC2Tools() []actool.CoreTool {
 		return map[string]any{"id": id, "status": status}, err
 	}), tool("c2_task_result", "读取当前任务显式绑定的 C2 会话执行结果。", map[string]any{"task_id": map[string]any{"type": "integer"}}, []string{"task_id"}, true, func(ctx context.Context, b json.RawMessage) (any, error) {
 		var v struct {
-			ID int64 `json:"task_id"`
+			ID        int64 `json:"task_id"`
+			SessionID int64 `json:"session_id"`
 		}
 		if json.Unmarshal(b, &v) != nil {
 			return nil, fmt.Errorf("invalid input")
 		}
-		var sid int64
-		if err := s.m.pg.QueryRowContext(ctx, "SELECT session_id FROM c2_tasks WHERE id=$1", v.ID).Scan(&sid); err != nil {
-			return nil, err
+		sid := v.SessionID
+		if v.ID > 0 {
+			if err := s.m.pg.QueryRowContext(ctx, "SELECT session_id FROM c2_tasks WHERE id=$1", v.ID).Scan(&sid); err != nil {
+				return nil, err
+			}
+		}
+		if sid == 0 {
+			ri := agent.RunInfoFrom(ctx)
+			var bound map[string]int64
+			if err := s.m.pg.OperatorSetting(ctx, "conversation.c2."+strings.TrimPrefix(ri.SessionID, "conv-"), &bound); err != nil {
+				return nil, err
+			}
+			sid = bound["session_id"]
 		}
 		if err := s.checkC2TaskBinding(ctx, sid); err != nil {
 			return nil, err
 		}
-		return s.operatorSQLList(ctx, `SELECT to_jsonb(x) FROM c2_tasks x WHERE id=$1`, v.ID)
+		return s.operatorSQLList(ctx, `SELECT to_jsonb(x) FROM c2_tasks x WHERE session_id=$1 AND ($2=0 OR id=$2) ORDER BY id DESC LIMIT 20`, sid, v.ID)
 	})}
 }
 func (s *Server) checkC2TaskBinding(ctx context.Context, sid int64) error {
