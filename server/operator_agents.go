@@ -7,6 +7,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"log"
 	"net/http"
+	"strconv"
 )
 
 // Role definitions are data recovered from the user-supplied runtime. Existing
@@ -106,4 +107,44 @@ func (s *Server) operatorTaskExperts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"experts": keys, "runs": items})
+}
+
+func (s *Server) operatorExpertChat(w http.ResponseWriter, r *http.Request) {
+	if s.pg(w) == nil {
+		return
+	}
+	id, err := pathID(r, "id")
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	key := r.PathValue("key")
+	var defs []struct {
+		Key string `json:"key"`
+	}
+	_ = json.Unmarshal(operatorAgentDefinitions, &defs)
+	allowed := false
+	for _, d := range defs {
+		if d.Key == key {
+			allowed = true
+		}
+	}
+	if !allowed {
+		writeErr(w, 400, "unknown expert")
+		return
+	}
+	if _, ok := s.m.Task(strconv.FormatInt(id, 10)); !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	c, err := s.m.pg.CreateConversation(key, fmt.Sprintf("Task #%d / %s", id, key), nil)
+	if err != nil {
+		operatorError(w, err)
+		return
+	}
+	if err = s.m.pg.SaveOperatorSetting(r.Context(), fmt.Sprintf("conversation.expert.%d", c.ID), map[string]int64{"task_id": id}); err != nil {
+		operatorError(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"conversation_id": c.ID, "task_id": id})
 }

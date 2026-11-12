@@ -33,7 +33,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: go test -race ./kb ./c2 ./db ./server ./session -run 'TestOperator|TestLibrary|TestReferenceBlock' -count=1 -timeout=5m
+      - run: go test -race -p=1 ./kb ./c2 ./db ./server ./session -run 'TestOperator|TestLibrary|TestReferenceBlock' -count=1 -timeout=5m
       - name: Build current UI and isolated Mac preview
         run: |
           cd web

@@ -27,8 +27,11 @@ func (s *Server) closeOperatorModules() {
 	}
 	s.c2Ops.wg.Wait()
 }
+
+type operatorTaskChatKey struct{}
+
 func (s *Server) operatorConversationContext(ctx context.Context, c *db.Conversation) (context.Context, []int64, bool, error) {
-	for _, kind := range []string{"webshell", "c2"} {
+	for _, kind := range []string{"webshell", "c2", "expert"} {
 		var b map[string]int64
 		err := s.m.pg.OperatorSetting(ctx, fmt.Sprintf("conversation.%s.%d", kind, c.ID), &b)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -37,7 +40,7 @@ func (s *Server) operatorConversationContext(ctx context.Context, c *db.Conversa
 		if err != nil {
 			return ctx, nil, true, conversationAdmissionError()
 		}
-		if b["task_id"] <= 0 || b["session_id"] <= 0 || c.AgentKey != "pentest" {
+		if b["task_id"] <= 0 || (kind != "expert" && b["session_id"] <= 0) || (kind != "expert" && c.AgentKey != "pentest") {
 			return ctx, nil, true, conversationAdmissionError()
 		}
 		parent, err := s.m.pg.GetTask(b["task_id"])
@@ -52,14 +55,14 @@ func (s *Server) operatorConversationContext(ctx context.Context, c *db.Conversa
 			if e != nil || !ok {
 				return ctx, nil, true, conversationAdmissionError()
 			}
-		} else {
+		} else if kind == "c2" {
 			var status string
 			if e := s.m.pg.QueryRowContext(ctx, "SELECT status FROM c2_sessions WHERE id=$1", b["session_id"]).Scan(&status); e != nil || status == "killed" {
 				return ctx, nil, true, conversationAdmissionError()
 			}
 		}
 		bound, _, err := s.bindConversationTask(ctx, b["task_id"], c.AgentKey, true)
-		return bound, []int64{b["task_id"]}, true, err
+		return context.WithValue(bound, operatorTaskChatKey{}, b["task_id"]), []int64{b["task_id"]}, true, err
 	}
 	return ctx, nil, false, nil
 }

@@ -167,7 +167,7 @@ def dec(keyb, ctb):
 
 # AES-GCM for explicit GCM listeners; CBC-HMAC remains available for legacy peers.
 _cbc_enc, _cbc_dec = enc, dec
-def _mul(x,y):
+def _mul128(x,y):
  z=0
  for i in range(128):
   if (x>>(127-i))&1:z^=y
@@ -175,7 +175,7 @@ def _mul(x,y):
  return z
 def _ghash(h,a):
  y=0
- for i in range(0,len(a),16):y=_mul(y^int.from_bytes(a[i:i+16].ljust(16,b'\0'),'big'),h)
+ for i in range(0,len(a),16):y=_mul128(y^int.from_bytes(a[i:i+16].ljust(16,b'\0'),'big'),h)
  return y
 def _gcm_tag(w,nonce,ct):
  h=int.from_bytes(aes256_block([0]*16,w),'big')

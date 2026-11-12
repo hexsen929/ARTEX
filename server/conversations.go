@@ -763,7 +763,26 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 	}
 	// On a manual stop ctx is cancelled; Chat already emits a clean "已手动停止"
 	// step, so skip the raw-error entry — only surface genuine failures.
-	if _, err := ca.Chat(ctx, c.AgentKey, sessionID, msg, maxTurns, maxDuration, webSearch, emit); err != nil {
+	var chatErr error
+	if taskID, ok := ctx.Value(operatorTaskChatKey{}).(int64); ok {
+		task, exists := s.m.Task(strconv.FormatInt(taskID, 10))
+		if !exists || task.Store == nil {
+			chatErr = conversationAdmissionError()
+		} else {
+			expected := task.Store.ID()
+			validate := func(callCtx context.Context) error {
+				p, e := s.m.pg.GetTask(taskID)
+				if e != nil || p == nil || p.ExplorationID != expected || p.Paused || p.Status == "done" || p.Status == "failed" || p.Status == "timeout" || callCtx.Err() != nil {
+					return conversationAdmissionError()
+				}
+				return nil
+			}
+			_, chatErr = ca.ChatInTask(ctx, c.AgentKey, sessionID, msg, maxTurns, maxDuration, webSearch, emit, s.m.Assets(), task.Store, s.evidenceStore(), validate)
+		}
+	} else {
+		_, chatErr = ca.Chat(ctx, c.AgentKey, sessionID, msg, maxTurns, maxDuration, webSearch, emit)
+	}
+	if err := chatErr; err != nil {
 		finishReason = err.Error()
 		if ctx.Err() == nil {
 			_, _ = pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true,

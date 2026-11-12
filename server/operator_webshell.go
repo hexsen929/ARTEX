@@ -354,7 +354,7 @@ func (s *Server) operatorWebshellAsset(w http.ResponseWriter, r *http.Request) {
 			operatorError(w, e)
 			return
 		}
-		if e = s.sessStore.SetHostAsset(r.Context(), id, asset); e != nil {
+		if _, e = s.m.pg.ExecContext(r.Context(), "UPDATE sessions SET host_asset_id=$2 WHERE id=$1", id, asset); e != nil {
 			operatorError(w, e)
 			return
 		}

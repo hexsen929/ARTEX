@@ -49,6 +49,7 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/kb/import", s.operatorKBImport)
 	mux.HandleFunc("GET /api/tasks/{id}/kb-candidates", s.operatorKBCandidates)
 	mux.HandleFunc("GET /api/tasks/{id}/experts", s.operatorTaskExperts)
+	mux.HandleFunc("POST /api/tasks/{id}/experts/{key}/chat", s.operatorExpertChat)
 	s.registerVPSRoutes(mux)
 	s.registerWebshellRoutes(mux)
 	s.registerC2Routes(mux)

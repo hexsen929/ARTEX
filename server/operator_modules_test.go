@@ -62,7 +62,10 @@ func TestOperatorLibraryPresetAndSkillsContracts(t *testing.T) {
 	if resp["hit_count"] != float64(2) {
 		t.Fatal(resp)
 	}
-	_, _ = s.m.pg.Exec("INSERT INTO intercept_rules(name,pattern,action) VALUES('operator fixture preserve','never-match','deny')")
+	var before int
+	if err := s.m.pg.QueryRow("SELECT count(*) FROM intercept_rules").Scan(&before); err != nil {
+		t.Fatal(err)
+	}
 	status, resp = operatorRequest(t, s, "POST", "/api/armor/presets", map[string]any{"name": "operator fixture", "text": "retain exact evidence"})
 	if status != 200 {
 		t.Fatal(status, resp)
@@ -74,10 +77,10 @@ func TestOperatorLibraryPresetAndSkillsContracts(t *testing.T) {
 		t.Fatal(status, resp)
 	}
 	var count int
-	if err := s.m.pg.QueryRow("SELECT count(*) FROM intercept_rules WHERE name='operator fixture preserve'").Scan(&count); err != nil || count != 1 {
+	if err := s.m.pg.QueryRow("SELECT count(*) FROM intercept_rules").Scan(&count); err != nil || count != before {
 		t.Fatal("preset changed intercept rules", count, err)
 	}
-	defer s.m.pg.Exec("DELETE FROM intercept_rules WHERE name='operator fixture preserve'")
+
 	defer s.m.pg.Exec("DELETE FROM operator_module_settings WHERE key='armor'")
 	os.MkdirAll(filepath.Join(s.skillDir, "fixture", "refs"), 0700)
 	os.WriteFile(filepath.Join(s.skillDir, "fixture", "SKILL.md"), []byte("---\nname: fixture\ndescription: fixture\n---\nneedle-operator"), 0600)
