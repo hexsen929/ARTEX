@@ -33,7 +33,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: go test -race -p=1 ./kb ./c2 ./db ./server ./session -run 'TestOperator|TestLibrary|TestReferenceBlock' -count=1 -timeout=5m
+      - run: go test -race -p=1 ./agent ./kb ./c2 ./db ./server ./session -run 'TestOperator|TestLibrary|TestReferenceBlock' -count=1 -timeout=5m
       - name: Build current UI and isolated Mac preview
         run: |
           cd web
@@ -50,3 +50,15 @@ jobs:
         with:
           name: operator-preview-macos-arm64
           path: /tmp/operator-preview
+
+  windows-client-crypto:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify real PowerShell GCM and CBC-HMAC interoperability
+        shell: pwsh
+        run: go test ./c2 -run '^TestOperatorPowerShellEnvelopeCompatibility$' -count=1 -v -timeout=3m

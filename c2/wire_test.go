@@ -126,3 +126,47 @@ print(json.dumps({'d':ns['enc'](ns['C']['key'],'client-message'),'response':ns['
 		t.Fatal(fmt.Sprint("invalid key accepted"))
 	}
 }
+
+func TestOperatorPowerShellEnvelopeCompatibility(t *testing.T) {
+	pwsh, err := exec.LookPath("pwsh")
+	if err != nil {
+		t.Skip("PowerShell 7 unavailable")
+	}
+	key := bytes.Repeat([]byte{5}, 32)
+	for _, mode := range []string{"gcm", "cbc-hmac"} {
+		t.Run(mode, func(t *testing.T) {
+			script, _, err := BuildPayload(PayloadConfig{Key: base64.StdEncoding.EncodeToString(key), Token: "fixture", UUID: "fixture", Transport: "http", Envelope: mode, Interval: 5}, "windows")
+			if err != nil {
+				t.Fatal(err)
+			}
+			i := strings.Index(script, "while($true)")
+			if i < 0 {
+				t.Fatal("payload loop marker missing")
+			}
+			helpers := script[:i]
+			wire, err := (Envelope{Key: key, Mode: mode}).Seal([]byte("server-response"), mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var env map[string]string
+			json.Unmarshal(wire, &env)
+			command := helpers + "\n$ErrorActionPreference='Stop'\n$d=E $C.key 'client-message'\n$p=D $C.key '" + env["d"] + "'\n@{d=$d;response=$p}|ConvertTo-Json -Compress\n"
+			raw, err := exec.Command(pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command).CombinedOutput()
+			if err != nil {
+				t.Fatal(err, string(raw))
+			}
+			var out struct {
+				D        string `json:"d"`
+				Response string `json:"response"`
+			}
+			if err = json.Unmarshal(bytes.TrimSpace(raw), &out); err != nil {
+				t.Fatal(err, string(raw))
+			}
+			b, _ := json.Marshal(map[string]string{"d": out.D})
+			plain, _, err := (Envelope{Key: key, Mode: mode}).Open(b)
+			if err != nil || string(plain) != "client-message" || out.Response != "server-response" {
+				t.Fatal(string(plain), out.Response, err)
+			}
+		})
+	}
+}

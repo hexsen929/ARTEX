@@ -26,7 +26,7 @@ function E($k,$s){
 $CBCEncrypt=${function:E};$CBCDecrypt=${function:D}
 function E($k,$s){
  if($C.envelope -ne 'gcm'){return (& $CBCEncrypt $k $s)}
- $a=[Security.Cryptography.AesGcm]::new([Convert]::FromBase64String($k));$n=New-Object byte[] 12;[Security.Cryptography.RandomNumberGenerator]::Fill($n)
+ $a=[Security.Cryptography.AesGcm]::new([Convert]::FromBase64String($k));$n=New-Object byte[] 12;$rng=[Security.Cryptography.RandomNumberGenerator]::Create();$rng.GetBytes($n);$rng.Dispose()
  $p=[Text.Encoding]::UTF8.GetBytes($s);$ct=New-Object byte[] $p.Length;$tag=New-Object byte[] 16;$a.Encrypt($n,$p,$ct,$tag);$a.Dispose()
  return [Convert]::ToBase64String([byte[]]($n+$ct+$tag))
 }
