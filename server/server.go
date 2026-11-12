@@ -359,6 +359,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	}
 	s.wireMemoryRecall()
 	s.wireKnowledge()
+	s.initOperatorModules()
 	s.restoreTaskRuntimes()
 	s.ensureProxySupervisor()
 	s.proxyPoolWG.Add(1)
@@ -984,6 +985,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
 	s.registerMemoryRoutes(mux)
 	s.registerKnowledgeRoutes(mux)
+	s.registerOperatorRoutes(mux)
 	s.registerReportTemplateRoutes(mux)
 
 	// 页面一键更新。走的是默认的 JWT 鉴权（auth.go 只放行 /api/auth/* 和
