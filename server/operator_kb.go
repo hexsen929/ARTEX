@@ -39,6 +39,8 @@ func operatorError(w http.ResponseWriter, err error) {
 	}
 }
 func (s *Server) registerOperatorRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/kb/config", s.operatorKBConfigGet)
+	mux.HandleFunc("PUT /api/kb/config", s.operatorKBConfigPut)
 	mux.HandleFunc("GET /api/kb/status", s.operatorKBStatus)
 	mux.HandleFunc("GET /api/kb/search", s.operatorKBSearch)
 	mux.HandleFunc("GET /api/kb/entry", s.operatorKBGet)
@@ -67,13 +69,16 @@ func (s *Server) initOperatorModules() {
 			log.Printf("[kb] imported %d new entries; existing entries preserved", n)
 		}
 	}
-	s.c2Ops = &c2OperatorState{running: map[int64]*c2Running{}}
+	moduleCtx, moduleCancel := context.WithCancel(s.ctx)
+	s.c2Ops = &c2OperatorState{running: map[int64]*c2Running{}, ctx: moduleCtx, cancel: moduleCancel}
+	s.c2Ops.wg.Add(1)
+	go func() { defer s.c2Ops.wg.Done(); s.runOperatorKBWorker(moduleCtx) }()
 	agent.OperatorSupplement = func(ctx context.Context, ri agent.RunInfo, role string) string {
 		if role == "asset_mapper" || role == "credential_processor" || role == "memory" || strings.HasPrefix(role, "judge") {
 			return ""
 		}
 		out := s.armorFor(role)
-		if ri.TaskID > 0 && (role == "worker" || role == "planner" || role == "mainagent") {
+		if s.operatorKBConfig(ctx).Preflight && ri.TaskID > 0 && (role == "worker" || role == "planner" || role == "mainagent") {
 			if task, ok := s.m.Task(strconv.FormatInt(ri.TaskID, 10)); ok {
 				es, err := s.m.pg.KBEntries(ctx)
 				if err == nil {
@@ -221,7 +226,7 @@ func (s *Server) operatorKBCandidates(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid task id")
 		return
 	}
-	rows, err := s.m.pg.QueryContext(r.Context(), `SELECT id,payload FROM exploration_nodes WHERE kind='finding' AND exploration_id=(SELECT exploration_id FROM tasks WHERE id=$1) ORDER BY id DESC LIMIT 100`, id)
+	rows, err := s.m.pg.QueryContext(r.Context(), `SELECT id,to_jsonb(f) FROM findings f WHERE task_id=$1 ORDER BY id DESC LIMIT 100`, id)
 	if err != nil {
 		operatorError(w, err)
 		return

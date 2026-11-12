@@ -13,6 +13,10 @@ func (s *Server) closeOperatorModules() {
 		return
 	}
 	s.c2Ops.mu.Lock()
+	s.c2Ops.closed = true
+	if s.c2Ops.cancel != nil {
+		s.c2Ops.cancel()
+	}
 	ids := []int64{}
 	for id := range s.c2Ops.running {
 		ids = append(ids, id)

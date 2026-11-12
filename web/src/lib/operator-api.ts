@@ -14,7 +14,9 @@ export const operatorAPI = {
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `c2-file-${id}.bin`; a.click();
+    a.href = url;
+    a.download = `c2-file-${id}.bin`;
+    a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   },
 };

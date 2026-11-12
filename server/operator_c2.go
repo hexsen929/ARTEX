@@ -26,6 +26,9 @@ import (
 )
 
 type c2OperatorState struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
+	closed  bool
 	mu      sync.Mutex
 	running map[int64]*c2Running
 	wg      sync.WaitGroup
@@ -228,6 +231,9 @@ func (s *Server) startOperatorC2(id int64) error {
 	}
 	s.c2Ops.mu.Lock()
 	defer s.c2Ops.mu.Unlock()
+	if s.c2Ops.closed {
+		return fmt.Errorf("C2 subsystem closing")
+	}
 	if s.c2Ops.running[id] != nil {
 		return nil
 	}
@@ -236,7 +242,7 @@ func (s *Server) startOperatorC2(id int64) error {
 		_, _ = s.m.pg.Exec(`UPDATE c2_listeners SET status='error',last_error=$2 WHERE id=$1`, id, err.Error())
 		return err
 	}
-	ctx, cancel := context.WithCancel(s.ctx)
+	ctx, cancel := context.WithCancel(s.c2Ops.ctx)
 	run := &c2Running{listener: ln, conns: map[net.Conn]bool{}, cancel: cancel}
 	s.c2Ops.running[id] = run
 	if l.Kind == "http_beacon" {
