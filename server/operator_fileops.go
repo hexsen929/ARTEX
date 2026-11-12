@@ -56,6 +56,23 @@ func (s *Server) operatorFileOp(w http.ResponseWriter, r *http.Request) {
 	}
 	var secret session.Secret
 	_ = json.Unmarshal(rec.Secret, &secret)
+	if php, ok := sh.(*session.HTTPShell); ok && php.PHPNative() {
+		if v.Op == "chmod" && !operatorFileMode.MatchString(v.Mode) {
+			writeErr(w, 400, "octal mode required")
+			return
+		}
+		if (v.Op == "rename" || v.Op == "copy") && v.Destination == "" {
+			writeErr(w, 400, "destination required")
+			return
+		}
+		out, e := php.PHPFileAction(r.Context(), v.Op, v.Path, v.Destination, v.Mode, v.Recursive)
+		if e != nil {
+			writeErr(w, 502, e.Error())
+			return
+		}
+		writeJSON(w, 200, out)
+		return
+	}
 	p := quoteOperatorPath(v.Path)
 	dst := quoteOperatorPath(v.Destination)
 	cmd := ""

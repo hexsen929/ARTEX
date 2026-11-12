@@ -32,6 +32,9 @@ func (o HTTPOptions) Validate() error {
 	return nil
 }
 func (s *HTTPShell) applyHTTPOptions(o HTTPOptions) error {
+	if s.transport == "xor" && ((o.Method != "" && o.Method != "POST") || o.CommandParam != "") {
+		return fmt.Errorf("phpxor uses raw POST; command parameter overrides are not supported")
+	}
 	if err := o.Validate(); err != nil {
 		return err
 	}

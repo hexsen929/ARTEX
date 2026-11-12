@@ -133,7 +133,7 @@ func (d *DB) ImportLegacyKB(ctx context.Context, dir string) (int, error) {
 	}
 	defer s.Close()
 	s.SetMaxOpenConns(1)
-	rows, err := s.QueryContext(ctx, `SELECT code,title,kind,category,cve,component,versions,severity,language,source,source_url,description,usage,content,path,verified,verified_note,hit_count,used_on,engagement_id,engagement_name,asset_target,found_by_agent,tags,created_by FROM poc LIMIT 10001`)
+	rows, err := s.QueryContext(ctx, `SELECT code,title,kind,category,cve,component,versions,severity,language,source,source_url,description,usage,content,path,verified,verified_note,hit_count,used_on,engagement_id,engagement_name,asset_target,found_by_agent,tags,created_by,created_at,updated_at FROM poc LIMIT 10001`)
 	if err != nil {
 		return 0, err
 	}
@@ -153,7 +153,7 @@ func (d *DB) ImportLegacyKB(ctx context.Context, dir string) (int, error) {
 		if n >= 10000 {
 			return 0, fmt.Errorf("knowledge import exceeds 10000 entries")
 		}
-		vals := make([]sql.NullString, 25)
+		vals := make([]sql.NullString, 27)
 		dest := make([]any, len(vals))
 		for i := range vals {
 			dest[i] = &vals[i]
@@ -163,6 +163,12 @@ func (d *DB) ImportLegacyKB(ctx context.Context, dir string) (int, error) {
 		}
 		f := func(i int) string { return vals[i].String }
 		e := kb.Entry{Code: f(0), Title: f(1), Kind: f(2), Category: f(3), CVE: f(4), Component: f(5), Versions: f(6), Severity: f(7), Language: f(8), Source: f(9), SourceURL: f(10), Description: f(11), Usage: f(12), Content: f(13), Path: portablePOCPath(dir, f(14)), Verified: f(15) == "1", VerifiedNote: f(16), UsedOn: f(18), EngagementID: f(19), EngagementName: f(20), AssetTarget: f(21), FoundByAgent: f(22), Tags: f(23), CreatedBy: f(24)}
+		e.CreatedAt = f(25)
+		e.UpdatedAt = f(26)
+		e.HitCount, _ = strconv.ParseInt(f(17), 10, 64)
+		if e.HitCount < 0 {
+			e.HitCount = 0
+		}
 		e.Polarity = kb.GuessPolarity(e)
 		if meta, ok := metadata[e.Code]; ok {
 			if meta.Polarity == "positive" || meta.Polarity == "context" || meta.Polarity == "negative" {
@@ -179,7 +185,15 @@ func (d *DB) ImportLegacyKB(ctx context.Context, dir string) (int, error) {
 		if len(b) > kb.MaxContent+(128<<10) {
 			return 0, fmt.Errorf("knowledge entry too large")
 		}
-		res, er := tx.ExecContext(ctx, `INSERT INTO kb_entries(code,body,polarity) VALUES($1,$2::jsonb,$3) ON CONFLICT(code) DO NOTHING`, e.Code, b, e.Polarity)
+		created, ce := time.Parse(time.RFC3339Nano, e.CreatedAt)
+		if ce != nil {
+			created = time.Now().UTC()
+		}
+		updated, ue := time.Parse(time.RFC3339Nano, e.UpdatedAt)
+		if ue != nil {
+			updated = created
+		}
+		res, er := tx.ExecContext(ctx, `INSERT INTO kb_entries(code,body,polarity,hit_count,used_on,created_at,updated_at) VALUES($1,$2::jsonb,$3,$4,$5,$6,$7) ON CONFLICT(code) DO NOTHING`, e.Code, b, e.Polarity, e.HitCount, e.UsedOn, created, updated)
 		if er != nil {
 			return 0, er
 		}

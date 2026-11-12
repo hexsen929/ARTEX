@@ -63,6 +63,7 @@ type ProbeInfo struct {
 
 // HTTPShell 是一句话马会话。零值不可用，经 Probe / NewHTTPShell 构造。
 type HTTPShell struct {
+	transport   string
 	httpOptions HTTPOptions
 	id          int64
 	kind        string // http_php / http_phpcmd / http_jsp / http_aspx
@@ -114,6 +115,13 @@ func NewHTTPShell(shellURL, password, lang string, options ...HTTPOptions) (*HTT
 	if s.password == "" {
 		s.password = "cmd"
 	}
+	if s.lang == "phpxor" {
+		if len(s.password) != 16 {
+			return nil, fmt.Errorf("phpxor requires a 16-byte key")
+		}
+		s.lang = "php"
+		s.transport = "xor"
+	}
 	switch s.lang {
 	case "php":
 		s.kind, s.platform = "http_php", "linux"
@@ -164,9 +172,14 @@ func (s *HTTPShell) Funcs() []string {
 	return append([]string(nil), s.funcs...)
 }
 
-func (s *HTTPShell) ID() int64                   { return s.id }
-func (s *HTTPShell) Kind() string                { return s.kind }
-func (s *HTTPShell) Lang() string                { return s.lang }
+func (s *HTTPShell) ID() int64    { return s.id }
+func (s *HTTPShell) Kind() string { return s.kind }
+func (s *HTTPShell) Lang() string {
+	if s.transport == "xor" {
+		return "phpxor"
+	}
+	return s.lang
+}
 func (s *HTTPShell) URL() string                 { return s.url }
 func (s *HTTPShell) Close(context.Context) error { return nil } // HTTP 会话无资源
 
@@ -194,7 +207,7 @@ type Secret struct {
 // Secret 导出当前连接参数（探测后的完整指纹）。
 func (s *HTTPShell) Secret() Secret {
 	sec := Secret{
-		URL: s.url, Password: s.password, Lang: s.lang,
+		URL: s.url, Password: s.password, Lang: s.Lang(),
 		Variant: s.variant, Platform: s.platform, Funcs: s.Funcs(),
 		DisableFunctions: s.disableFuncs, Mail: s.mailOK, Putenv: s.putenvOK,
 		Bypass: s.bypass, BypassLib: s.bypassLib,
@@ -255,6 +268,9 @@ func (s *HTTPShell) post(ctx context.Context, fields url.Values, timeout time.Du
 // postH 同 post，附带响应头（auto 判型要用通用头信号区分 phpcmd/jsp;
 // 加密马通道无明文响应头语义，恒返回 nil)。
 func (s *HTTPShell) postH(ctx context.Context, fields url.Values, timeout time.Duration) (string, http.Header, error) {
+	if s.transport == "xor" {
+		return s.postCustomXOR(ctx, fields, timeout)
+	}
 	if s.enc != nil {
 		body, err := s.enc.exec(ctx, fields.Get(s.password), timeout)
 		return body, nil, err

@@ -267,12 +267,15 @@ function POCLibrary() {
     `/kb/search?limit=100&q=${encodeURIComponent(search)}&category=${encodeURIComponent(category)}`,
   );
   const status = useData<Row>("/kb/status");
+  const config = useData<{ preflight: boolean; backfill: boolean; after: string }>("/kb/config");
+  const [expert, setExpert] = React.useState("code_auditor");
   const [edit, setEdit] = React.useState<Row | null>(null),
     [task, setTask] = React.useState("");
   const [candidates, setCandidates] = React.useState<Row[]>([]);
   const action = useAction(() => {
     results.reload();
     status.reload();
+    config.reload();
   });
   const rows = [...(results.data?.ammo ?? []), ...(results.data?.playbook ?? []), ...(results.data?.negative ?? [])];
   return (
@@ -282,7 +285,7 @@ function POCLibrary() {
           ["总条目", "total"],
           ["发布者标记已验证", "verified"],
           ["负面情报", "negative"],
-          ["正文取用次数", "reused"],
+          ["累计复用（含导入历史）", "reused"],
         ].map(([label, key]) => (
           <Card key={key}>
             <CardContent className="p-4">
@@ -292,6 +295,33 @@ function POCLibrary() {
           </Card>
         ))}
       </div>
+      {config.data && (
+        <div className="flex flex-wrap gap-4 rounded-md border p-3 text-sm">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={config.data.preflight}
+              disabled={action.busy}
+              onChange={(e) =>
+                action.run(() => api.save("/kb/config", { ...config.data, preflight: e.target.checked }, "PUT"))
+              }
+            />
+            任务开局自动预查
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={config.data.backfill}
+              disabled={action.busy}
+              onChange={(e) =>
+                action.run(() => api.save("/kb/config", { ...config.data, backfill: e.target.checked }, "PUT"))
+              }
+            />
+            已验证的新发现自动回填
+          </label>
+          <span className="text-xs text-muted-foreground">回填保留证据与适用条件，不覆盖人工条目。</span>
+        </div>
+      )}
       <form
         className="flex flex-wrap gap-2"
         onSubmit={(e) => {
@@ -413,6 +443,32 @@ function POCLibrary() {
               }
             >
               加载候选
+            </Button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <select
+              aria-label="任务专家"
+              className="rounded-md border bg-background px-3"
+              value={expert}
+              onChange={(e) => setExpert(e.target.value)}
+            >
+              {["code_auditor", "reverser", "kb_curator", "exploit", "cloud", "avevasion", "payout_analyst"].map(
+                (key) => (
+                  <option key={key}>{key}</option>
+                ),
+              )}
+            </select>
+            <Button
+              variant="outline"
+              disabled={!task || action.busy}
+              onClick={() =>
+                action.run(async () => {
+                  const v = await api.save<{ conversation_id: number }>(`/tasks/${task}/experts/${expert}/chat`, {});
+                  window.location.href = `/chat?c=${v.conversation_id}`;
+                }, "")
+              }
+            >
+              打开此任务的专家对话
             </Button>
           </div>
           <Grid
@@ -631,6 +687,26 @@ function VPS() {
                     检查 SSH
                   </Button>
                   <Button
+                    variant="outline"
+                    disabled={action.busy}
+                    onClick={() => {
+                      if (window.confirm("把全局回连主机改为此 VPS？现有固定环境配置仍优先。"))
+                        action.run(() => api.save(`/vps/${edit.id}/apply`, { callback: true }));
+                    }}
+                  >
+                    用于回连
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={action.busy || edit.kind !== "socks5"}
+                    onClick={() => {
+                      if (window.confirm("将全局出口切换到此 SOCKS5 端点？"))
+                        action.run(() => api.save(`/vps/${edit.id}/apply`, { egress: true }));
+                    }}
+                  >
+                    用于出口
+                  </Button>
+                  <Button
                     variant="destructive"
                     disabled={action.busy}
                     onClick={() => {
@@ -675,7 +751,7 @@ function VPS() {
 const shellFields: Field[] = [
   { key: "name", label: "名称" },
   { key: "url", label: "完整 URL", required: true },
-  { key: "lang", label: "协议", options: ["auto", "php", "phpcmd", "jsp", "aspx", "phpenc", "jspenc"] },
+  { key: "lang", label: "协议", options: ["auto", "php", "phpcmd", "phpxor", "jsp", "aspx", "phpenc", "jspenc"] },
   { key: "password", label: "连接参数 / 密码字段名", type: "password" },
   { key: "secret", label: "加密会话密钥", type: "password" },
   { key: "method", label: "方法", options: ["POST", "GET"] },
