@@ -55,6 +55,10 @@ func operatorError(w http.ResponseWriter, err error) {
 	}
 }
 func (s *Server) registerOperatorRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/operator/trigger-budget", s.operatorTriggerBudget)
+	mux.HandleFunc("PUT /api/operator/trigger-budget", s.operatorTriggerBudget)
+	mux.HandleFunc("GET /api/tasks/{id}/steer", s.operatorTaskSteer)
+	mux.HandleFunc("POST /api/tasks/{id}/steer", s.operatorTaskSteer)
 	mux.HandleFunc("GET /api/kb/config", s.operatorKBConfigGet)
 	mux.HandleFunc("PUT /api/kb/config", s.operatorKBConfigPut)
 	mux.HandleFunc("GET /api/kb/status", s.operatorKBStatus)
