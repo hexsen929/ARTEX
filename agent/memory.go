@@ -28,7 +28,7 @@ type MemoryRecallResult struct {
 var MemoryRecall func(context.Context, RunInfo, string, llm.CompletionRequest) (MemoryRecallResult, error)
 
 func memoryRoleAllowed(role string) bool {
-	return role != "" && role != db.CredentialAgentKey && role != "asset_mapper" && role != "worker.intranet" && role != "memory"
+	return role != "" && role != db.CredentialAgentKey && role != "asset_mapper" && role != "worker.intranet" && role != "memory" && role != "kb_curator"
 }
 
 // attachMemory wraps only the harness's primary model calls. Auxiliary title,

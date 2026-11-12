@@ -15,6 +15,7 @@ const MaxContent = 256 << 10
 var Categories = []string{"rce", "deserialization", "file-upload", "sqli", "unauthorized", "auth-bypass", "weak-password", "ssrf", "xxe", "path-traversal", "file-read", "info-leak", "privesc", "tunnel", "methodology", "recon", "frontend-reverse", "app-audit", "env", "waf", "protocol"}
 
 type Entry struct {
+	Score           int    `json:"score,omitempty"`
 	ID              int64  `json:"id"`
 	Code            string `json:"code"`
 	Title           string `json:"title"`
@@ -171,7 +172,11 @@ func Rank(entries []Entry, q Query) Result {
 		if q.Category != "" && q.Category != e.Category || q.Kind != "" && q.Kind != e.Kind || q.Polarity != "" && q.Polarity != e.Polarity {
 			continue
 		}
-		if n := Score(e, terms); n > 0 {
+		n := e.Score
+		if n <= 0 {
+			n = Score(e, terms)
+		}
+		if n > 0 {
 			rs = append(rs, ranked{e, n})
 		}
 	}

@@ -15,6 +15,9 @@ import (
 )
 
 func (s *Server) registerWebshellRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/sessions/{id}/fileop", s.operatorFileOp)
+	mux.HandleFunc("POST /api/sessions/{id}/eval", s.operatorWebshellEval)
+	mux.HandleFunc("GET /api/sessions/{id}/download", s.operatorSessionDownload)
 	mux.HandleFunc("GET /api/webshell", s.operatorWebshellList)
 	mux.HandleFunc("POST /api/webshell", s.operatorWebshellSave)
 	mux.HandleFunc("PUT /api/webshell/{id}", s.operatorWebshellSave)

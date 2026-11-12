@@ -188,7 +188,7 @@ func (c *ChatAgent) chat(ctx context.Context, agentKey, sessionID, message strin
 	if !explanationOnly {
 		proxyAddr, proxyCACert = c.proxyForChat(ctx)
 	}
-	restricted := explanationOnly || agentKey == db.CredentialAgentKey || agentKey == "goals" || agentKey == "asset_mapper"
+	restricted := explanationOnly || agentKey == db.CredentialAgentKey || agentKey == "goals" || agentKey == "asset_mapper" || agentKey == "kb_curator"
 	// gate the global web-search opts by this agent's own flag.
 	ws := c.webSearch
 	if !webSearch || restricted {
@@ -214,7 +214,7 @@ func (c *ChatAgent) chat(ctx context.Context, agentKey, sessionID, message strin
 	cleanup := func() {}
 	if !explanationOnly {
 		base := []actool.CoreTool{}
-		if agentKey != "asset_mapper" {
+		if agentKey != "asset_mapper" && agentKey != "kb_curator" {
 			base = actool.DefaultTools()
 		}
 		if scope, ok := ctx.Value(taskChatScopeKey{}).(*taskChatScope); ok && scope.role == agentKey && !restricted {

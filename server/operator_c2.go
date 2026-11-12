@@ -824,7 +824,13 @@ func (s *Server) operatorC2Tools() []actool.CoreTool {
 		if agent.RunInfoFrom(ctx).TaskID <= 0 {
 			return nil, fmt.Errorf("task context required")
 		}
-		return s.operatorSQLList(ctx, `SELECT to_jsonb(x) FROM c2_sessions x WHERE status='active' ORDER BY id LIMIT 100`)
+		ri := agent.RunInfoFrom(ctx)
+		conv := strings.TrimPrefix(ri.SessionID, "conv-")
+		var bound map[string]int64
+		if err := s.m.pg.OperatorSetting(ctx, "conversation.c2."+conv, &bound); err != nil || bound["task_id"] != ri.TaskID {
+			return []map[string]any{}, nil
+		}
+		return s.operatorSQLList(ctx, `SELECT to_jsonb(x) FROM c2_sessions x WHERE id=$1 AND status='active'`, bound["session_id"])
 	}), tool("c2_exec", "向显式绑定的 C2 会话排队任务。AI 请求记录为待审批，操作员批准后才投递；已投递任务不会自动重放。", map[string]any{"session_id": map[string]any{"type": "integer"}, "command": strParam("命令")}, []string{"session_id", "command"}, false, func(ctx context.Context, b json.RawMessage) (any, error) {
 		var v struct {
 			ID      int64  `json:"session_id"`

@@ -118,7 +118,12 @@ func (d *DB) ImportLegacyKB(ctx context.Context, dir string) (int, error) {
 	}
 	defer tx.Rollback()
 	n := 0
+	scanned := 0
 	for rows.Next() {
+		scanned++
+		if scanned > 10000 {
+			return 0, fmt.Errorf("knowledge import exceeds 10000 entries")
+		}
 		if n >= 10000 {
 			return 0, fmt.Errorf("knowledge import exceeds 10000 entries")
 		}
@@ -168,5 +173,83 @@ func portablePOCPath(dir, p string) string {
 	if fi, err := os.Lstat(out); err != nil || !fi.Mode().IsRegular() {
 		return ""
 	}
-	return out
+	realRoot, e1 := filepath.EvalSymlinks(root)
+	realOut, e2 := filepath.EvalSymlinks(out)
+	if e1 != nil || e2 != nil {
+		return ""
+	}
+	rel, err = filepath.Rel(realRoot, realOut)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	return realOut
+}
+
+// KBSearchEntries ranks full stored text in PostgreSQL, but only materializes
+// bounded metadata for candidate selection. Agent startup never loads every
+// POC body into the process or sends full scripts implicitly.
+func (d *DB) KBSearchEntries(ctx context.Context, q kb.Query) ([]kb.Entry, error) {
+	terms := kb.Terms(q.Q)
+	args := []any{}
+	score := "1"
+	if len(terms) > 0 {
+		parts := []string{}
+		for _, t := range terms {
+			args = append(args, "%"+escapeLikeOperator(t)+"%")
+			p := fmt.Sprintf("$%d", len(args))
+			for _, f := range []struct {
+				field  string
+				weight int
+			}{{"title", 20}, {"code", 10}, {"cve", 15}, {"component", 10}, {"tags", 6}, {"description", 3}, {"content", 1}} {
+				parts = append(parts, fmt.Sprintf("CASE WHEN lower(COALESCE(body->>'%s','')) LIKE %s ESCAPE '\\' THEN %d ELSE 0 END", f.field, p, f.weight))
+			}
+		}
+		score = strings.Join(parts, "+")
+	}
+	where := []string{"TRUE"}
+	for _, f := range []struct{ field, value string }{{"category", q.Category}, {"kind", q.Kind}, {"polarity", q.Polarity}} {
+		if f.value != "" {
+			args = append(args, f.value)
+			expr := "body->>'" + f.field + "'"
+			if f.field == "polarity" {
+				expr = "polarity"
+			}
+			where = append(where, fmt.Sprintf("%s=$%d", expr, len(args)))
+		}
+	}
+	query := `SELECT id,code,jsonb_build_object('title',left(body->>'title',1000),'category',body->>'category','kind',body->>'kind','cve',body->>'cve','component',left(body->>'component',1000),'versions',left(body->>'versions',1000),'description',left(body->>'description',2000),'tags',left(body->>'tags',1000),'verified',COALESCE((body->>'verified')::boolean,false),'has_content',COALESCE(body->>'content','')!=''),polarity,hit_count,used_on,rank FROM (SELECT *,(` + score + `) AS rank FROM kb_entries WHERE ` + strings.Join(where, " AND ") + `) c WHERE rank>0 ORDER BY rank DESC,code LIMIT 400`
+	rows, err := d.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []kb.Entry{}
+	for rows.Next() {
+		var e kb.Entry
+		var b []byte
+		if err = rows.Scan(&e.ID, &e.Code, &b, &e.Polarity, &e.HitCount, &e.UsedOn, &e.Score); err != nil {
+			return nil, err
+		}
+		var v kb.Entry
+		if err = json.Unmarshal(b, &v); err != nil {
+			return nil, err
+		}
+		v.ID = e.ID
+		v.Code = e.Code
+		v.Polarity = e.Polarity
+		v.HitCount = e.HitCount
+		v.UsedOn = e.UsedOn
+		v.Score = e.Score
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+func escapeLikeOperator(s string) string {
+	return strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(s)
+}
+func (d *DB) KBStats(ctx context.Context) (int, int, int, int64, error) {
+	var total, verified, negative int
+	var reused int64
+	err := d.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER (WHERE body->>'verified'='true'),count(*) FILTER (WHERE polarity='negative'),COALESCE(sum(hit_count),0) FROM kb_entries`).Scan(&total, &verified, &negative, &reused)
+	return total, verified, negative, reused, err
 }

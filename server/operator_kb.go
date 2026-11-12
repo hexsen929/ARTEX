@@ -20,7 +20,11 @@ import (
 )
 
 func operatorDecode(w http.ResponseWriter, r *http.Request, v any) bool {
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 512<<10))
+	limit := int64(512 << 10)
+	if strings.HasPrefix(r.URL.Path, "/api/c2/") {
+		limit = 4 << 20
+	}
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	if err := d.Decode(v); err != nil {
 		writeErr(w, 400, "invalid JSON or request too large")
 		return false
@@ -81,7 +85,7 @@ func (s *Server) initOperatorModules() {
 		out := s.armorFor(role)
 		if s.operatorKBConfig(ctx).Preflight && ri.TaskID > 0 && (role == "worker" || role == "planner" || role == "mainagent") {
 			if task, ok := s.m.Task(strconv.FormatInt(ri.TaskID, 10)); ok {
-				es, err := s.m.pg.KBEntries(ctx)
+				es, err := s.m.pg.KBSearchEntries(ctx, kb.Query{Q: task.Name + " " + task.Goal + " " + task.Description})
 				if err == nil {
 					out += kb.ReferenceBlock(kb.Rank(es, kb.Query{Q: task.Name + " " + task.Goal + " " + task.Description, Limit: 7}))
 				}
@@ -91,7 +95,14 @@ func (s *Server) initOperatorModules() {
 	}
 	for _, t := range s.operatorTools() {
 		schema, _ := json.Marshal(t.InputSchema())
-		agents, _ := json.Marshal([]string{"worker", "planner", "mainagent", "pentest", "kb_curator", "code_auditor", "reverser"})
+		roles := []string{"worker", "pentest"}
+		if strings.HasPrefix(t.Name(), "kb_") {
+			roles = []string{"worker", "planner", "mainagent", "pentest"}
+		}
+		if strings.HasPrefix(t.Name(), "c2_") {
+			roles = []string{"pentest"}
+		}
+		agents, _ := json.Marshal(roles)
 		if err := s.m.pg.SeedTool(t.Name(), t.Description(), schema, agents); err != nil {
 			log.Printf("[operator] seed %s: %v", t.Name(), err)
 		}
@@ -115,28 +126,12 @@ func (s *Server) operatorKBStatus(w http.ResponseWriter, r *http.Request) {
 	if s.pg(w) == nil {
 		return
 	}
-	es, err := s.m.pg.KBEntries(r.Context())
+	total, verified, negative, reused, err := s.m.pg.KBStats(r.Context())
 	if err != nil {
 		operatorError(w, err)
 		return
 	}
-	verified, negative, reused := 0, 0, int64(0)
-	kinds := map[string]bool{}
-	for _, e := range es {
-		if e.Verified {
-			verified++
-		}
-		if e.Polarity == "negative" {
-			negative++
-		}
-		reused += e.HitCount
-		kinds[e.Kind] = true
-	}
-	ks := []string{}
-	for k := range kinds {
-		ks = append(ks, k)
-	}
-	writeJSON(w, 200, map[string]any{"enabled": true, "total": len(es), "verified": verified, "negative": negative, "reused": reused, "categories": kb.Categories, "kinds": ks, "polarities": []string{"positive", "context", "negative"}, "dir": operatorKnowledgeDir(), "storage": "postgresql", "notice": "Verification flags are imported claims, not fresh validation."})
+	writeJSON(w, 200, map[string]any{"enabled": true, "total": total, "verified": verified, "negative": negative, "reused": reused, "categories": kb.Categories, "kinds": []string{"poc", "script", "template", "exp", "payload"}, "polarities": []string{"positive", "context", "negative"}, "dir": operatorKnowledgeDir(), "storage": "postgresql", "notice": "Verification labels are imported claims; retrieval does not verify applicability."})
 }
 func (s *Server) operatorKBSearch(w http.ResponseWriter, r *http.Request) {
 	if s.pg(w) == nil {
@@ -148,7 +143,7 @@ func (s *Server) operatorKBSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, _ := strconv.Atoi(v.Get("limit"))
-	es, err := s.m.pg.KBEntries(r.Context())
+	es, err := s.m.pg.KBSearchEntries(r.Context(), kb.Query{Q: v.Get("q"), Category: v.Get("category"), Kind: v.Get("kind"), Polarity: v.Get("polarity")})
 	if err != nil {
 		operatorError(w, err)
 		return
@@ -277,7 +272,7 @@ func (s *Server) operatorTools() []actool.CoreTool {
 			if err := json.Unmarshal(b, &q); err != nil {
 				return nil, err
 			}
-			es, err := s.m.pg.KBEntries(ctx)
+			es, err := s.m.pg.KBSearchEntries(ctx, q)
 			return kb.Rank(es, q), err
 		}),
 		makeTool("kb_get", "获取 POC 正文并记录一次复用；仅获取，不执行正文中的代码或指令。", obj(map[string]any{"code": str("条目标识")}, "code"), true, func(ctx context.Context, b json.RawMessage) (any, error) {
