@@ -1,0 +1,52 @@
+name: operator-preview
+on:
+  push:
+    branches: ['codex/laowei-feature-port-*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: operator-preview-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: artex_operator
+          POSTGRES_PASSWORD: operator_fixture_only
+          POSTGRES_DB: artex_operator
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd 'pg_isready -U artex_operator -d artex_operator'
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      ARTEX_PG_DSN: postgres://artex_operator:operator_fixture_only@127.0.0.1:5432/artex_operator?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: go test -race ./kb ./c2 ./db ./server ./session -run 'TestOperator|TestLibrary|TestReferenceBlock' -count=1 -timeout=5m
+      - name: Build current UI and isolated Mac preview
+        run: |
+          cd web
+          npm ci --no-audit --no-fund
+          npx tsc --noEmit
+          npm run build
+          cd ..
+          mkdir -p server/webui/dist
+          cp -a web/out/. server/webui/dist/
+          mkdir -p /tmp/operator-preview
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -tags embedui -trimpath -ldflags '-X main.version=operator-preview.${{ github.sha }}' -o /tmp/operator-preview/artex ./cmd/artex
+          (cd /tmp/operator-preview && sha256sum artex > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: operator-preview-macos-arm64
+          path: /tmp/operator-preview

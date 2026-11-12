@@ -100,7 +100,7 @@ func (s *Server) operatorTaskExperts(w http.ResponseWriter, r *http.Request) {
 	for _, d := range defs {
 		keys = append(keys, fmt.Sprint(d["key"]))
 	}
-	items, err := s.operatorSQLList(r.Context(), `SELECT to_jsonb(x) FROM (SELECT ca.conversation_id,ca.worker,MAX(ca.seq) AS last_seq FROM conversation_activities ca WHERE ca.task_id=$1 GROUP BY ca.conversation_id,ca.worker) x`, id)
+	items, err := s.operatorSQLList(r.Context(), `SELECT to_jsonb(x) FROM (SELECT c.id AS conversation_id,c.agent_key,c.title,c.updated_at FROM conversations c JOIN operator_module_settings o ON o.key ~ '^conversation[.](c2|webshell)[.][0-9]+$' AND split_part(o.key,'.',3)=c.id::text WHERE o.value->>'task_id'=$1::text ORDER BY c.id DESC LIMIT 100) x`, id)
 	if err != nil {
 		operatorError(w, err)
 		return

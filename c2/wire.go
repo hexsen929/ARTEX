@@ -152,8 +152,16 @@ func WriteFrame(w io.Writer, b []byte) error {
 	}
 	var h [4]byte
 	binary.BigEndian.PutUint32(h[:], uint32(len(b)))
-	if _, err := w.Write(h[:]); err != nil {
-		return err
+	header := h[:]
+	for len(header) > 0 {
+		n, err := w.Write(header)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		header = header[n:]
 	}
 	for len(b) > 0 {
 		n, err := w.Write(b)
