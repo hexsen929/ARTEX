@@ -44,7 +44,9 @@ jobs:
           mkdir -p server/webui/dist
           cp -a web/out/. server/webui/dist/
           mkdir -p /tmp/operator-preview
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -tags embedui -trimpath -ldflags '-X main.version=operator-preview.${{ github.sha }}' -o /tmp/operator-preview/artex ./cmd/artex
+          version="2.4.21-operator.${GITHUB_SHA:0:8}"
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -tags embedui -trimpath -ldflags "-X main.version=$version" -o /tmp/operator-preview/artex ./cmd/artex
+          printf '{"commit":"%s","version":"%s"}\n' "$GITHUB_SHA" "$version" > /tmp/operator-preview/build-metadata.json
           (cd /tmp/operator-preview && sha256sum artex > SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with:

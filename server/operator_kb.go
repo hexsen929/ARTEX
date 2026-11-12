@@ -340,7 +340,7 @@ func (s *Server) operatorTools() []actool.CoreTool {
 			}
 			e.CreatedBy = "agent"
 			e, created, err := s.saveOperatorPOC(ctx, e)
-			return map[string]any{"id": e.ID, "code": e.Code, "created": created}, err
+			return map[string]any{"id": e.ID, "code": e.Code, "created": created, "path": e.Path}, err
 		}),
 	}
 	tools = append(tools, s.operatorVPSTool())
