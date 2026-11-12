@@ -63,13 +63,14 @@ type ProbeInfo struct {
 
 // HTTPShell 是一句话马会话。零值不可用，经 Probe / NewHTTPShell 构造。
 type HTTPShell struct {
-	id       int64
-	kind     string // http_php / http_phpcmd / http_jsp / http_aspx
-	url      string
-	password string // 连接密码 = POST 字段名
-	lang     string // php / phpcmd / jsp / aspx
-	variant  string // php: eval | assert;phpcmd: cmd
-	platform string // linux | windows
+	httpOptions HTTPOptions
+	id          int64
+	kind        string // http_php / http_phpcmd / http_jsp / http_aspx
+	url         string
+	password    string // 连接密码 = POST 字段名
+	lang        string // php / phpcmd / jsp / aspx
+	variant     string // php: eval | assert;phpcmd: cmd
+	platform    string // linux | windows
 
 	mu    sync.RWMutex
 	funcs []string // php 可用执行函数（探测记忆，禁用变化时重探）
@@ -103,7 +104,7 @@ func DirectHTTPClient(timeout time.Duration) *http.Client {
 
 // NewHTTPShell 由已知参数构造会话（DB 恢复路径：马型已探测过，不重复探测）。
 // lang: php / phpcmd / jsp / aspx。password 为空默认 "cmd"。
-func NewHTTPShell(shellURL, password, lang string) (*HTTPShell, error) {
+func NewHTTPShell(shellURL, password, lang string, options ...HTTPOptions) (*HTTPShell, error) {
 	s := &HTTPShell{
 		url:      strings.TrimSpace(shellURL),
 		password: password,
@@ -127,6 +128,11 @@ func NewHTTPShell(shellURL, password, lang string) (*HTTPShell, error) {
 	}
 	if _, err := url.ParseRequestURI(s.url); err != nil {
 		return nil, opError("probe", "非法 WebShell URL: %v", err)
+	}
+	if len(options) > 0 {
+		if err := s.applyHTTPOptions(options[0]); err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -166,12 +172,13 @@ func (s *HTTPShell) Close(context.Context) error { return nil } // HTTP 会话�
 
 // Secret 是落库 secret JSON 的形态（连接参数，由 db 层加密存储）。
 type Secret struct {
-	URL      string   `json:"url"`
-	Password string   `json:"password"`
-	Lang     string   `json:"lang"`
-	Variant  string   `json:"variant,omitempty"`
-	Platform string   `json:"platform,omitempty"`
-	Funcs    []string `json:"funcs,omitempty"`
+	Options  *HTTPOptions `json:"http_options,omitempty"`
+	URL      string       `json:"url"`
+	Password string       `json:"password"`
+	Lang     string       `json:"lang"`
+	Variant  string       `json:"variant,omitempty"`
+	Platform string       `json:"platform,omitempty"`
+	Funcs    []string     `json:"funcs,omitempty"`
 	// disable_functions 指纹与绕过登记（复盘 R1：探测结果随 secret 落库，
 	// 比 sessions 表加列侵入小；恢复后免重探）。
 	DisableFunctions bool   `json:"disable_functions,omitempty"`
@@ -196,6 +203,10 @@ func (s *HTTPShell) Secret() Secret {
 		sec.Key = base64.StdEncoding.EncodeToString(s.enc.key)
 		sec.EncMode = s.enc.Mode()
 	}
+	if s.httpOptions != (HTTPOptions{}) {
+		o := s.httpOptions
+		sec.Options = &o
+	}
 	return sec
 }
 
@@ -211,6 +222,11 @@ func RestoreHTTPShell(id int64, sec Secret) (*HTTPShell, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if sec.Options != nil {
+		if err := s.applyHTTPOptions(*sec.Options); err != nil {
+			return nil, err
+		}
 	}
 	s.id = id
 	s.SetVariant(sec.Variant)
@@ -248,8 +264,29 @@ func (s *HTTPShell) postH(ctx context.Context, fields url.Values, timeout time.D
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url,
-		strings.NewReader(fields.Encode()))
+	method := strings.ToUpper(s.httpOptions.Method)
+	if method == "" {
+		method = http.MethodPost
+	}
+	requestURL := s.url
+	encoded := fields.Encode()
+	if method == http.MethodGet {
+		u, err := url.Parse(requestURL)
+		if err != nil {
+			return "", nil, err
+		}
+		q := u.Query()
+		for k, vs := range fields {
+			q.Del(k)
+			for _, v := range vs {
+				q.Add(k, v)
+			}
+		}
+		u.RawQuery = q.Encode()
+		requestURL = u.String()
+		encoded = ""
+	}
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, strings.NewReader(encoded))
 	if err != nil {
 		return "", nil, opError("http", "构造请求失败: %v", err)
 	}
@@ -264,11 +301,15 @@ func (s *HTTPShell) postH(ctx context.Context, fields url.Values, timeout time.D
 	if err != nil {
 		return "", nil, opError("http", "读取响应失败: %v", err)
 	}
-	if resp.StatusCode >= 400 {
-		return string(body), resp.Header, opError("http", "疑似被拦/马被删除：目标返回 HTTP %d: %s",
-			resp.StatusCode, excerpt(string(body), 200))
+	text, decodeErr := decodeShellBody(body, s.httpOptions.Encoding)
+	if decodeErr != nil {
+		return "", nil, decodeErr
 	}
-	return string(body), resp.Header, nil
+	if resp.StatusCode >= 400 {
+		return text, resp.Header, opError("http", "疑似被拦/马被删除：目标返回 HTTP %d: %s",
+			resp.StatusCode, excerpt(text, 200))
+	}
+	return text, resp.Header, nil
 }
 
 // ---------------- 哨兵 ----------------
@@ -315,12 +356,12 @@ func b64e(data []byte) string { return base64.StdEncoding.EncodeToString(data) }
 // Probe 探测 url 上的一句话马：发无害探针（echo 哨兵）,按回显判定马型与可用
 // 执行函数。lang 为 "auto" 时按「eval 探针与 cmd 探针分开打，谁的哨兵对就判谁」
 // 的顺序判型（见 probeAuto)。失败返回带探针回显摘要的错误，不伪造成功。
-func Probe(ctx context.Context, shellURL, password, lang string) (*HTTPShell, ProbeInfo, error) {
+func Probe(ctx context.Context, shellURL, password, lang string, options ...HTTPOptions) (*HTTPShell, ProbeInfo, error) {
 	lang = strings.ToLower(strings.TrimSpace(lang))
 	if lang == "" || lang == "auto" {
-		return probeAuto(ctx, shellURL, password)
+		return probeAuto(ctx, shellURL, password, options...)
 	}
-	s, err := NewHTTPShell(shellURL, password, lang)
+	s, err := NewHTTPShell(shellURL, password, lang, options...)
 	if err != nil {
 		return nil, ProbeInfo{}, err
 	}
@@ -340,29 +381,29 @@ func Probe(ctx context.Context, shellURL, password, lang string) (*HTTPShell, Pr
 //	  X-Powered-By 含 PHP → phpcmd;JSESSIONID/容器签名 → jsp;
 //	  无信号默认 phpcmd（加固 PHP 常剥头，而两者执行通道同构，误判代价对称）;
 //	③ ASPX 探针——cmd.exe 专属（未定义变量展开为空）。
-func probeAuto(ctx context.Context, shellURL, password string) (*HTTPShell, ProbeInfo, error) {
+func probeAuto(ctx context.Context, shellURL, password string, options ...HTTPOptions) (*HTTPShell, ProbeInfo, error) {
 	var errs []string
-	if s, err := NewHTTPShell(shellURL, password, "php"); err == nil {
+	if s, err := NewHTTPShell(shellURL, password, "php", options...); err == nil {
 		if info, perr := s.probe(ctx); perr == nil {
 			return s, info, nil
 		} else {
 			errs = append(errs, fmt.Sprintf("[php-eval] %v", perr))
 		}
 	}
-	hdr, err := probeCmdEcho(ctx, shellURL, password, "linux")
+	hdr, err := probeCmdEcho(ctx, shellURL, password, "linux", options...)
 	if err == nil {
 		lang := "phpcmd"
 		if !phpServerHint(hdr) && javaContainerHint(hdr) {
 			lang = "jsp"
 		}
-		s, cerr := NewHTTPShell(shellURL, password, lang)
+		s, cerr := NewHTTPShell(shellURL, password, lang, options...)
 		if cerr != nil {
 			return nil, ProbeInfo{}, cerr
 		}
 		return s, ProbeInfo{Kind: s.kind, Lang: lang, Variant: s.variant, Platform: "linux"}, nil
 	}
 	errs = append(errs, fmt.Sprintf("[sh-cmd] %v", err))
-	if s, err := NewHTTPShell(shellURL, password, "aspx"); err == nil {
+	if s, err := NewHTTPShell(shellURL, password, "aspx", options...); err == nil {
 		if info, perr := s.probe(ctx); perr == nil {
 			return s, info, nil
 		} else {
@@ -373,8 +414,8 @@ func probeAuto(ctx context.Context, shellURL, password string) (*HTTPShell, Prob
 }
 
 // probeCmdEcho 发一次 sh 命令回显探针，命中返回响应头（供 phpcmd/jsp 判型）。
-func probeCmdEcho(ctx context.Context, shellURL, password, platform string) (http.Header, error) {
-	s, err := NewHTTPShell(shellURL, password, "phpcmd")
+func probeCmdEcho(ctx context.Context, shellURL, password, platform string, options ...HTTPOptions) (http.Header, error) {
+	s, err := NewHTTPShell(shellURL, password, "phpcmd", options...)
 	if err != nil {
 		return nil, err
 	}

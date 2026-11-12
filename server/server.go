@@ -44,6 +44,7 @@ var BuildVersion = "dev"
 // Server exposes the ARTEX backend over a JSON HTTP API for the shadcn/ui
 // frontend.
 type Server struct {
+	c2Ops      *c2OperatorState
 	scheduleMu sync.Mutex
 	m          *Manager
 	engine     *Engine
@@ -390,6 +391,7 @@ func (s *Server) Close() {
 	if s == nil {
 		return
 	}
+	s.closeOperatorModules()
 	s.stopTaskConversationRuns()
 	if s.proxyCancel != nil {
 		s.proxyCancel()
