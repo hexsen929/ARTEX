@@ -62,6 +62,9 @@ func (s *Server) operatorConversationContext(ctx context.Context, c *db.Conversa
 			}
 		}
 		bound, _, err := s.bindConversationTask(ctx, b["task_id"], c.AgentKey, true)
+		if c.AgentKey == "kb_curator" {
+			return bound, []int64{b["task_id"]}, true, err
+		}
 		return context.WithValue(bound, operatorTaskChatKey{}, b["task_id"]), []int64{b["task_id"]}, true, err
 	}
 	return ctx, nil, false, nil
