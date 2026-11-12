@@ -51,9 +51,9 @@ func (d *DB) KBGet(ctx context.Context, code string, count bool, usedOn string) 
 	var c, m time.Time
 	var row *sql.Row
 	if count {
-		row = d.QueryRowContext(ctx, `UPDATE kb_entries SET hit_count=hit_count+1,used_on=$2,updated_at=now() WHERE code=$1 RETURNING id,body,polarity,hit_count,used_on,created_at,updated_at`, code, usedOn)
+		row = d.QueryRowContext(ctx, `UPDATE kb_entries SET hit_count=hit_count+1,used_on=$2,updated_at=now() WHERE code=$1 AND (source_finding_id IS NULL OR EXISTS(SELECT 1 FROM findings f WHERE f.id=source_finding_id AND (body->>'verified'!='true' OR f.verification_status='verified'))) RETURNING id,body,polarity,hit_count,used_on,created_at,updated_at`, code, usedOn)
 	} else {
-		row = d.QueryRowContext(ctx, `SELECT id,body,polarity,hit_count,used_on,created_at,updated_at FROM kb_entries WHERE code=$1`, code)
+		row = d.QueryRowContext(ctx, `SELECT id,body,polarity,hit_count,used_on,created_at,updated_at FROM kb_entries WHERE code=$1 AND (source_finding_id IS NULL OR EXISTS(SELECT 1 FROM findings f WHERE f.id=source_finding_id AND (body->>'verified'!='true' OR f.verification_status='verified')))`, code)
 	}
 	var id, h int64
 	var p, u string
@@ -206,7 +206,7 @@ func (d *DB) KBSearchEntries(ctx context.Context, q kb.Query) ([]kb.Entry, error
 		}
 		score = strings.Join(parts, "+")
 	}
-	where := []string{"TRUE"}
+	where := []string{"(source_finding_id IS NULL OR EXISTS(SELECT 1 FROM findings f WHERE f.id=source_finding_id AND (body->>'verified'!='true' OR f.verification_status='verified')))"}
 	for _, f := range []struct{ field, value string }{{"category", q.Category}, {"kind", q.Kind}, {"polarity", q.Polarity}} {
 		if f.value != "" {
 			args = append(args, f.value)
@@ -252,4 +252,20 @@ func (d *DB) KBStats(ctx context.Context) (int, int, int, int64, error) {
 	var reused int64
 	err := d.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER (WHERE body->>'verified'='true'),count(*) FILTER (WHERE polarity='negative'),COALESCE(sum(hit_count),0) FROM kb_entries`).Scan(&total, &verified, &negative, &reused)
 	return total, verified, negative, reused, err
+}
+
+// Automatic capture never overwrites a human-edited entry with the same code.
+func (d *DB) KBInsertIfAbsent(ctx context.Context, e kb.Entry) (kb.Entry, bool, error) {
+	if err := e.Validate(); err != nil {
+		return e, false, err
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		return e, false, err
+	}
+	err = d.QueryRowContext(ctx, `INSERT INTO kb_entries(code,body,polarity,source_finding_id) VALUES($1,$2::jsonb,$3,$4) ON CONFLICT(code) DO NOTHING RETURNING id`, e.Code, b, e.Polarity, nilIfZero(e.SourceFindingID)).Scan(&e.ID)
+	if err == sql.ErrNoRows {
+		return e, false, nil
+	}
+	return e, err == nil, err
 }

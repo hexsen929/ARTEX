@@ -63,18 +63,18 @@ func (s *Server) runOperatorKBWorker(ctx context.Context) {
 	}
 }
 func (s *Server) backfillOperatorKB(ctx context.Context, after time.Time, limit int) error {
-	rows, err := s.m.pg.QueryContext(ctx, `SELECT f.id,COALESCE(f.task_id,0),f.name,f.vulnclass,f.summary,f.evidence,f.report FROM findings f WHERE f.verification_status='verified' AND f.created_at >= $1 AND NOT EXISTS(SELECT 1 FROM kb_entries k WHERE k.source_finding_id=f.id) ORDER BY f.id LIMIT $2`, after, limit)
+	rows, err := s.m.pg.QueryContext(ctx, `SELECT f.id,COALESCE(f.task_id,0),f.name,f.vulnclass,f.summary,f.evidence,f.report,md5(jsonb_build_array(f.name,f.summary,f.evidence,f.report,f.verification_status)::text) FROM findings f WHERE f.verification_status='verified' AND f.created_at >= $1 AND NOT EXISTS(SELECT 1 FROM kb_entries k WHERE k.source_finding_id=f.id) AND NOT EXISTS(SELECT 1 FROM operator_module_settings o WHERE o.key='kb.review.'||f.id::text AND o.value->>'fingerprint'=md5(jsonb_build_array(f.name,f.summary,f.evidence,f.report,f.verification_status)::text)) ORDER BY f.id LIMIT $2`, after, limit)
 	if err != nil {
 		return err
 	}
 	type item struct {
-		id, task                                  int64
-		name, category, summary, evidence, report string
+		id, task                                               int64
+		name, category, summary, evidence, report, fingerprint string
 	}
 	items := []item{}
 	for rows.Next() {
 		var v item
-		if err = rows.Scan(&v.id, &v.task, &v.name, &v.category, &v.summary, &v.evidence, &v.report); err != nil {
+		if err = rows.Scan(&v.id, &v.task, &v.name, &v.category, &v.summary, &v.evidence, &v.report, &v.fingerprint); err != nil {
 			rows.Close()
 			return err
 		}
@@ -86,14 +86,19 @@ func (s *Server) backfillOperatorKB(ctx context.Context, after time.Time, limit 
 		return err
 	}
 	for _, v := range items {
+		checkpoint := func(status string) {
+			_ = s.m.pg.SaveOperatorSetting(ctx, fmt.Sprintf("kb.review.%d", v.id), map[string]string{"fingerprint": v.fingerprint, "status": status})
+		}
 		body := strings.TrimSpace(v.report)
 		if body == "" {
 			body = v.evidence
 		}
 		if body == "" {
+			checkpoint("no_reusable_content")
 			continue
 		}
 		if _, err = memory.SanitizeSource(v.name + "\n" + v.summary + "\n" + body); err != nil {
+			checkpoint("rejected_source")
 			continue
 		}
 		cat := v.category
@@ -118,11 +123,13 @@ func (s *Server) backfillOperatorKB(ctx context.Context, after time.Time, limit 
 			e.VerifiedNote = e.VerifiedNote[:8192]
 		}
 		if err = e.Validate(); err != nil {
+			checkpoint("invalid_entry")
 			continue
 		}
-		if _, _, err = s.m.pg.KBPut(ctx, e); err != nil {
+		if _, _, err = s.m.pg.KBInsertIfAbsent(ctx, e); err != nil {
 			return err
 		}
+		checkpoint("processed")
 	}
 	return nil
 }

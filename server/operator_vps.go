@@ -10,8 +10,10 @@ import (
 	"github.com/Autumn-27/artex/agent"
 	actool "github.com/Autumn-27/norma/tool"
 	"golang.org/x/crypto/ssh"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +57,7 @@ func (s *Server) registerVPSRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/vps/{id}", s.operatorVPSDelete)
 	mux.HandleFunc("POST /api/vps/{id}/check", s.operatorVPSCheck)
 	mux.HandleFunc("POST /api/vps/{id}/exec", s.operatorVPSExec)
+	mux.HandleFunc("POST /api/vps/{id}/apply", s.operatorVPSApply)
 }
 func (s *Server) operatorVPSList(w http.ResponseWriter, r *http.Request) {
 	if s.pg(w) == nil {
@@ -371,4 +374,64 @@ func (s *Server) operatorVPSTool() actool.CoreTool {
 		raw, _ := json.Marshal(out)
 		return actool.Text(string(raw)), nil
 	}})
+}
+
+// Route changes are delegated to the current settings implementation, retaining
+// its validation, environment locks, proxy health supervisor and agent rebuilds.
+func (s *Server) operatorVPSApply(w http.ResponseWriter, r *http.Request) {
+	if s.pg(w) == nil {
+		return
+	}
+	id, err := pathID(r, "id")
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	var req struct {
+		Callback bool `json:"callback"`
+		Egress   bool `json:"egress"`
+	}
+	if !operatorDecode(w, r, &req) {
+		return
+	}
+	v, err := scanOperatorVPS(s.m.pg.QueryRowContext(r.Context(), "SELECT "+vpsColumns+" FROM vps_hosts WHERE id=$1", id))
+	if err != nil {
+		operatorError(w, err)
+		return
+	}
+	if !v.Enabled || !req.Callback && !req.Egress {
+		writeErr(w, 400, "select an enabled VPS and an explicit action")
+		return
+	}
+	body := map[string]any{}
+	if req.Callback {
+		body["callback_addr"] = v.Host
+	}
+	if req.Egress {
+		if v.Kind != "socks5" {
+			writeErr(w, 400, "egress requires a socks5 endpoint, not an SSH port")
+			return
+		}
+		u := url.URL{Scheme: "socks5", Host: net.JoinHostPort(v.Host, strconv.Itoa(v.Port))}
+		if v.SocksUser != "" {
+			password := ""
+			if v.socksPassword != "" {
+				b, e := s.m.pg.OperatorOpen(s.jwtKey, v.socksPassword)
+				if e != nil {
+					operatorError(w, e)
+					return
+				}
+				password = string(b)
+			}
+			u.User = url.UserPassword(v.SocksUser, password)
+		}
+		body["global_proxy"] = u.String()
+		body["global_proxy_enabled"] = true
+	}
+	b, _ := json.Marshal(body)
+	copy := r.Clone(r.Context())
+	copy.Method = "PUT"
+	copy.Body = io.NopCloser(bytes.NewReader(b))
+	copy.ContentLength = int64(len(b))
+	s.putSettings(w, copy)
 }
