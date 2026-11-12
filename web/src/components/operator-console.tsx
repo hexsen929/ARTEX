@@ -758,7 +758,7 @@ const shellFields: Field[] = [
   { key: "cmd_param", label: "命令参数名（覆盖默认）" },
   { key: "encoding", label: "响应编码", options: ["auto", "utf-8", "gbk", "gb18030"] },
   { key: "target_os", label: "操作系统", options: ["", "linux", "windows"] },
-  { key: "task_id", label: "所属任务 ID（用于智能体控制）", type: "number" },
+  { key: "task_id", label: "绑定任务 ID（不移除创建者原有权限）", type: "number" },
   { key: "probe", label: "保存前实际探测", type: "checkbox" },
   { key: "remark", label: "备注", type: "textarea" },
 ];
@@ -825,7 +825,18 @@ function Webshells() {
                     disabled={action.busy}
                     onClick={() =>
                       action.run(async () => {
-                        const v = await api.save<{ conversation_id: number }>(`/webshell/${edit.id}/chat`, {});
+                        const selected =
+                          Number(edit.created_by_task) ||
+                          Number(
+                            window.prompt(
+                              "选择要授权控制此会话的任务 ID（将记录显式授权）",
+                              String(edit.task_id ?? ""),
+                            ),
+                          );
+                        if (!selected) return;
+                        const v = await api.save<{ conversation_id: number }>(`/webshell/${edit.id}/chat`, {
+                          task_id: selected,
+                        });
                         window.location.href = `/chat?c=${v.conversation_id}`;
                       }, "")
                     }

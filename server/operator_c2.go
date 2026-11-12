@@ -769,7 +769,8 @@ func (s *Server) operatorC2Chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		TaskID int64 `json:"task_id"`
+		TaskID int64  `json:"task_id"`
+		Agent  string `json:"agent_key"`
 	}
 	if !operatorDecode(w, r, &req) {
 		return
@@ -787,7 +788,14 @@ func (s *Server) operatorC2Chat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "session unavailable")
 		return
 	}
-	c, e := s.m.pg.CreateConversation("pentest", fmt.Sprintf("C2 #%d", id), nil)
+	if req.Agent == "" {
+		req.Agent = "pentest"
+	}
+	if !operatorExecutionRole(req.Agent) {
+		writeErr(w, 400, "execution role required")
+		return
+	}
+	c, e := s.m.pg.CreateConversation(req.Agent, fmt.Sprintf("C2 #%d", id), nil)
 	if e != nil {
 		operatorError(w, e)
 		return

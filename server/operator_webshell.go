@@ -166,6 +166,12 @@ func (s *Server) operatorWebshellSave(w http.ResponseWriter, r *http.Request) {
 		operatorError(w, err)
 		return
 	}
+	if old != nil && req.TaskID > 0 && old.CreatedByTask != req.TaskID {
+		if err := s.sessStore.BindTask(ctx, id, req.TaskID); err != nil {
+			operatorError(w, err)
+			return
+		}
+	}
 	sh.SetID(id)
 	s.sessReg.Add(sh)
 	s.auditIntranet(r, "webshell save id=%d probe=%v", id, probe)
@@ -314,22 +320,53 @@ func (s *Server) operatorWebshellChat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	var req struct {
+		TaskID int64  `json:"task_id"`
+		Agent  string `json:"agent_key"`
+	}
+	if !operatorDecode(w, r, &req) {
+		return
+	}
 	rec, err := s.sessStore.Get(r.Context(), id)
 	if err != nil {
 		operatorError(w, err)
 		return
 	}
-	if rec.CreatedByTask <= 0 {
-		writeErr(w, 409, "bind this session to a task before starting agent control")
+	if req.TaskID == 0 {
+		req.TaskID = rec.CreatedByTask
+	}
+	if req.TaskID <= 0 {
+		writeErr(w, 409, "select an explicit task for agent control")
 		return
 	}
-	c, err := s.m.pg.CreateConversation("pentest", fmt.Sprintf("WebShell #%d", id), nil)
+	if _, ok := s.m.Task(strconv.FormatInt(req.TaskID, 10)); !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	if req.Agent == "" {
+		req.Agent = "pentest"
+	}
+	if !operatorExecutionRole(req.Agent) {
+		writeErr(w, 400, "execution role required")
+		return
+	}
+	if req.TaskID != rec.CreatedByTask {
+		if err = s.sessStore.BindTask(r.Context(), id, req.TaskID); err != nil {
+			operatorError(w, err)
+			return
+		}
+	}
+	c, err := s.m.pg.CreateConversation(req.Agent, fmt.Sprintf("WebShell #%d", id), nil)
 	if err != nil {
 		operatorError(w, err)
 		return
 	}
-	_ = s.m.pg.SaveOperatorSetting(r.Context(), fmt.Sprintf("conversation.webshell.%d", c.ID), map[string]int64{"session_id": id, "task_id": rec.CreatedByTask})
-	writeJSON(w, 200, map[string]any{"conversation_id": c.ID, "session_id": id, "task_id": rec.CreatedByTask})
+	if err = s.m.pg.SaveOperatorSetting(r.Context(), fmt.Sprintf("conversation.webshell.%d", c.ID), map[string]int64{"session_id": id, "task_id": req.TaskID}); err != nil {
+		operatorError(w, err)
+		return
+	}
+	s.auditIntranet(r, "webshell conversation session=%d task=%d agent=%s", id, req.TaskID, req.Agent)
+	writeJSON(w, 200, map[string]any{"conversation_id": c.ID, "session_id": id, "task_id": req.TaskID})
 }
 func (s *Server) operatorWebshellAsset(w http.ResponseWriter, r *http.Request) {
 	if !s.intranetSessionsReady(w) {

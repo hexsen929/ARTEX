@@ -40,7 +40,7 @@ func (s *Server) operatorConversationContext(ctx context.Context, c *db.Conversa
 		if err != nil {
 			return ctx, nil, true, conversationAdmissionError()
 		}
-		if b["task_id"] <= 0 || (kind != "expert" && b["session_id"] <= 0) || (kind != "expert" && c.AgentKey != "pentest") {
+		if b["task_id"] <= 0 || (kind != "expert" && b["session_id"] <= 0) || (kind != "expert" && !operatorExecutionRole(c.AgentKey)) {
 			return ctx, nil, true, conversationAdmissionError()
 		}
 		parent, err := s.m.pg.GetTask(b["task_id"])

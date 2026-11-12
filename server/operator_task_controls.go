@@ -175,3 +175,7 @@ func (s *Server) operatorTaskSteer(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "delivered": delivered, "skipped": skipped})
 }
+
+func operatorExecutionRole(key string) bool {
+	return key == "pentest" || (key != "kb_curator" && isOperatorExpert(key))
+}
