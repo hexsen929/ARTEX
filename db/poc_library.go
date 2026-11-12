@@ -97,6 +97,23 @@ func (d *DB) ImportLegacyKB(ctx context.Context, dir string) (int, error) {
 	if !fi.Mode().IsRegular() || fi.Size() > 256<<20 {
 		return 0, fmt.Errorf("knowledge.db must be a regular database under 256 MiB")
 	}
+	metadata := map[string]struct {
+		Polarity string `json:"polarity"`
+		Category string `json:"category"`
+	}{}
+	mp := filepath.Join(dir, "entry-meta.json")
+	if fi, err := os.Lstat(mp); err == nil {
+		if !fi.Mode().IsRegular() || fi.Size() > 1<<20 {
+			return 0, fmt.Errorf("invalid entry metadata file")
+		}
+		b, err := os.ReadFile(mp)
+		if err != nil {
+			return 0, err
+		}
+		if err = json.Unmarshal(b, &metadata); err != nil {
+			return 0, fmt.Errorf("invalid entry metadata JSON")
+		}
+	}
 	u := url.URL{Scheme: "file", Path: p}
 	q := u.Query()
 	q.Set("mode", "ro")
@@ -138,6 +155,14 @@ func (d *DB) ImportLegacyKB(ctx context.Context, dir string) (int, error) {
 		f := func(i int) string { return vals[i].String }
 		e := kb.Entry{Code: f(0), Title: f(1), Kind: f(2), Category: f(3), CVE: f(4), Component: f(5), Versions: f(6), Severity: f(7), Language: f(8), Source: f(9), SourceURL: f(10), Description: f(11), Usage: f(12), Content: f(13), Path: portablePOCPath(dir, f(14)), Verified: f(15) == "1", VerifiedNote: f(16), UsedOn: f(18), EngagementID: f(19), EngagementName: f(20), AssetTarget: f(21), FoundByAgent: f(22), Tags: f(23), CreatedBy: f(24)}
 		e.Polarity = kb.GuessPolarity(e)
+		if meta, ok := metadata[e.Code]; ok {
+			if meta.Polarity == "positive" || meta.Polarity == "context" || meta.Polarity == "negative" {
+				e.Polarity = meta.Polarity
+			}
+			if meta.Category != "" {
+				e.Category = meta.Category
+			}
+		}
 		b, er := json.Marshal(e)
 		if er != nil {
 			return 0, er

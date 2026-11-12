@@ -335,28 +335,8 @@ func (s *Server) startOperatorC2(id int64) error {
 	_, err = s.m.pg.Exec(`UPDATE c2_listeners SET status='running',started_at=now(),last_error='',updated_at=now() WHERE id=$1`, id)
 	return err
 }
-func (s *Server) stopOperatorC2(id int64) {
-	if s.c2Ops == nil {
-		return
-	}
-	s.c2Ops.mu.Lock()
-	run := s.c2Ops.running[id]
-	delete(s.c2Ops.running, id)
-	if run != nil {
-		run.cancel()
-		if run.server != nil {
-			run.server.Close()
-		}
-		run.listener.Close()
-		for c := range run.conns {
-			c.Close()
-		}
-	}
-	s.c2Ops.mu.Unlock()
-	if s.m != nil && s.m.pg != nil {
-		_, _ = s.m.pg.Exec(`UPDATE c2_listeners SET status='stopped',updated_at=now() WHERE id=$1`, id)
-	}
-}
+func (s *Server) stopOperatorC2(id int64) { _ = s.stopOperatorC2Runtime(id, true) }
+
 func (s *Server) operatorC2Start(w http.ResponseWriter, r *http.Request) {
 	if s.pg(w) == nil {
 		return
@@ -380,7 +360,10 @@ func (s *Server) operatorC2Stop(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, e.Error())
 		return
 	}
-	s.stopOperatorC2(id)
+	if err := s.stopOperatorC2Runtime(id, true); err != nil {
+		operatorError(w, err)
+		return
+	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 func (s *Server) operatorC2DeleteListener(w http.ResponseWriter, r *http.Request) {
@@ -502,7 +485,8 @@ func (s *Server) handleOperatorC2(ctx context.Context, l c2Listener, raw []byte,
 				}
 				_ = json.Unmarshal(payload, &p)
 				if err = s.c2SaveDownload(ctx, sid, r.ID, p.Path, r.Output); err != nil {
-					return nil, err
+					_, _ = s.m.pg.ExecContext(ctx, "UPDATE c2_tasks SET status='failed',error=$2 WHERE id=$1", r.ID, "download result invalid or could not be stored")
+					s.c2Event(ctx, l.ID, sid, r.ID, "task", "download storage failed")
 				}
 			}
 			s.c2Event(ctx, l.ID, sid, r.ID, "task", "completed "+status)
@@ -631,6 +615,12 @@ func (s *Server) queueOperatorC2Task(ctx context.Context, sid int64, b json.RawM
 		}
 		if len(v.Data) > 3<<20 {
 			return 0, "", fmt.Errorf("file too large")
+		}
+		if v.Type == "upload" {
+			raw, e := base64.StdEncoding.DecodeString(v.Data)
+			if e != nil || len(raw) > 2<<20 {
+				return 0, "", fmt.Errorf("upload must be valid base64, at most 2 MiB")
+			}
 		}
 	case "exit":
 	default:
@@ -871,6 +861,53 @@ func (s *Server) checkC2TaskBinding(ctx context.Context, sid int64) error {
 	conv := strings.TrimPrefix(ri.SessionID, "conv-")
 	if err := s.m.pg.OperatorSetting(ctx, "conversation.c2."+conv, &bound); err != nil || bound["task_id"] != ri.TaskID || bound["session_id"] != sid {
 		return fmt.Errorf("C2 session is not explicitly bound to this task conversation")
+	}
+	return nil
+}
+
+func (s *Server) restoreOperatorC2() {
+	rows, err := s.m.pg.QueryContext(s.c2Ops.ctx, "SELECT id FROM c2_listeners WHERE status='running' ORDER BY id LIMIT 64")
+	if err != nil {
+		return
+	}
+	ids := []int64{}
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		if s.c2Ops.ctx.Err() != nil {
+			return
+		}
+		if err := s.startOperatorC2(id); err != nil {
+			s.c2Event(s.c2Ops.ctx, id, 0, 0, "listener", "restart failed")
+		}
+	}
+}
+func (s *Server) stopOperatorC2Runtime(id int64, persist bool) error {
+	if s.c2Ops == nil {
+		return nil
+	}
+	s.c2Ops.mu.Lock()
+	run := s.c2Ops.running[id]
+	delete(s.c2Ops.running, id)
+	if run != nil {
+		run.cancel()
+		if run.server != nil {
+			run.server.Close()
+		}
+		run.listener.Close()
+		for c := range run.conns {
+			c.Close()
+		}
+	}
+	s.c2Ops.mu.Unlock()
+	if persist && s.m != nil && s.m.pg != nil {
+		_, err := s.m.pg.Exec(`UPDATE c2_listeners SET status='stopped',updated_at=now() WHERE id=$1`, id)
+		return err
 	}
 	return nil
 }

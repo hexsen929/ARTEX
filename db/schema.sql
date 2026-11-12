@@ -2696,3 +2696,18 @@ CREATE TABLE IF NOT EXISTS kb_entries (
 CREATE TABLE IF NOT EXISTS operator_module_settings (
  key TEXT PRIMARY KEY, value JSONB NOT NULL DEFAULT '{}', updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+DO $operator_relations$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='operator_c2_listener_owner') THEN
+  ALTER TABLE c2_sessions ADD CONSTRAINT operator_c2_listener_owner FOREIGN KEY(listener_id) REFERENCES c2_listeners(id) ON DELETE CASCADE;
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='operator_c2_task_owner') THEN
+  ALTER TABLE c2_tasks ADD CONSTRAINT operator_c2_task_owner FOREIGN KEY(session_id) REFERENCES c2_sessions(id) ON DELETE CASCADE;
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='operator_c2_file_owner') THEN
+  ALTER TABLE c2_files ADD CONSTRAINT operator_c2_file_owner FOREIGN KEY(session_id) REFERENCES c2_sessions(id) ON DELETE CASCADE;
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='operator_webshell_history_owner') THEN
+  ALTER TABLE webshell_commands ADD CONSTRAINT operator_webshell_history_owner FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE;
+ END IF;
+END $operator_relations$;

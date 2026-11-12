@@ -54,6 +54,7 @@ func (s *Server) runOperatorKBWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			_, _ = s.m.pg.ExecContext(ctx, `UPDATE c2_sessions SET status='dead' WHERE status='active' AND last_check_in < now() - GREATEST(30,sleep_seconds*3)*interval '1 second'`)
 			cfg := s.operatorKBConfig(ctx)
 			if !cfg.Backfill || cfg.After.IsZero() {
 				continue

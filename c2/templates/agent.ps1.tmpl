@@ -72,6 +72,7 @@ while($true){
      elseif($t.type -eq 'upload'){
       [IO.File]::WriteAllBytes($t.path,[Convert]::FromBase64String($t.data));$out='uploaded'
      }elseif($t.type -eq 'download'){
+      if((Get-Item -LiteralPath $t.path).Length -gt 2097152){throw 'download exceeds 2 MiB'}
       $out=[Convert]::ToBase64String([IO.File]::ReadAllBytes($t.path))
      }
     }catch{$er=$_.Exception.Message}

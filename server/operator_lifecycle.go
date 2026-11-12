@@ -23,7 +23,7 @@ func (s *Server) closeOperatorModules() {
 	}
 	s.c2Ops.mu.Unlock()
 	for _, id := range ids {
-		s.stopOperatorC2(id)
+		_ = s.stopOperatorC2Runtime(id, false)
 	}
 	s.c2Ops.wg.Wait()
 }
