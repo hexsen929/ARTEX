@@ -9,6 +9,7 @@ import io
 import json
 import os
 import platform
+import plistlib
 import shutil
 import stat
 import subprocess
@@ -116,6 +117,13 @@ exec "$HERE/javafx-java-home/bin/java" --module-path "$HERE/javafx/lib" --add-mo
     run('npm','install','--no-audit','--no-fund',cwd=electron)
     dist=electron/'node_modules/electron/dist/Electron.app';app=root/'AntSword.app';shutil.copytree(dist,app,symlinks=True)
     resources=app/'Contents/Resources';shutil.copytree(ant,resources/'antsword',symlinks=True)
+    for plist in [app/'Contents/Info.plist',*list((app/'Contents/Frameworks').glob('*.app/Contents/Info.plist'))]:
+        info=plistlib.loads(plist.read_bytes())
+        old_id=info.get('CFBundleIdentifier','')
+        info['CFBundleIdentifier']=old_id.replace('com.github.Electron','org.artex.tools.antsword')
+        if plist==app/'Contents/Info.plist':
+            info['CFBundleName']='ARTEX AntSword';info['CFBundleDisplayName']='ARTEX AntSword'
+        plist.write_bytes(plistlib.dumps(info))
     core=resources/'antsword/app.js';text=core.read_text();old="protocol.registerStandardSchemes(['ant-views', 'ant-static', 'ant-src']);"
     if old not in text:raise ValueError('upstream protocol patch point drifted')
     text=text.replace(old,"protocol.registerSchemesAsPrivileged(['ant-views','ant-static','ant-src'].map(scheme=>({scheme,privileges:{standard:true,secure:true,supportFetchAPI:true,corsEnabled:true}})));")
@@ -123,6 +131,9 @@ exec "$HERE/javafx-java-home/bin/java" --module-path "$HERE/javafx/lib" --add-mo
     if point not in text:raise ValueError('upstream window patch point drifted')
     text=text.replace(point,point+'\n      contextIsolation: false,\n      enableRemoteModule: true,',1)
     core.write_text(text)
+    logger=resources/'antsword/modules/logger.js';text=logger.read_text();old='\n      arguments\n'
+    if text.count(old)!=4:raise ValueError('upstream IPC logger compatibility patch drifted')
+    logger.write_text(text.replace(old,'\n      Array.from(arguments)\n'))
     for entry,old in [('load.entry.js',"path.join(remote.process.env.AS_WORKDIR, 'source')"),('app.entry.js',"path.join(remote.process.env.AS_WORKDIR, 'source/core')")]:
         path=resources/'antsword/source'/entry;text=path.read_text()
         if text.count(old)!=1:raise ValueError('upstream core/data path split drifted')
@@ -137,7 +148,7 @@ if(process.env.ARTEX_TOOL_SMOKE==='1'){
   let failed=false;process.on('uncaughtException',e=>{console.error(e.stack);app.exit(2)});
   app.on('browser-window-created',(_,window)=>{
     window.webContents.on('console-message',(_,level,message)=>{if(level>=3){console.error(message);failed=true}});
-    window.webContents.once('did-finish-load',()=>{const timer=setInterval(async()=>{try{const ready=await window.webContents.executeJavaScript('!!(window.antSword && antSword.package && antSword.module.shellmanager && antSword.core && Object.keys(antSword.core).length)');if(ready){clearInterval(timer);console.log('ARTEX_ANTSWORD_READY');app.exit(failed?3:0)}}catch(e){console.error(e.stack);app.exit(3)}},500)});
+    window.webContents.once('did-finish-load',()=>{const timer=setInterval(async()=>{try{const ready=await window.webContents.executeJavaScript('!!(window.antSword && antSword.package && antSword.module.shellmanager && antSword.core && Object.keys(antSword.core).length)');if(ready){clearInterval(timer);const database=await window.webContents.executeJavaScript('Array.isArray(antSword.ipcRenderer.sendSync("shell-find",{}))');if(!database){app.exit(5);return}console.log('ARTEX_ANTSWORD_DATABASE_READY');console.log('ARTEX_ANTSWORD_READY');app.exit(failed?3:0)}}catch(e){console.error(e.stack);app.exit(3)}},500)});
   });setTimeout(()=>app.exit(4),45000);
 }
 require('../antsword/app.js');

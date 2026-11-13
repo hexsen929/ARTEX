@@ -252,7 +252,11 @@ exec "$JAVA" "$@"
     write(root, "toolkit/java", java, 0o700)
     for name, jar in [("behinder", "Behinder_v4.1/Behinder.jar"), ("godzilla-cli", "Godzilla/godzilla.jar")]:
         script = ('#!/bin/sh\nset -eu\nHERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
-                  'exec "$HERE/java" -jar "$HERE/' + jar + '" "$@"\n').encode()
+                  'ROOT=$(CDPATH= cd -- "$HERE/../.." && pwd)\n'
+                  'STATE="${ARTEX_GODZILLA_DATA:-${ARTEX_DATA_DIR:-$ROOT/data}/tools/runtime/godzilla}"\n'
+                  'HOME="$STATE/home"; TMPDIR="$STATE/tmp"; export HOME TMPDIR\n'
+                  'mkdir -p "$HOME" "$TMPDIR"\ncd "$STATE"\n'
+                  'exec "$HERE/java" -Duser.home="$HOME" -Djava.io.tmpdir="$TMPDIR" -jar "$HERE/' + jar + '" "$@"\n').encode()
         write(root, "toolkit/" + name, script, 0o700)
     # Only the Behinder launcher needs JavaFX modules. Godzilla uses the
     # ordinary verified JVM; both retain their original JAR/plugin contents.
@@ -264,6 +268,8 @@ ROOT=$(CDPATH= cd -- "$HERE/../.." && pwd)
 DATA="${ARTEX_DATA_DIR:-$ROOT/data}"
 STATE="${ARTEX_BEHINDER_DATA:-$DATA/tools/runtime/behinder}"
 mkdir -p "$STATE"
+HOME="$STATE/home"; TMPDIR="$STATE/tmp"; export HOME TMPDIR
+mkdir -p "$HOME" "$TMPDIR"
 if [ ! -f "$STATE/data.db" ]; then
   cp "$HERE/Behinder_v4.1/clean-data.db" "$STATE/data.db"
   chmod 600 "$STATE/data.db"
@@ -272,7 +278,7 @@ if [ ! -d "$STATE/Plugins" ] && [ -d "$HERE/Behinder_v4.1/Plugins" ]; then
   cp -R "$HERE/Behinder_v4.1/Plugins" "$STATE/Plugins"
 fi
 cd "$STATE"
-exec "$DATA/tools/javafx-java" -jar "$HERE/Behinder_v4.1/Behinder.jar" "$@"
+exec "$DATA/tools/javafx-java" -Duser.home="$HOME" -Djava.io.tmpdir="$TMPDIR" -jar "$HERE/Behinder_v4.1/Behinder.jar" "$@"
 ''')
     behinder.chmod(0o700)
     result = {"schema": 2, "independent_skills": imported, "toolkit": toolkit,

@@ -60,10 +60,19 @@ jobs:
         run: |
           tar -czf "$RUNNER_TEMP/complete-operator-runtime-darwin-arm64.tar.gz" -C "$RUNNER_TEMP/operator-runtime" tools
           shasum -a 256 "$RUNNER_TEMP/complete-operator-runtime-darwin-arm64.tar.gz" > "$RUNNER_TEMP/complete-operator-runtime-darwin-arm64.sha256"
+          tar -czf "$RUNNER_TEMP/antsword-native-darwin-arm64.tar.gz" -C "$RUNNER_TEMP/operator-runtime" tools/AntSword.app tools/antsword tools/operator-runtime-manifest.json
+          shasum -a 256 "$RUNNER_TEMP/antsword-native-darwin-arm64.tar.gz" > "$RUNNER_TEMP/antsword-native-darwin-arm64.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: complete-operator-runtime-darwin-arm64
           path: |
             ${{ runner.temp }}/complete-operator-runtime-darwin-arm64.tar.gz
             ${{ runner.temp }}/complete-operator-runtime-darwin-arm64.sha256
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: antsword-native-darwin-arm64
+          path: |
+            ${{ runner.temp }}/antsword-native-darwin-arm64.tar.gz
+            ${{ runner.temp }}/antsword-native-darwin-arm64.sha256
           retention-days: 7
