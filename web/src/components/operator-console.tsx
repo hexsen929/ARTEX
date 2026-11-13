@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { operatorAPI as api, type OperatorRow as Row } from "@/lib/operator-api";
 
-type Module = "kb" | "c2" | "webshell" | "vps" | "armor" | "skills" | "cleanup";
+type Module = "kb" | "c2" | "webshell" | "vps" | "armor" | "skills" | "cleanup" | "surfaces";
 const modules: { key: Module; title: string; url: string }[] = [
   { key: "kb", title: "POC 武器库", url: "/system/kb" },
   { key: "c2", title: "C2 控制台", url: "/c2" },
@@ -18,6 +18,7 @@ const modules: { key: Module; title: string; url: string }[] = [
   { key: "armor", title: "智能体预设", url: "/system/armor" },
   { key: "skills", title: "技能全文检索", url: "/system/skill-search" },
   { key: "cleanup", title: "垃圾清理", url: "/system/cleanup" },
+  { key: "surfaces", title: "漏洞面分类", url: "/system/finding-surfaces" },
 ];
 function text(value: unknown) {
   return value === null || value === undefined
@@ -1341,11 +1342,11 @@ function C2() {
               variant="destructive"
               disabled={action.busy}
               onClick={() => {
-                if (window.confirm("停用此会话，拒绝后续上线？"))
+                if (window.confirm("删除此会话及其任务/文件台账？客户端再次上线将生成新会话。"))
                   action.run(() => api.remove(`/c2/sessions/${session.id}`));
               }}
             >
-              停用会话
+              删除会话
             </Button>
           </CardContent>
         </Card>
@@ -1398,6 +1399,112 @@ function C2() {
     </div>
   );
 }
+function FindingSurfaces() {
+  const data = useData<{
+    categories: { key: string; label: string }[];
+    counts: Record<string, number>;
+    overrides: Record<string, string>;
+    automatic_enabled: boolean;
+  }>("/findings/surfaces");
+  const [selected, setSelected] = React.useState("");
+  const [className, setClassName] = React.useState("");
+  const [mapping, setMapping] = React.useState("other");
+  const records = useData<{ items: Row[] }>(
+    selected ? `/exploration/findings?page=1&limit=100&surface=${encodeURIComponent(selected)}` : null,
+  );
+  const action = useAction(() => {
+    data.reload();
+    records.reload();
+  });
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">
+        按二开版的11类关键词顺序归类；未知类型由当前模型在启动5秒后及每10分钟补分。这里只发送类型字符串，不改动漏洞验证结论。
+      </p>
+      <ErrorBox message={data.error || records.error || action.error} />
+      <div className="flex flex-wrap gap-2">
+        <Button
+          variant="outline"
+          disabled={action.busy}
+          onClick={() => action.run(() => api.save("/findings/surfaces/classify", {}))}
+        >
+          归类未知类型
+        </Button>
+        <Button
+          variant="outline"
+          disabled={!data.data || action.busy}
+          onClick={() =>
+            action.run(() =>
+              api.save("/findings/surfaces", { automatic_enabled: !data.data?.automatic_enabled }, "PUT"),
+            )
+          }
+        >
+          {data.data?.automatic_enabled ? "关闭自动补分" : "开启自动补分"}
+        </Button>
+      </div>
+      <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-4">
+        {data.data?.categories.map((c) => (
+          <button
+            key={c.key}
+            onClick={() => setSelected(c.key)}
+            className={`rounded-md border p-4 text-left ${selected === c.key ? "bg-muted" : "hover:bg-muted/40"}`}
+          >
+            <p className="text-sm">{c.label}</p>
+            <p className="text-2xl font-semibold">{data.data?.counts[c.key] ?? 0}</p>
+          </button>
+        ))}
+      </div>
+      <form
+        className="flex flex-wrap gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          action.run(() => api.save("/findings/surfaces", { mapping: { [className]: mapping } }, "PUT"));
+        }}
+      >
+        <Input
+          className="max-w-sm"
+          aria-label="漏洞类型原字符串"
+          placeholder="漏洞类型原字符串"
+          value={className}
+          onChange={(e) => setClassName(e.target.value)}
+        />
+        <select
+          aria-label="漏洞面归类"
+          className="rounded-md border bg-background px-3"
+          value={mapping}
+          onChange={(e) => setMapping(e.target.value)}
+        >
+          {data.data?.categories.map((c) => (
+            <option key={c.key} value={c.key}>
+              {c.label}
+            </option>
+          ))}
+        </select>
+        <Button disabled={!className.trim() || action.busy}>保存归类</Button>
+      </form>
+      {selected && (
+        <Grid
+          rows={records.data?.items ?? []}
+          columns={[
+            { key: "name", title: "发现名称" },
+            { key: "vulnclass", title: "类型" },
+            { key: "surface", title: "漏洞面" },
+            { key: "severity", title: "级别" },
+            { key: "verification_status", title: "验证状态" },
+          ]}
+        />
+      )}
+      <h2 className="text-lg font-semibold">已保存的补充分组</h2>
+      <Grid
+        rows={Object.entries(data.data?.overrides ?? {}).map(([vulnclass, surface]) => ({ vulnclass, surface }))}
+        columns={[
+          { key: "vulnclass", title: "原类型" },
+          { key: "surface", title: "分组" },
+        ]}
+      />
+    </div>
+  );
+}
 export function OperatorConsole({ module }: { module: Module }) {
   const title = modules.find((v) => v.key === module)?.title;
   return (
@@ -1431,6 +1538,8 @@ export function OperatorConsole({ module }: { module: Module }) {
         <Presets />
       ) : module === "skills" ? (
         <SkillSearch />
+      ) : module === "surfaces" ? (
+        <FindingSurfaces />
       ) : (
         <Cleanup />
       )}

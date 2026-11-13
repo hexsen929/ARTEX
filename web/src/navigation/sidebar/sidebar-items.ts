@@ -83,6 +83,7 @@ export const sidebarItems: NavGroup[] = [
       { id: "operator-presets", title: "智能体预设", url: "/system/armor", icon: Bot },
       { id: "skill-search", title: "技能全文检索", url: "/system/skill-search", icon: ScrollText },
       { id: "operator-cleanup", title: "垃圾清理", url: "/system/cleanup", icon: FolderOpen },
+ {id:"finding-surfaces",title:"漏洞面分类",url:"/system/finding-surfaces",icon:Bug},
       { id: "reports", title: "Word 报告", url: "/function/reports", icon: Bug },
       { id: "traffic", title: "流量", url: "/function/traffic", icon: Activity },
       { id: "repeater", title: "请求重发", url: "/function/repeater", icon: Repeat },

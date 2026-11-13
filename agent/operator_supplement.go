@@ -15,7 +15,7 @@ func attachOperatorSupplement(ctx context.Context, opts *agentcore.Options, role
 		return
 	}
 	b := strings.TrimSpace(OperatorSupplement(ctx, RunInfoFrom(ctx), role))
-	if b == "" || len(b) > 40<<10 {
+	if b == "" || len(b) > 64<<10 {
 		return
 	}
 	opts.SystemPrompt = append(append([]string(nil), opts.SystemPrompt...), b)
