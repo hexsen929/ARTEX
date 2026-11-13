@@ -60,6 +60,36 @@ func TestExecutionHydraMigrationPreservesApprovalPolicy(t *testing.T) {
 	}
 }
 
+func TestOperatorHydraCompatibilityDoesNotRewriteExplicitAllowPolicy(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	const name = "[内置] 口令喷洒/爆破: hydra"
+	var id int64
+	var oldPattern, oldAction string
+	if err = d.QueryRow("SELECT id,pattern,action FROM intercept_rules WHERE name=$1", name).Scan(&id, &oldPattern, &oldAction); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.Exec("UPDATE intercept_rules SET pattern=$2,action=$3 WHERE id=$1", id, oldPattern, oldAction)
+	})
+	const original = `(?i)\bhydra\b`
+	for _, action := range []string{"allow", "deny"} {
+		if _, err = d.Exec("UPDATE intercept_rules SET pattern=$2,action=$3 WHERE id=$1", id, original, action); err != nil {
+			t.Fatal(err)
+		}
+		if err = d.repairHydraNamespaceRule(); err != nil {
+			t.Fatal(err)
+		}
+		var actual string
+		if err = d.QueryRow("SELECT pattern FROM intercept_rules WHERE id=$1", id).Scan(&actual); err != nil || actual != original {
+			t.Fatal("explicit policy scope changed", action, actual, err)
+		}
+	}
+}
+
 func TestExecutionOutcomeGenerationCannotSettleNewRun(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {
