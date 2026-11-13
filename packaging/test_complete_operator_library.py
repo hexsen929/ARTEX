@@ -24,7 +24,7 @@ class CompleteLibraryTests(unittest.TestCase):
                 "redteam/toolkit/wordlists/sample.txt": b"fixture\n",
                 "redteam/toolkit/httpx/httpx": b"\x7fELFfixture",
                 "redteam/toolkit/vps/id_rsa": b"private fixture not activated",
-                "redteam/toolkit/Behinder_v4.1/data.db": b"history not activated",
+                "redteam/toolkit/Behinder_v4.1/data.db": (root / "fixture.db").read_bytes(),
             }
             with tarfile.open(root / "fixture.tar.gz", "w:gz") as tar:
                 for name, raw in entries.items():
