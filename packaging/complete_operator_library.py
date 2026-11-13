@@ -24,7 +24,7 @@ HOST_TOOLS = {
     "subfinder/subfinder": "subfinder", "dnsx/dnsx": "dnsx", "ksubdomain/ksubdomain": "ksubdomain",
     "frp/frpc": "frpc", "frp/frps": "frps", "suo5/suo5-linux-amd64": "suo5",
     "suo5/suo5-darwin-arm64": "suo5", "dirsearch/dirsearch": "dirsearch",
-    "oneforall/oneforall": "oneforall", "nuclei": "nuclei", "ffuf": "ffuf", "nmap": "nmap",
+    "oneforall/oneforall": "oneforall", "AntSword/antsword": "antsword", "nuclei": "nuclei", "ffuf": "ffuf", "nmap": "nmap",
 }
 
 
@@ -182,6 +182,15 @@ def complete_library(archive, destination, runtime_metadata=None):
         if path.exists():
             path.unlink()
         write(root, "toolkit/" + rel, host_wrapper(tool,len(PurePosixPath(rel).parts)+1), 0o700)
+    for relative,tool in [("dirsearch/dirsearch.py","dirsearch"),("oneforall/OneForAll-0.4.5/oneforall.py","oneforall")]:
+        adapter=("#!/usr/bin/env python3\nimport os,pathlib,sys\n"
+                 "root=next(p.parent for p in pathlib.Path(__file__).resolve().parents if p.name=='toolkit')\n"
+                 "target=pathlib.Path(os.environ.get('ARTEX_DATA_DIR',str(root.parent/'data')))/'tools'/"+repr(tool)+"\n"
+                 "if not target.is_file():raise SystemExit('Missing verified host runtime: "+tool+"')\n"
+                 "os.execv(str(target),[str(target),*sys.argv[1:]])\n").encode()
+        path=root/'toolkit'/relative
+        if path.exists():path.unlink()
+        write(root,'toolkit/'+relative,adapter,0o700)
     java = b'''#!/bin/sh
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -195,6 +204,11 @@ exec "$JAVA" "$@"
         script = ('#!/bin/sh\nset -eu\nHERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
                   'exec "$HERE/java" -jar "$HERE/' + jar + '" "$@"\n').encode()
         write(root, "toolkit/" + name, script, 0o700)
+    # Only the Behinder launcher needs JavaFX modules. Godzilla uses the
+    # ordinary verified JVM; both retain their original JAR/plugin contents.
+    behinder=root/'toolkit/behinder'
+    behinder.write_text('#!/bin/sh\nset -eu\nHERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nROOT=$(CDPATH= cd -- "$HERE/../.." && pwd)\nexec "${ARTEX_DATA_DIR:-$ROOT/data}/tools/javafx-java" -jar "$HERE/Behinder_v4.1/Behinder.jar" "$@"\n')
+    behinder.chmod(0o700)
     result = {"schema": 2, "independent_skills": imported, "toolkit": toolkit,
               "host_adapters": HOST_TOOLS, "standard_skill_count": len(core),
               "flat_skill_count": len(flat), "distinct_variant_count": sum(x["status"] == "independent_variant" for x in imported),

@@ -78,6 +78,17 @@ def build(root):
     write(root/'oneforall',python_wrapper('oneforall','oneforall/oneforall.py'))
     write(root/'dirsearch',python_wrapper('dirsearch','dirsearch/dirsearch.py'))
     java=Path(os.environ['JAVA_HOME']);shutil.copytree(java,root/'java',symlinks=False)
+    fx=root/'javafx/lib';fx.mkdir(parents=True)
+    for spec in LOCK['javafx'].values():
+        with urllib.request.urlopen(spec['url'],timeout=120) as response:raw=response.read(128*1024*1024+1)
+        if len(raw)!=spec['size'] or hashlib.sha256(raw).hexdigest()!=spec['sha256']:raise ValueError('JavaFX artifact identity mismatch')
+        (fx/spec['name']).write_bytes(raw)
+    write(root/'javafx-java','''#!/bin/sh
+set -eu
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$HERE/java/bin/java" --module-path "$HERE/javafx/lib" --add-modules javafx.controls,javafx.fxml,javafx.web,javafx.swing --add-exports javafx.graphics/com.sun.javafx.application=ALL-UNNAMED --add-exports javafx.graphics/com.sun.glass.ui=ALL-UNNAMED --add-opens javafx.graphics/javafx.scene=ALL-UNNAMED "$@"
+''')
+
     # GUI runtime and core are ordinary vendored tool resources, not the host's
     # application profile, keychain, shell list or personal Electron state.
     ant=source('antsword',root);run('npm','install','--ignore-scripts','--no-audit','--no-fund',cwd=ant)
@@ -115,17 +126,28 @@ exec "$HERE/AntSword.app/Contents/MacOS/Electron" "$@"
 ''')
     shutil.rmtree(electron)
     run('codesign','--force','--deep','--sign','-',app)
+    tool_entries=[]
+    for name,entry,underlying in [('subfinder','subfinder','subfinder'),('dnsx','dnsx','dnsx'),('ksubdomain','ksubdomain','ksubdomain'),('frpc','frpc','frpc'),('frps','frps','frps'),('oneforall','oneforall','sources/oneforall/oneforall.py'),('dirsearch','dirsearch','sources/dirsearch/dirsearch.py'),('antsword','antsword','AntSword.app/Contents/MacOS/Electron'),('java','java/bin/java','java/bin/java'),('javafx-java','javafx-java','java/bin/java')]:
+        tool_entries.append({'name':name,'purpose':'完整二开工具包主机运行时：'+name,'execution':'host','platform':'darwin/arm64','path':'tools/'+entry,'sha256':sha(root/entry),'resolved_executable':'tools/'+underlying,'resolved_sha256':sha(root/underlying)})
     records=[]
     for p in sorted(root.rglob('*')):
         if p.is_symlink():records.append({'path':p.relative_to(root).as_posix(),'link':os.readlink(p)})
         elif p.is_file():records.append({'path':p.relative_to(root).as_posix(),'size':p.stat().st_size,'sha256':sha(p)})
-    manifest={'schema':1,'platform':'darwin/arm64','python':'3.11','java_version':LOCK['java_version'],'sources':LOCK['sources'],'electron':LOCK['electron_version'],'files':records}
+    manifest={'schema':1,'platform':'darwin/arm64','python':'3.11','java_version':LOCK['java_version'],'sources':LOCK['sources'],'electron':LOCK['electron_version'],'files':records,'tools':tool_entries}
     (root/'operator-runtime-manifest.json').write_text(json.dumps(manifest,indent=2))
     return manifest
 
 def smoke(root):
     env={**os.environ,'ARTEX_PYTHON311':os.sys.executable,'PYTHONDONTWRITEBYTECODE':'1'}
     run(root/'java/bin/java','-version')
+    # Exercise the real aarch64 JavaFX native loader and WindowServer on the
+    # cloud host. The supplied JARs' old x86-64 dylibs are not used on ARM64.
+    smoke_source=root/'JavaFXSmoke.java'
+    smoke_source.write_text('import javafx.application.Application;import javafx.application.Platform;import javafx.stage.Stage;public class JavaFXSmoke extends Application {public void start(Stage s){s.show();System.out.println("ARTEX_JAVAFX_READY");Platform.exit();}public static void main(String[] a){launch(a);}}')
+    run(root/'java/bin/javac','--module-path',root/'javafx/lib','--add-modules','javafx.graphics',smoke_source)
+    run(root/'javafx-java','-cp',root,'JavaFXSmoke',timeout=45)
+    smoke_source.unlink();(root/'JavaFXSmoke.class').unlink()
+
     run(root/'dirsearch','--help',env=env)
     # OneForAll's top-level Fire help imports its dependencies but never starts
     # enumeration. Network-disabled execution is enforced by the workflow.
