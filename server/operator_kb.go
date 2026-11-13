@@ -73,6 +73,7 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux) {
 	s.registerVPSRoutes(mux)
 	s.registerWebshellRoutes(mux)
 	s.registerC2Routes(mux)
+	s.registerSurfaceRoutes(mux)
 	s.registerArmorRoutes(mux)
 	s.registerSkillSearchRoutes(mux)
 	s.registerCleanupRoutes(mux)
@@ -92,7 +93,9 @@ func (s *Server) initOperatorModules() {
 	}
 	moduleCtx, moduleCancel := context.WithCancel(s.ctx)
 	s.c2Ops = &c2OperatorState{running: map[int64]*c2Running{}, ctx: moduleCtx, cancel: moduleCancel}
-	s.c2Ops.wg.Add(1)
+	s.c2Ops.wg.Add(3)
+	go func() { defer s.c2Ops.wg.Done(); s.runSurfaceClassifier(moduleCtx) }()
+	go func() { defer s.c2Ops.wg.Done(); s.runOperatorC2Sweep(moduleCtx) }()
 	go func() { defer s.c2Ops.wg.Done(); s.runOperatorKBWorker(moduleCtx) }()
 	agent.OperatorSupplement = func(ctx context.Context, ri agent.RunInfo, role string) string {
 		if role == "asset_mapper" || role == "credential_processor" || role == "memory" || strings.HasPrefix(role, "judge") {

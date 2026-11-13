@@ -26,12 +26,13 @@ import (
 )
 
 type c2OperatorState struct {
-	ctx     context.Context
-	cancel  context.CancelFunc
-	closed  bool
-	mu      sync.Mutex
-	running map[int64]*c2Running
-	wg      sync.WaitGroup
+	approvals map[int64]context.CancelFunc
+	ctx       context.Context
+	cancel    context.CancelFunc
+	closed    bool
+	mu        sync.Mutex
+	running   map[int64]*c2Running
+	wg        sync.WaitGroup
 }
 type c2Running struct {
 	server   *http.Server
@@ -590,14 +591,43 @@ func (s *Server) operatorC2DeleteSession(w http.ResponseWriter, r *http.Request)
 }
 func (s *Server) queueOperatorC2Task(ctx context.Context, sid int64, b json.RawMessage, source string) (int64, string, error) {
 	var v struct {
-		Type    string `json:"type"`
-		Command string `json:"command"`
-		Arg     string `json:"arg"`
-		Path    string `json:"path"`
-		Data    string `json:"data"`
+		Type    string          `json:"type"`
+		Command string          `json:"command"`
+		Arg     string          `json:"arg"`
+		Path    string          `json:"path"`
+		Data    string          `json:"data"`
+		Seconds int             `json:"seconds"`
+		Payload json.RawMessage `json:"payload"`
 	}
 	if err := json.Unmarshal(b, &v); err != nil {
 		return 0, "", err
+	}
+	v.Type = strings.ToLower(strings.TrimSpace(v.Type))
+	if len(v.Payload) > 0 && string(v.Payload) != "null" {
+		var nested struct {
+			Command string `json:"command"`
+			Arg     string `json:"arg"`
+			Path    string `json:"path"`
+			Data    string `json:"data"`
+			Seconds int    `json:"seconds"`
+		}
+		if err := json.Unmarshal(v.Payload, &nested); err != nil {
+			return 0, "", fmt.Errorf("payload must be an object")
+		}
+		v.Command = nested.Command
+		v.Arg = nested.Arg
+		v.Path = nested.Path
+		v.Data = nested.Data
+		v.Seconds = nested.Seconds
+	}
+	if v.Arg == "" && v.Seconds > 0 {
+		v.Arg = strconv.Itoa(v.Seconds)
+	}
+	if source == "" {
+		source = "manual"
+	}
+	if source != "manual" && source != "ai" {
+		return 0, "", fmt.Errorf("source must be manual or ai")
 	}
 	switch v.Type {
 	case "shell":
@@ -622,22 +652,25 @@ func (s *Server) queueOperatorC2Task(ctx context.Context, sid int64, b json.RawM
 				return 0, "", fmt.Errorf("upload must be valid base64, at most 2 MiB")
 			}
 		}
-	case "exit":
+	case "exit", "kill":
 	default:
 		return 0, "", fmt.Errorf("unsupported task type")
 	}
 	var exists bool
-	if err := s.m.pg.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM c2_sessions WHERE id=$1 AND status!='killed')", sid).Scan(&exists); err != nil || !exists {
+	if err := s.m.pg.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM c2_sessions WHERE id=$1 AND status='active')", sid).Scan(&exists); err != nil || !exists {
 		return 0, "", fmt.Errorf("active session required")
 	}
 	payload, _ := json.Marshal(map[string]any{"command": v.Command, "arg": v.Arg, "path": v.Path, "data": v.Data})
 	status, approval := "queued", ""
-	if source == "ai" {
+	if c2.TaskNeedsApproval(v.Type) {
 		status = "awaiting_approval"
 		approval = "pending"
 	}
 	var id int64
 	err := s.m.pg.QueryRowContext(ctx, `INSERT INTO c2_tasks(session_id,task_type,payload,status,source,approval_status) VALUES($1,$2,$3::jsonb,$4,$5,$6) RETURNING id`, sid, v.Type, payload, status, source, approval).Scan(&id)
+	if err == nil && status == "awaiting_approval" {
+		s.requestOperatorC2Approval(id, sid, v.Type, payload)
+	}
 	return id, status, err
 }
 func (s *Server) operatorC2Task(w http.ResponseWriter, r *http.Request) {
@@ -653,7 +686,14 @@ func (s *Server) operatorC2Task(w http.ResponseWriter, r *http.Request) {
 	if !operatorDecode(w, r, &b) {
 		return
 	}
-	tid, status, e := s.queueOperatorC2Task(r.Context(), id, b, "manual")
+	var request struct {
+		Source string `json:"source"`
+	}
+	if json.Unmarshal(b, &request) != nil {
+		writeErr(w, 400, "invalid request")
+		return
+	}
+	tid, status, e := s.queueOperatorC2Task(r.Context(), id, b, request.Source)
 	if e != nil {
 		writeErr(w, 400, e.Error())
 		return
@@ -685,25 +725,34 @@ func (s *Server) operatorC2CancelTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "task already delivered, completed or unavailable; remote execution was not assumed cancelled")
 		return
 	}
+	s.cancelOperatorC2Approval(id)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 func (s *Server) operatorC2ApproveTask(w http.ResponseWriter, r *http.Request) {
 	if s.pg(w) == nil {
 		return
 	}
-	id, e := pathID(r, "id")
-	if e != nil {
-		writeErr(w, 400, e.Error())
+	id, err := pathID(r, "id")
+	if err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
-	var n int64
-	e = s.m.pg.QueryRowContext(r.Context(), `UPDATE c2_tasks SET status='queued',approval_status='approved' WHERE id=$1 AND status='awaiting_approval' RETURNING id`, id).Scan(&n)
-	if e != nil {
-		writeErr(w, 409, "task not pending approval")
+	var pending int64
+	err = s.m.pg.QueryRowContext(r.Context(), `SELECT id FROM intercept_pending WHERE status='pending' AND tool_name LIKE 'c2_%' AND tool_input->>'c2_task_id'=$1::text ORDER BY id DESC LIMIT 1`, id).Scan(&pending)
+	if err != nil {
+		writeErr(w, 409, "approval not pending or still initializing; refresh the approval queue")
+		return
+	}
+	if s.m.interceptor == nil {
+		writeErr(w, 503, "approval subsystem unavailable")
+		return
+	}
+	if err = s.m.interceptor.Decide(pending, true); err != nil {
+		operatorError(w, err)
 		return
 	}
 	s.c2Event(r.Context(), 0, 0, id, "opsec", "operator approved")
-	writeJSON(w, 200, map[string]any{"ok": true})
+	writeJSON(w, 200, map[string]any{"ok": true, "pending_id": pending})
 }
 func (s *Server) operatorC2Events(w http.ResponseWriter, r *http.Request) {
 	if s.pg(w) == nil {

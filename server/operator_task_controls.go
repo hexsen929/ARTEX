@@ -177,5 +177,5 @@ func (s *Server) operatorTaskSteer(w http.ResponseWriter, r *http.Request) {
 }
 
 func operatorExecutionRole(key string) bool {
-	return key == "pentest" || (key != "kb_curator" && isOperatorExpert(key))
+	return key == "pentest" || isOperatorExpert(key)
 }

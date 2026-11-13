@@ -361,6 +361,7 @@ func coverageAssetRefDTO(ref db.AssetRef) CoverageAssetRefDTO {
 // ---- Finding (frontend "Finding") ----
 
 type FindingDTO struct {
+	Surface            string           `json:"surface,omitempty"`
 	Reproduction       *db.Reproduction `json:"reproduction,omitempty"`
 	VerificationStatus string           `json:"verification_status"`
 	VerificationNote   string           `json:"verification_note"`
@@ -516,6 +517,7 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		status = db.FindingPending
 	}
 	d := FindingDTO{
+		Surface:            f.Surface,
 		Reproduction:       f.Reproduction,
 		VerificationStatus: f.VerificationStatus, VerificationNote: f.VerificationNote,
 		ID:           i64s(f.ID),
@@ -531,6 +533,9 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		Report:               f.Report,
 		ReportConversationID: f.ReportConversationID,
 		TS:                   rfc3339(f.CreatedAt),
+	}
+	if d.Surface == "" {
+		d.Surface = db.SurfaceKeyFor(f.VulnClass)
 	}
 	if d.VerificationStatus == "" {
 		d.VerificationStatus = db.VerificationLegacy

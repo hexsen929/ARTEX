@@ -37,7 +37,7 @@ func (t *taskChatTool) Call(ctx context.Context, b json.RawMessage, tc *actool.T
 // token and revalidates the persisted task before accessing its graph.
 func (c *ChatAgent) ChatInTask(ctx context.Context, agentKey, sessionID, message string, maxTurns int, maxDuration time.Duration, webSearch bool, emit func(db.Activity), as *db.AssetStore, store *db.ExplorationStore, recorder FindingRecorder, validate func(context.Context) error) (string, error) {
 	ri := RunInfoFrom(ctx)
-	if ri.TaskID <= 0 || store == nil || store.ID() != ri.ExplorationID || validate == nil || ExplanationOnly(ctx) || agentKey == "asset_mapper" || agentKey == db.CredentialAgentKey || agentKey == "goals" || agentKey == "kb_curator" || agentKey == "worker.intranet" {
+	if ri.TaskID <= 0 || store == nil || store.ID() != ri.ExplorationID || validate == nil || ExplanationOnly(ctx) || agentKey == "asset_mapper" || agentKey == db.CredentialAgentKey || agentKey == "goals" || agentKey == "worker.intranet" {
 		return "", fmt.Errorf("explicit, matching task conversation capability required")
 	}
 	if err := validate(ctx); err != nil {

