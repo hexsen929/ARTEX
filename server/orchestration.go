@@ -46,6 +46,7 @@ func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 	if s.stage != nil {
 		tools = append(tools, s.stageShareTool()) // 受管文件投递(F13),默认绑 worker
 	}
+	tools = append(tools, s.operatorTools()...)
 	tools = append(tools, s.sessionTools()...)    // 立足点会话工具(期 1a),默认绑 worker
 	tools = append(tools, s.credentialTools()...) // 凭据工具(期 2),默认绑 worker
 	tools = append(tools, s.tunnelTools()...)     // 隧道四件套(期 3a),默认绑 worker

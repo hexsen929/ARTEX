@@ -444,11 +444,13 @@ export type HintState = "active" | "consumed";
 export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves" | "covers";
 
 export interface TaskNode {
+  model_recovery?: { attempts: number; limit: number; status: string; code: string; message: string; next_at?: string };
   execution_attempt?: number;
   execution_checkpoint?: {
     tool_calls: number;
     tool_results: number;
     pending: Record<string, string>;
+    not_executed?: Record<string, string>;
     last_tool?: string;
     last_activity_id?: number;
     last_result_id?: number;

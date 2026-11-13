@@ -1,0 +1,187 @@
+[
+  {
+    "key": "authz",
+    "label": "授权面（越权）",
+    "keywords": [
+      "unauthorized",
+      "unauth",
+      "idor",
+      "privilege",
+      "access-control",
+      "authz",
+      "permission",
+      "bola",
+      "bfla",
+      "越权",
+      "未授权"
+    ]
+  },
+  {
+    "key": "auth",
+    "label": "认证面",
+    "keywords": [
+      "auth",
+      "login",
+      "password",
+      "credential",
+      "brute",
+      "session",
+      "token",
+      "jwt",
+      "oauth",
+      "sso",
+      "mfa",
+      "2fa",
+      "captcha",
+      "认证",
+      "登录",
+      "口令",
+      "验证码"
+    ]
+  },
+  {
+    "key": "injection",
+    "label": "注入面",
+    "keywords": [
+      "sql",
+      "inject",
+      "cmdi",
+      "command",
+      "rce",
+      "exec",
+      "ssti",
+      "template",
+      "xxe",
+      "ldap",
+      "nosql",
+      "deserial",
+      "代码执行",
+      "命令执行",
+      "注入"
+    ]
+  },
+  {
+    "key": "file",
+    "label": "文件面",
+    "keywords": [
+      "file",
+      "upload",
+      "lfi",
+      "traversal",
+      "download",
+      "path",
+      "文件",
+      "上传",
+      "遍历",
+      "下载",
+      "读取",
+      "写入"
+    ]
+  },
+  {
+    "key": "request",
+    "label": "请求面",
+    "keywords": [
+      "ssrf",
+      "csrf",
+      "smuggl",
+      "host-header",
+      "crlf",
+      "request",
+      "redirect",
+      "waf",
+      "bypass",
+      "evasion",
+      "绕",
+      "请求",
+      "重定向",
+      "绕过"
+    ]
+  },
+  {
+    "key": "cache",
+    "label": "缓存与 CDN",
+    "keywords": [
+      "cache",
+      "cdn",
+      "poison",
+      "deception",
+      "缓存"
+    ]
+  },
+  {
+    "key": "logic",
+    "label": "业务逻辑",
+    "keywords": [
+      "logic",
+      "race",
+      "price",
+      "payment",
+      "order",
+      "coupon",
+      "refund",
+      "业务",
+      "逻辑",
+      "支付"
+    ]
+  },
+  {
+    "key": "api",
+    "label": "接口与文档面",
+    "keywords": [
+      "api",
+      "graphql",
+      "swagger",
+      "openapi",
+      "docs",
+      "actuator",
+      "接口",
+      "文档"
+    ]
+  },
+  {
+    "key": "client",
+    "label": "前端与客户端面",
+    "keywords": [
+      "xss",
+      "cors",
+      "clickjack",
+      "prototype",
+      "dom",
+      "front",
+      "client",
+      "前端",
+      "客户端",
+      "浏览器"
+    ]
+  },
+  {
+    "key": "infra",
+    "label": "服务与基础设施面",
+    "keywords": [
+      "info",
+      "leak",
+      "config",
+      "exposed",
+      "redis",
+      "docker",
+      "k8s",
+      "cloud",
+      "service",
+      "infra",
+      "panel",
+      "default",
+      "misconfig",
+      "信息",
+      "泄露",
+      "配置",
+      "服务",
+      "默认"
+    ]
+  },
+  {
+    "key": "other",
+    "label": "未分类",
+    "keywords": []
+  }
+]

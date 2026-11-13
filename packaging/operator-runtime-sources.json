@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "python": "3.11",
+  "java_version": "11.0.33+10",
+  "electron_version": "38.8.6",
+  "sources": {
+    "oneforall": {
+      "repository": "shmilylty/OneForAll",
+      "commit": "5ad26a99cd8625dfff0f3ce0300a10b38135b03a",
+      "url": "https://codeload.github.com/shmilylty/OneForAll/zip/5ad26a99cd8625dfff0f3ce0300a10b38135b03a",
+      "size": 49329085,
+      "sha256": "ca850e4018a9a193e4bbb7947b3b480252f40fecdbb0781940b6223794fa3626"
+    },
+    "dirsearch": {
+      "repository": "maurosoria/dirsearch",
+      "commit": "b08e8b42efb822bf0b4bda87bd00cb04e6116a2d",
+      "url": "https://codeload.github.com/maurosoria/dirsearch/zip/b08e8b42efb822bf0b4bda87bd00cb04e6116a2d",
+      "size": 482145,
+      "sha256": "a35777d5261e0bd3e52be99e1c9c80f0a1591f19a89b9c2e743b033c3c230483"
+    },
+    "antsword": {
+      "repository": "AntSwordProject/antSword",
+      "commit": "4ab11f821d7e2545dfaa003f1c764087eb4086a1",
+      "url": "https://codeload.github.com/AntSwordProject/antSword/zip/4ab11f821d7e2545dfaa003f1c764087eb4086a1",
+      "size": 27118885,
+      "sha256": "ae8aac34e54278865e8ec7e941f11b50a5fc8d1dc70c9d0bfbc5c8f3aee67f31"
+    }
+  },
+  "note": "Sources and binary archives are pinned. Tool source/configuration from the private supplied archive is not uploaded.",
+  "javafx_version": "21.0.13",
+  "javafx": {
+    "base": {
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-base/21.0.13/javafx-base-21.0.13-mac-aarch64.jar",
+      "sha256": "bcb86ab39c655b103b9fd91bb8bce02f90c39dbdb06f84c46671536639cdc499",
+      "size": 753226,
+      "name": "javafx-base-21.0.13-mac-aarch64.jar",
+      "class_major": 61
+    },
+    "graphics": {
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-graphics/21.0.13/javafx-graphics-21.0.13-mac-aarch64.jar",
+      "sha256": "0b57b97cf0515f5798d775ca9adb01f160cf6d8ab10e3216a015fa27a0ee3317",
+      "size": 4824423,
+      "name": "javafx-graphics-21.0.13-mac-aarch64.jar",
+      "class_major": 61
+    },
+    "controls": {
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-controls/21.0.13/javafx-controls-21.0.13-mac-aarch64.jar",
+      "sha256": "e9cfb31e04032abd4170dfa0d00f683a227631e08cb9ca2ff4d946c08dd68120",
+      "size": 2582611,
+      "name": "javafx-controls-21.0.13-mac-aarch64.jar",
+      "class_major": 61
+    },
+    "fxml": {
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-fxml/21.0.13/javafx-fxml-21.0.13-mac-aarch64.jar",
+      "sha256": "ec5c9875052bcb3be0659af506b21be512f2dae87063a5a11b98fac12dc80732",
+      "size": 130030,
+      "name": "javafx-fxml-21.0.13-mac-aarch64.jar",
+      "class_major": 61
+    },
+    "media": {
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-media/21.0.13/javafx-media-21.0.13-mac-aarch64.jar",
+      "sha256": "07c0a61726c24c5c29ddcb54b1fab452c205e8def761ba738e8060a7a1584536",
+      "size": 1487824,
+      "name": "javafx-media-21.0.13-mac-aarch64.jar",
+      "class_major": 61
+    },
+    "web": {
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-web/21.0.13/javafx-web-21.0.13-mac-aarch64.jar",
+      "sha256": "7a25cc46dc6c5ebb16a4d1d43b8d25d4f6503cefcd7a9071e69802ca1f1ea494",
+      "size": 40158729,
+      "name": "javafx-web-21.0.13-mac-aarch64.jar",
+      "class_major": 61
+    },
+    "swing": {
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-swing/21.0.13/javafx-swing-21.0.13-mac-aarch64.jar",
+      "sha256": "22f148f2f13fbd6142dfa419dc6418a7d7b49b9563bcc764e0a57f53555c5f2c",
+      "size": 89706,
+      "name": "javafx-swing-21.0.13-mac-aarch64.jar",
+      "class_major": 61
+    }
+  },
+  "javafx_java_version": "17.0.21+9",
+  "electron_remote_version": "2.1.4"
+}

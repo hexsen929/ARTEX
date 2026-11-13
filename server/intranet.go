@@ -331,6 +331,15 @@ func (s *Server) intranetListDir(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, err.Error())
 		return
 	}
+	if php, ok := sess.(*session.HTTPShell); ok && php.PHPNative() {
+		raw, e := php.PHPFileAction(r.Context(), "list", a.Path, "", "", false)
+		if e != nil {
+			writeErr(w, 502, e.Error())
+			return
+		}
+		writeJSON(w, 200, raw)
+		return
+	}
 	stdout, _, err := sess.Exec(r.Context(), "ls -la "+shellQuote(a.Path), 15*time.Second)
 	s.sessStore.Touch(r.Context(), id)
 	if err != nil {

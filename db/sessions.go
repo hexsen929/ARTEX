@@ -265,7 +265,9 @@ WHERE s.id=$2 FOR SHARE OF s,t`, taskID, sessionID).Scan(&owner)
 }
 
 // TaskCanUse never follows parent_ref: data visibility is not remote-control
-// authorization. Sessions without a creating task require an explicit binding.
+// authorization. Operator-created global sessions are available to live tasks,
+// as in the original include_global contract; task-owned sessions still require
+// ownership or an explicit handoff. Taskless chats need their own exact binding.
 func (s *SessionStore) TaskCanUse(ctx context.Context, sessionID, taskID int64) (bool, error) {
 	if sessionID <= 0 || taskID <= 0 {
 		return false, nil
@@ -273,7 +275,7 @@ func (s *SessionStore) TaskCanUse(ctx context.Context, sessionID, taskID int64) 
 	var ok bool
 	err := s.d.QueryRowContext(ctx, `SELECT EXISTS(
 SELECT 1 FROM sessions s JOIN tasks t ON t.id=$2 AND t.deleted_at IS NULL
-WHERE s.id=$1 AND (s.created_by_task=t.id OR EXISTS(
+WHERE s.id=$1 AND (s.created_by_task IS NULL OR s.created_by_task=t.id OR EXISTS(
 SELECT 1 FROM task_session_bindings b WHERE b.task_id=t.id AND b.session_id=s.id)))`, sessionID, taskID).Scan(&ok)
 	return ok, err
 }

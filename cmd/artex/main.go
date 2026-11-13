@@ -96,6 +96,10 @@ func run() int {
 		log.Printf("[config] 配置文件: %s (不存在 — 将仅尝试环境变量 ARTEX_PG_DSN)", cfgPath)
 	}
 
+	if err := config.ConfigureExecutionEnvironment(*dataDir); err != nil {
+		log.Fatalf("configure execution environment: %v", err)
+	}
+
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, shutdown := shutdownContext(sigCtx)

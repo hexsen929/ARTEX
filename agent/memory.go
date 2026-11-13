@@ -35,6 +35,7 @@ func memoryRoleAllowed(role string) bool {
 // compaction and extraction calls still use the original provider, so transient
 // memory never becomes direct compression input or recursively calls itself.
 func attachMemory(ctx context.Context, opts *agentcore.Options, role string) context.Context {
+	attachOperatorSupplement(ctx, opts, role)
 	if opts == nil || opts.Provider == nil || MemoryRecall == nil || !memoryRoleAllowed(role) {
 		return ctx
 	}

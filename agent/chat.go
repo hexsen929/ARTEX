@@ -174,6 +174,10 @@ type chatVars struct{ DataDir, Now string }
 // tool_use / tool_result / text / result), tagged with the agent key as the
 // worker lane.
 func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message string, maxTurns int, maxDuration time.Duration, webSearch bool, emit func(db.Activity)) (string, error) {
+	return c.chat(ctx, agentKey, sessionID, message, maxTurns, maxDuration, webSearch, emit)
+}
+
+func (c *ChatAgent) chat(ctx context.Context, agentKey, sessionID, message string, maxTurns int, maxDuration time.Duration, webSearch bool, emit func(db.Activity)) (string, error) {
 	// Parent task attribution is not an exploration capability for Chat.
 	ctx = WithoutTaskToolSet(ctx)
 	if agentKey == "worker.intranet" {
@@ -212,6 +216,10 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		base := []actool.CoreTool{}
 		if agentKey != "asset_mapper" {
 			base = actool.DefaultTools()
+		}
+		if scope, ok := ctx.Value(taskChatScopeKey{}).(*taskChatScope); ok && scope.role == agentKey && !restricted {
+			scope.owner = RunInfoFrom(ctx)
+			base = append(base, scope.tools...)
 		}
 		base = append(base, deepSeekTools(ws)...)
 		tools, def, cleanup = AugmentTools(ctx, agentKey, base)

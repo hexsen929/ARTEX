@@ -93,6 +93,9 @@ func (s *Server) bindConversationTask(ctx context.Context, id int64, role string
 }
 
 func (s *Server) conversationTaskContext(ctx context.Context, c *db.Conversation, hints []int64) (context.Context, []int64, error) {
+	if bound, owners, ok, err := s.operatorConversationContext(ctx, c); ok {
+		return bound, owners, err
+	}
 	var origin *int64
 	execute := false
 	switch c.AgentKey {
