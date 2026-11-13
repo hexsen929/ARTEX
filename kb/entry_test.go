@@ -56,6 +56,10 @@ func TestOperatorKnowledgeImportAndResultCaptureHaveOriginalValidation(t *testin
 	e.Manual = false
 	e.EngagementID = "fixture"
 	e.AssetTarget = "fixture.invalid"
+	e.Polarity = ""
+	if e.ValidateAgentAdd() == nil {
+		t.Fatal("unverified result implicitly became context")
+	}
 	e.Polarity = "context"
 	if err := e.ValidateAgentAdd(); err != nil {
 		t.Fatal("context source rejected", err)
@@ -65,5 +69,10 @@ func TestOperatorKnowledgeImportAndResultCaptureHaveOriginalValidation(t *testin
 	e.VerifiedNote = "observed fixture evidence"
 	if err := e.ValidateAgentAdd(); err != nil {
 		t.Fatal(err)
+	}
+	e.Manual = true
+	e.Category = "other"
+	if e.ValidateAgentAdd() == nil {
+		t.Fatal("manual import accepted original forbidden category other")
 	}
 }

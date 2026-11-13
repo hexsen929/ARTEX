@@ -314,8 +314,12 @@ func categoryMatches(filter, category string) bool {
 // ValidateAgentAdd preserves the original distinction between a human/curator
 // material import and a factual result captured from an engagement.
 func (e *Entry) ValidateAgentAdd() error {
+	explicitContext := strings.TrimSpace(e.Polarity) == "context"
 	if err := e.Validate(); err != nil {
 		return err
+	}
+	if e.Category == "other" || e.Category == "file-read" {
+		return fmt.Errorf("category required and must be an original non-other category")
 	}
 	if e.Manual {
 		return nil
@@ -326,7 +330,7 @@ func (e *Entry) ValidateAgentAdd() error {
 	if strings.TrimSpace(e.AssetTarget) == "" {
 		return fmt.Errorf("asset_target required (or manual=true for material import)")
 	}
-	if !e.Verified && e.Polarity != "context" {
+	if !e.Verified && !explicitContext {
 		return fmt.Errorf("verified=true and verification evidence required for positive/negative results; context may be unverified")
 	}
 	return nil

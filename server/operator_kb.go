@@ -350,11 +350,11 @@ func (s *Server) operatorTools() []actool.CoreTool {
 				return nil, err
 			}
 			if err := e.ValidateAgentAdd(); err != nil {
-				return nil, err
+				return map[string]any{"ok": false, "rejected": true, "missing": []string{err.Error()}, "hint": "补齐以上必填项后重新调用 kb_add；不要编造证据。"}, nil
 			}
 			e.CreatedBy = "agent"
 			e, created, err := s.saveOperatorPOC(ctx, e)
-			return map[string]any{"id": e.ID, "code": e.Code, "created": created, "path": e.Path}, err
+			return map[string]any{"ok": err == nil, "id": e.ID, "code": e.Code, "created": created, "path": e.Path, "note": "已回填；跨靶标后续任务可通过 kb_search/kb_get 复用。"}, err
 		}),
 	}
 	tools = append(tools, s.operatorVPSTool())
