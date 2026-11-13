@@ -2,7 +2,7 @@
   "schema": 1,
   "python": "3.11",
   "java_version": "11.0.33+10",
-  "electron_version": "13.6.9",
+  "electron_version": "38.8.6",
   "sources": {
     "oneforall": {
       "repository": "shmilylty/OneForAll",
@@ -79,5 +79,6 @@
       "class_major": 61
     }
   },
-  "javafx_java_version": "17.0.21+9"
+  "javafx_java_version": "17.0.21+9",
+  "electron_remote_version": "2.1.4"
 }

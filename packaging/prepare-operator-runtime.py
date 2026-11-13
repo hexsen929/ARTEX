@@ -129,8 +129,18 @@ exec "$HERE/javafx-java-home/bin/java" --module-path "$HERE/javafx/lib" --add-mo
     text=text.replace(old,"protocol.registerSchemesAsPrivileged(['ant-views','ant-static','ant-src'].map(scheme=>({scheme,privileges:{standard:true,secure:true,supportFetchAPI:true,corsEnabled:true}})));")
     point='webPreferences: {'
     if point not in text:raise ValueError('upstream window patch point drifted')
-    text=text.replace(point,point+'\n      contextIsolation: false,\n      enableRemoteModule: true,',1)
+    text=text.replace(point,point+'\n      contextIsolation: false,\n      sandbox: false,\n      preload: require("path").join(process.resourcesPath,"app/preload.js"),',1)
+    old="""mainWindow.webContents.on('new-window', (event, url) => {
+    event.preventDefault();
+    shell.openExternal(url);
+  });"""
+    if old not in text:raise ValueError('upstream external-window patch drifted')
+    text=text.replace(old,"mainWindow.webContents.setWindowOpenHandler(({url})=>{shell.openExternal(url);return {action:'deny'}});")
     core.write_text(text)
+    for path in (resources/'antsword').rglob('*.js'):
+        if path==core or 'node_modules' in path.parts:continue
+        text=path.read_text();point='webPreferences: {'
+        if point in text:path.write_text(text.replace(point,point+'\n sandbox: false, preload: require("path").join(process.resourcesPath,"app/preload.js"),'))
     logger=resources/'antsword/modules/logger.js';text=logger.read_text();old='\n      arguments\n'
     if text.count(old)!=4:raise ValueError('upstream IPC logger compatibility patch drifted')
     logger.write_text(text.replace(old,'\n      Array.from(arguments)\n'))
@@ -139,8 +149,15 @@ exec "$HERE/javafx-java-home/bin/java" --module-path "$HERE/javafx/lib" --add-mo
         if text.count(old)!=1:raise ValueError('upstream core/data path split drifted')
         path.write_text(text.replace(old,old.replace('AS_WORKDIR','ARTEX_ANTSWORD_CORE')))
     bootstrap=resources/'app';bootstrap.mkdir();(bootstrap/'package.json').write_text('{"name":"artex-antsword","main":"main.js"}')
+    run('npm','install','--no-audit','--no-fund','--legacy-peer-deps','--prefix',bootstrap,'@electron/remote@'+LOCK['electron_remote_version'])
+    (bootstrap/'preload.js').write_text("""const path=require('path');
+const core=path.join(process.resourcesPath,'antsword');
+process.env.NODE_PATH=[path.join(core,'source'),path.join(core,'node_modules'),process.env.NODE_PATH].filter(Boolean).join(path.delimiter);require('module').Module._initPaths();
+Object.defineProperty(require('electron'),'remote',{value:require('@electron/remote'),configurable:true,enumerable:true});
+""")
     (bootstrap/'main.js').write_text("""const {app}=require('electron');
 const path=require('path');const fs=require('fs');
+const remote=require('@electron/remote/main');remote.initialize();app.on('browser-window-created',(_,window)=>remote.enable(window.webContents));
 const state=process.env.ARTEX_ANTSWORD_DATA||path.join(process.resourcesPath,'../../../runtime/antsword');
 fs.mkdirSync(state,{recursive:true});process.env.AS_WORKDIR=state;process.env.ARTEX_ANTSWORD_CORE=path.join(process.resourcesPath,'antsword');process.env.HOME=path.join(state,'home');fs.mkdirSync(process.env.HOME,{recursive:true});app.setPath('userData',state);
 const dialog=require('electron').dialog;for(const key of ['showOpenDialog','showSaveDialog','showMessageBox']){const sync=dialog[key+'Sync'];if(sync){dialog[key]=function(...args){if(typeof args[args.length-1]==='function'){const callback=args.pop();const result=sync.apply(dialog,args);callback(result);return result;}return sync.apply(dialog,args)}}}
