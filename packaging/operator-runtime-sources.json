@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "python": "3.11",
+  "java_version": "11.0.33+10",
+  "electron_version": "13.6.9",
+  "sources": {
+    "oneforall": {
+      "repository": "shmilylty/OneForAll",
+      "commit": "5ad26a99cd8625dfff0f3ce0300a10b38135b03a",
+      "url": "https://codeload.github.com/shmilylty/OneForAll/zip/5ad26a99cd8625dfff0f3ce0300a10b38135b03a",
+      "size": 49329085,
+      "sha256": "ca850e4018a9a193e4bbb7947b3b480252f40fecdbb0781940b6223794fa3626"
+    },
+    "dirsearch": {
+      "repository": "maurosoria/dirsearch",
+      "commit": "b08e8b42efb822bf0b4bda87bd00cb04e6116a2d",
+      "url": "https://codeload.github.com/maurosoria/dirsearch/zip/b08e8b42efb822bf0b4bda87bd00cb04e6116a2d",
+      "size": 482145,
+      "sha256": "a35777d5261e0bd3e52be99e1c9c80f0a1591f19a89b9c2e743b033c3c230483"
+    },
+    "antsword": {
+      "repository": "AntSwordProject/antSword",
+      "commit": "4ab11f821d7e2545dfaa003f1c764087eb4086a1",
+      "url": "https://codeload.github.com/AntSwordProject/antSword/zip/4ab11f821d7e2545dfaa003f1c764087eb4086a1",
+      "size": 27118885,
+      "sha256": "ae8aac34e54278865e8ec7e941f11b50a5fc8d1dc70c9d0bfbc5c8f3aee67f31"
+    }
+  },
+  "note": "Sources and binary archives are pinned. Tool source/configuration from the private supplied archive is not uploaded."
+}

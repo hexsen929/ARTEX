@@ -579,14 +579,32 @@ func (s *Server) operatorC2DeleteSession(w http.ResponseWriter, r *http.Request)
 	if s.pg(w) == nil {
 		return
 	}
-	id, e := pathID(r, "id")
-	if e == nil {
-		_, e = s.m.pg.ExecContext(r.Context(), "UPDATE c2_sessions SET status='killed' WHERE id=$1", id)
-	}
-	if e != nil {
-		operatorError(w, e)
+	id, err := pathID(r, "id")
+	if err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
+	rows, err := s.m.pg.QueryContext(r.Context(), "SELECT id FROM c2_tasks WHERE session_id=$1 AND status='awaiting_approval'", id)
+	if err != nil {
+		operatorError(w, err)
+		return
+	}
+	ids := []int64{}
+	for rows.Next() {
+		var task int64
+		if rows.Scan(&task) == nil {
+			ids = append(ids, task)
+		}
+	}
+	rows.Close()
+	for _, task := range ids {
+		s.cancelOperatorC2Approval(task)
+	}
+	if _, err = s.m.pg.ExecContext(r.Context(), "DELETE FROM c2_sessions WHERE id=$1", id); err != nil {
+		operatorError(w, err)
+		return
+	}
+	s.c2Event(r.Context(), 0, id, 0, "session", "operator deleted session")
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 func (s *Server) queueOperatorC2Task(ctx context.Context, sid int64, b json.RawMessage, source string) (int64, string, error) {
@@ -652,7 +670,7 @@ func (s *Server) queueOperatorC2Task(ctx context.Context, sid int64, b json.RawM
 				return 0, "", fmt.Errorf("upload must be valid base64, at most 2 MiB")
 			}
 		}
-	case "exit", "kill":
+	case "exit", "kill", "persist", "selfdel":
 	default:
 		return 0, "", fmt.Errorf("unsupported task type")
 	}
@@ -668,9 +686,6 @@ func (s *Server) queueOperatorC2Task(ctx context.Context, sid int64, b json.RawM
 	}
 	var id int64
 	err := s.m.pg.QueryRowContext(ctx, `INSERT INTO c2_tasks(session_id,task_type,payload,status,source,approval_status) VALUES($1,$2,$3::jsonb,$4,$5,$6) RETURNING id`, sid, v.Type, payload, status, source, approval).Scan(&id)
-	if err == nil && status == "awaiting_approval" {
-		s.requestOperatorC2Approval(id, sid, v.Type, payload)
-	}
 	return id, status, err
 }
 func (s *Server) operatorC2Task(w http.ResponseWriter, r *http.Request) {
@@ -697,6 +712,19 @@ func (s *Server) operatorC2Task(w http.ResponseWriter, r *http.Request) {
 	if e != nil {
 		writeErr(w, 400, e.Error())
 		return
+	}
+	if status == "awaiting_approval" {
+		var taskType string
+		var payload []byte
+		if e = s.m.pg.QueryRowContext(r.Context(), "SELECT task_type,payload FROM c2_tasks WHERE id=$1", tid).Scan(&taskType, &payload); e != nil {
+			operatorError(w, e)
+			return
+		}
+		status, e = s.awaitOperatorC2Approval(r.Context(), tid, id, taskType, payload)
+		if e != nil {
+			operatorError(w, e)
+			return
+		}
 	}
 	writeJSON(w, 200, map[string]any{"id": tid, "status": status})
 }
@@ -738,7 +766,7 @@ func (s *Server) operatorC2ApproveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var pending int64
-	err = s.m.pg.QueryRowContext(r.Context(), `SELECT id FROM intercept_pending WHERE status='pending' AND tool_name LIKE 'c2_%' AND tool_input->>'c2_task_id'=$1::text ORDER BY id DESC LIMIT 1`, id).Scan(&pending)
+	err = s.m.pg.QueryRowContext(r.Context(), `SELECT id FROM intercept_pending WHERE status='pending' AND tool_name LIKE 'c2_task:%' AND tool_input->>'c2_task_id'=$1::text ORDER BY id DESC LIMIT 1`, id).Scan(&pending)
 	if err != nil {
 		writeErr(w, 409, "approval not pending or still initializing; refresh the approval queue")
 		return
@@ -878,7 +906,7 @@ func (s *Server) operatorC2Tools() []actool.CoreTool {
 			return []map[string]any{}, nil
 		}
 		return s.operatorSQLList(ctx, `SELECT to_jsonb(x) FROM c2_sessions x WHERE id=$1 AND status='active'`, bound["session_id"])
-	}), tool("c2_exec", "向显式绑定的 C2 会话排队任务。AI 请求记录为待审批，操作员批准后才投递；已投递任务不会自动重放。", map[string]any{"session_id": map[string]any{"type": "integer"}, "command": strParam("命令")}, []string{"session_id", "command"}, false, func(ctx context.Context, b json.RawMessage) (any, error) {
+	}), tool("c2_exec", "向显式绑定的 C2 会话排队 shell 任务，命令遵循现有工具闸门。文件传输、退出等按原版任务类型进入人工审批；已投递任务不会自动重放。", map[string]any{"session_id": map[string]any{"type": "integer"}, "command": strParam("命令")}, []string{"session_id", "command"}, false, func(ctx context.Context, b json.RawMessage) (any, error) {
 		var v struct {
 			ID      int64  `json:"session_id"`
 			Command string `json:"command"`

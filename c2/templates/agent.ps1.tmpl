@@ -74,7 +74,7 @@ while($true){
      }elseif($t.type -eq 'download'){
       if((Get-Item -LiteralPath $t.path).Length -gt 2097152){throw 'download exceeds 2 MiB'}
       $out=[Convert]::ToBase64String([IO.File]::ReadAllBytes($t.path))
-     }
+     }else{throw ('unsupported task type: '+$t.type)}
     }catch{$er=$_.Exception.Message}
     $st='success';if($er){$st='failed'}$res+=@{id=$t.id;output=$out;error=$er;status=$st}
    }

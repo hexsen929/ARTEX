@@ -8,48 +8,56 @@ import (
 	"time"
 )
 
-func (s *Server) requestOperatorC2Approval(taskID, sessionID int64, kind string, payload []byte) {
+func (s *Server) awaitOperatorC2Approval(parent context.Context, taskID, sessionID int64, kind string, payload []byte) (string, error) {
 	if s.c2Ops == nil || s.m == nil || s.m.pg == nil {
-		return
+		return "blocked", fmt.Errorf("C2 approval subsystem unavailable")
 	}
 	s.c2Ops.mu.Lock()
 	if s.c2Ops.closed {
 		s.c2Ops.mu.Unlock()
-		return
+		return "blocked", fmt.Errorf("C2 subsystem closing")
 	}
-	ctx, cancel := context.WithCancel(s.c2Ops.ctx)
+	ctx, cancel := context.WithCancel(parent)
+	stopGlobal := context.AfterFunc(s.c2Ops.ctx, cancel)
 	if s.c2Ops.approvals == nil {
 		s.c2Ops.approvals = map[int64]context.CancelFunc{}
 	}
 	s.c2Ops.approvals[taskID] = cancel
 	s.c2Ops.wg.Add(1)
 	s.c2Ops.mu.Unlock()
-	go func() {
-		defer s.c2Ops.wg.Done()
-		defer cancel()
-		defer func() { s.c2Ops.mu.Lock(); delete(s.c2Ops.approvals, taskID); s.c2Ops.mu.Unlock() }()
-		allowed := false
-		reason := "C2 approval subsystem unavailable"
-		if s.m.interceptor != nil {
-			var body any
-			if json.Unmarshal(payload, &body) != nil {
-				body = map[string]any{}
-			}
-			raw, _ := json.Marshal(map[string]any{"c2_task_id": taskID, "session_id": sessionID, "type": kind, "payload": body})
-			allowed = s.m.interceptor.HandleAsk(ctx, 0, intercept.Decision{Action: "ask", Message: fmt.Sprintf("C2 %s 操作需要人工审批（会话 #%d / 任务 #%d）", kind, sessionID, taskID), TimeoutEnabled: false}, "c2_"+kind, raw)
-			reason = "C2 approval rejected or cancelled"
+	defer s.c2Ops.wg.Done()
+	defer cancel()
+	defer stopGlobal()
+	defer func() { s.c2Ops.mu.Lock(); delete(s.c2Ops.approvals, taskID); s.c2Ops.mu.Unlock() }()
+	allowed := false
+	reason := "C2 approval subsystem unavailable"
+	var listenerID int64
+	_ = s.m.pg.QueryRowContext(ctx, "SELECT listener_id FROM c2_sessions WHERE id=$1", sessionID).Scan(&listenerID)
+	if s.m.interceptor != nil {
+		var body any
+		if json.Unmarshal(payload, &body) != nil {
+			body = map[string]any{}
 		}
-		// A cancel, shutdown or another decision owns the terminal state. Never
-		// resurrect a cancelled task after an approval response arrives late.
-		status, approval := "blocked", "rejected"
-		if allowed && ctx.Err() == nil {
-			status, approval = "queued", "approved"
-			reason = ""
+		raw, _ := json.Marshal(map[string]any{"c2_task_id": taskID, "c2_listener_id": listenerID, "c2_session_id": sessionID, "task_type": kind, "payload": body})
+		allowed = s.m.interceptor.HandleAsk(ctx, 0, intercept.Decision{Action: "ask", Message: fmt.Sprintf("C2 会话 #%d 请求执行危险任务 %q，需要人工审批", sessionID, kind), TimeoutEnabled: false}, "c2_task:"+kind, raw)
+		reason = "C2 approval rejected or cancelled"
+	}
+	status, approval := "blocked", "rejected"
+	if allowed && ctx.Err() == nil {
+		status, approval = "queued", "approved"
+		reason = ""
+	}
+	saveCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	var saved string
+	err := s.m.pg.QueryRowContext(saveCtx, `UPDATE c2_tasks SET status=$2,approval_status=$3,error=$4 WHERE id=$1 AND status='awaiting_approval' RETURNING status`, taskID, status, approval, reason).Scan(&saved)
+	if err != nil {
+		if e := s.m.pg.QueryRowContext(saveCtx, "SELECT status FROM c2_tasks WHERE id=$1", taskID).Scan(&saved); e != nil {
+			return "blocked", e
 		}
-		saveCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stop()
-		_, _ = s.m.pg.ExecContext(saveCtx, `UPDATE c2_tasks SET status=$2,approval_status=$3,error=$4 WHERE id=$1 AND status='awaiting_approval'`, taskID, status, approval, reason)
-	}()
+		return saved, nil
+	}
+	return saved, nil
 }
 func (s *Server) cancelOperatorC2Approval(id int64) {
 	if s.c2Ops == nil {

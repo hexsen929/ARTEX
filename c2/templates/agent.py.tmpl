@@ -228,6 +228,7 @@ if MODE=='http':
       data=open(t['path'],'rb').read(2097153)
       if len(data)>2097152:raise ValueError('download exceeds 2 MiB')
       out=base64.b64encode(data).decode()
+     else:raise ValueError('unsupported task type: '+str(t.get('type')))
     except Exception as e:er=str(e)
     res.append({'id':t['id'],'output':out,'error':er,'status':'failed' if er else 'success'})
    if res:
@@ -268,6 +269,7 @@ else:
        data=open(t['path'],'rb').read(2097153)
        if len(data)>2097152:raise ValueError('download exceeds 2 MiB')
        out=base64.b64encode(data).decode()
+      else:raise ValueError('unsupported task type: '+str(t.get('type')))
      except Exception as e:er=str(e)
      res.append({'id':t['id'],'output':out,'error':er,'status':'failed' if er else 'success'})
     rm={'type':'result','session_id':msg.get('session_id'),'results':res} if res else {'type':'beacon','session_id':msg.get('session_id')}

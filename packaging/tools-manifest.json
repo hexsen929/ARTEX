@@ -1176,6 +1176,131 @@
       "execution": "target",
       "category": "arsenal",
       "env": ""
+    },
+    {
+      "name": "subfinder",
+      "purpose": "原红队工具包的 macOS ARM64 主机运行时：subfinder",
+      "version": "2.17.0",
+      "platform": "darwin/arm64",
+      "sha256": "",
+      "path": "tools/subfinder",
+      "execution": "host",
+      "category": "arsenal",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/subfinder",
+          "version": "2.17.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/subfinder/releases/download/v2.17.0/subfinder_2.17.0_macOS_arm64.zip",
+            "sha256": "012d6ff91ef932ac6d1a321fb5735cf1412168d163e6adbc6cbe5fc42fe03c3b",
+            "size": 9883401,
+            "format": "zip",
+            "member": "subfinder"
+          }
+        }
+      ]
+    },
+    {
+      "name": "dnsx",
+      "purpose": "原红队工具包的 macOS ARM64 主机运行时：dnsx",
+      "version": "1.3.1",
+      "platform": "darwin/arm64",
+      "sha256": "",
+      "path": "tools/dnsx",
+      "execution": "host",
+      "category": "arsenal",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/dnsx",
+          "version": "1.3.1",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/projectdiscovery/dnsx/releases/download/v1.3.1/dnsx_1.3.1_macOS_arm64.zip",
+            "sha256": "6b1681e4168cf6175facea723e16fca4ca2f99c3f9f83dea8c2b79ed20a3f417",
+            "size": 9397450,
+            "format": "zip",
+            "member": "dnsx"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ksubdomain",
+      "purpose": "原红队工具包的 macOS ARM64 主机运行时：ksubdomain",
+      "version": "2.4.0",
+      "platform": "darwin/arm64",
+      "sha256": "",
+      "path": "tools/ksubdomain",
+      "execution": "host",
+      "category": "arsenal",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/ksubdomain",
+          "version": "2.4.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/boy-hack/ksubdomain/releases/download/v2.4.0/KSubdomain-v2.4.0-darwin-arm64.zip",
+            "sha256": "ef63157ee3401360d45bf361ab76b640327a04fc8fc719c8d27de4721745b523",
+            "size": 7461843,
+            "format": "zip",
+            "member": "ksubdomain"
+          }
+        }
+      ]
+    },
+    {
+      "name": "frpc",
+      "purpose": "原红队工具包的 macOS ARM64 主机运行时：frpc",
+      "version": "0.72.0",
+      "platform": "darwin/arm64",
+      "sha256": "",
+      "path": "tools/frpc",
+      "execution": "host",
+      "category": "arsenal",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/frpc",
+          "version": "0.72.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/fatedier/frp/releases/download/v0.72.0/frp_0.72.0_darwin_arm64.tar.gz",
+            "sha256": "6e8576c5b6b9914a86850f6ff4fb81c5a09e706f91f70f64d5f398558bdc9db8",
+            "size": 13217943,
+            "format": "tar.gz",
+            "member": "frpc"
+          }
+        }
+      ]
+    },
+    {
+      "name": "frps",
+      "purpose": "原红队工具包的 macOS ARM64 主机运行时：frps",
+      "version": "0.72.0",
+      "platform": "darwin/arm64",
+      "sha256": "",
+      "path": "tools/frps",
+      "execution": "host",
+      "category": "arsenal",
+      "variants": [
+        {
+          "platform": "darwin/arm64",
+          "path": "tools/frps",
+          "version": "0.72.0",
+          "sha256": "",
+          "download": {
+            "url": "https://github.com/fatedier/frp/releases/download/v0.72.0/frp_0.72.0_darwin_arm64.tar.gz",
+            "sha256": "6e8576c5b6b9914a86850f6ff4fb81c5a09e706f91f70f64d5f398558bdc9db8",
+            "size": 13217943,
+            "format": "tar.gz",
+            "member": "frps"
+          }
+        }
+      ]
     }
   ]
 }

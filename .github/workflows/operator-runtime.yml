@@ -1,0 +1,62 @@
+name: complete operator runtime
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/laowei-feature-port-*']
+    paths:
+      - packaging/operator-runtime-sources.json
+      - packaging/prepare-operator-runtime.py
+      - .github/workflows/operator-runtime.yml
+permissions:
+  contents: read
+concurrency:
+  group: operator-runtime-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  macos-runtime:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: arm64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11.0.33+10'
+          architecture: aarch64
+      - name: Resource import and platform manifest regressions
+        run: python3 -m unittest discover -s packaging -p 'test_*.py'
+      - name: Prepare pinned native host supplements
+        run: |
+          python3 packaging/prepare-tools.py --platform darwin/arm64 \
+            --destination "$RUNNER_TEMP/operator-runtime/tools" \
+            --host-only --tools subfinder,dnsx,ksubdomain,frpc,frps --install
+      - name: Native identity and entry-point checks
+        run: |
+          root="$RUNNER_TEMP/operator-runtime/tools"
+          "$root/subfinder" -version
+          "$root/dnsx" -version
+          "$root/ksubdomain" --help
+          "$root/frpc" --version
+          "$root/frps" --version
+      - name: Build Java, Python and native ARM64 AntSword runtime
+        run: python3 packaging/prepare-operator-runtime.py --destination "$RUNNER_TEMP/operator-runtime/tools"
+      - name: Smoke help and real GUI initialization without targets
+        run: python3 packaging/prepare-operator-runtime.py --destination "$RUNNER_TEMP/operator-runtime/tools" --smoke
+      - name: Package relocatable runtime
+        run: |
+          tar -czf "$RUNNER_TEMP/complete-operator-runtime-darwin-arm64.tar.gz" -C "$RUNNER_TEMP/operator-runtime" tools
+          shasum -a 256 "$RUNNER_TEMP/complete-operator-runtime-darwin-arm64.tar.gz" > "$RUNNER_TEMP/complete-operator-runtime-darwin-arm64.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: complete-operator-runtime-darwin-arm64
+          path: |
+            ${{ runner.temp }}/complete-operator-runtime-darwin-arm64.tar.gz
+            ${{ runner.temp }}/complete-operator-runtime-darwin-arm64.sha256
+          retention-days: 7
