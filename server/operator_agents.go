@@ -17,6 +17,19 @@ import (
 //go:embed operator_agents.json
 var operatorAgentDefinitions []byte
 
+//go:embed operator_tool_agents.json
+var operatorToolAgents []byte
+
+func operatorDefaultToolAgents(name string) []string {
+	var bindings map[string][]string
+	if json.Unmarshal(operatorToolAgents, &bindings) == nil {
+		if agents, ok := bindings[name]; ok {
+			return agents
+		}
+	}
+	return []string{"worker", "pentest"}
+}
+
 func (s *Server) seedOperatorAgents() {
 	var done map[string]bool
 	if s.m.pg.OperatorSetting(s.ctx, "operator.agents.seeded.v1", &done) == nil && done["done"] {

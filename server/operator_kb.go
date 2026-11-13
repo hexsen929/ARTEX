@@ -131,13 +131,7 @@ func (s *Server) initOperatorModules() {
 	}
 	for _, t := range s.operatorTools() {
 		schema, _ := json.Marshal(t.InputSchema())
-		roles := []string{"worker", "pentest"}
-		if strings.HasPrefix(t.Name(), "kb_") {
-			roles = []string{"worker", "planner", "mainagent", "pentest"}
-		}
-		if strings.HasPrefix(t.Name(), "c2_") {
-			roles = []string{"pentest"}
-		}
+		roles := operatorDefaultToolAgents(t.Name())
 		agents, _ := json.Marshal(roles)
 		if err := s.m.pg.SeedTool(t.Name(), t.Description(), schema, agents); err != nil {
 			log.Printf("[operator] seed %s: %v", t.Name(), err)

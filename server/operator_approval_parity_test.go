@@ -125,3 +125,17 @@ func TestOperatorC2IndependentConversationKeepsExactSessionBinding(t *testing.T)
 		t.Fatal("C2 chat escaped its bound session")
 	}
 }
+
+func TestOperatorDefaultRemoteToolRolesMatchOriginal(t *testing.T) {
+	for _, name := range []string{"c2_exec", "c2_list_sessions", "c2_task_result", "list_sessions", "session_eval"} {
+		found := false
+		for _, role := range operatorDefaultToolAgents(name) {
+			if role == "mainagent" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("original independent chat cannot obtain its tools", name)
+		}
+	}
+}
