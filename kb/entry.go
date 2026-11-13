@@ -161,7 +161,7 @@ func Rank(entries []Entry, q Query) Result {
 		if q.Component != "" && !strings.Contains(strings.ToLower(e.Component), strings.ToLower(q.Component)) {
 			continue
 		}
-		if q.Category != "" && !categoryMatches(q.Category, e.Category) || q.Kind != "" && q.Kind != e.Kind || q.Polarity != "" && !categoryMatches(q.Polarity, e.Polarity) {
+		if q.Category != "" && !categoryMatches(q.Category, e.Category) || q.Kind != "" && q.Kind != e.Kind {
 			continue
 		}
 		n := e.Score
@@ -202,12 +202,15 @@ func Rank(entries []Entry, q Query) Result {
 	if n > 200 {
 		n = 200
 	}
-	for _, r := range rs {
+	for i, r := range rs {
 		out.Stats[r.e.Polarity]++
-		if len(out.Ammo)+len(out.Playbook)+len(out.Negative) >= n {
-			continue
+		if i >= n {
+			break
 		}
 		e := r.e
+		if q.Polarity != "" && !categoryMatches(q.Polarity, e.Polarity) {
+			continue
+		}
 		e.Content = ""
 		switch e.Polarity {
 		case "negative":
@@ -221,7 +224,57 @@ func Rank(entries []Entry, q Query) Result {
 		}
 	}
 	out.Stats["total"] = len(rs)
+	switch {
+	case len(out.Ammo)+len(out.Playbook) > 0:
+		out.Hint = "弹药/打法命中：取全文用 kb_get(\"<code>\")（会自动记一次复用）；命中即用，不要重新手搓。"
+	case len(out.Negative) > 0:
+		out.Hint = "只命中负面情报：这条路已被证明走不通，换面。"
+	default:
+		out.Hint = "库里没有命中：先查本机 nuclei 模板，再上网或手搓，验证有效后用 kb_add 回填。"
+	}
 	return out
+}
+
+// ToolResponse is the original compact SDK contract. The browser's flat
+// metadata response is separate; neither operation implicitly executes a POC.
+func (r Result) ToolResponse() map[string]any {
+	brief := func(es []Entry) []map[string]any {
+		items := []map[string]any{}
+		clip := func(s string, n int) string {
+			v := []rune(s)
+			if len(v) > n {
+				return string(v[:n]) + "…"
+			}
+			return s
+		}
+		for _, e := range es {
+			v := map[string]any{"id": e.ID, "code": e.Code, "title": clip(e.Title, 160), "category": e.Category, "polarity": e.Polarity, "verified": e.Verified, "hit_count": e.HitCount, "has_content": e.HasContent}
+			for k, s := range map[string]string{"cve": e.CVE, "component": e.Component, "severity": e.Severity, "kind": e.Kind} {
+				if s != "" {
+					v[k] = s
+				}
+			}
+			if e.VerifiedNote != "" {
+				v["verified_note"] = clip(e.VerifiedNote, 200)
+			}
+			if e.Usage != "" {
+				v["usage"] = clip(e.Usage, 240)
+			} else if e.Description != "" {
+				v["description"] = clip(e.Description, 200)
+			}
+			if e.EngagementName != "" {
+				v["engagement"] = e.EngagementName
+			} else if e.EngagementID != "" {
+				v["engagement"] = e.EngagementID
+			}
+			if e.AssetTarget != "" {
+				v["asset_target"] = clip(e.AssetTarget, 120)
+			}
+			items = append(items, v)
+		}
+		return items
+	}
+	return map[string]any{"buckets": map[string]any{"ammo": brief(r.Ammo), "playbook": brief(r.Playbook), "negative": brief(r.Negative)}, "counts": map[string]int{"ammo": len(r.Ammo), "playbook": len(r.Playbook), "negative": len(r.Negative)}, "hint": r.Hint, "stats": r.Stats}
 }
 func ReferenceBlock(r Result) string {
 	if len(r.Ammo)+len(r.Playbook)+len(r.Negative) == 0 {

@@ -766,7 +766,7 @@ func (s *Server) operatorC2ApproveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var pending int64
-	err = s.m.pg.QueryRowContext(r.Context(), `SELECT id FROM intercept_pending WHERE status='pending' AND tool_name LIKE 'c2_task:%' AND tool_input->>'c2_task_id'=$1::text ORDER BY id DESC LIMIT 1`, id).Scan(&pending)
+	err = s.m.pg.QueryRowContext(r.Context(), `SELECT id FROM intercept_pending WHERE status='pending' AND tool_name LIKE 'c2_task:%' AND tool_input->>'c2_task_id'=$1 ORDER BY id DESC LIMIT 1`, fmt.Sprint(id)).Scan(&pending)
 	if err != nil {
 		writeErr(w, 409, "approval not pending or still initializing; refresh the approval queue")
 		return
@@ -852,11 +852,11 @@ func (s *Server) operatorC2Chat(w http.ResponseWriter, r *http.Request) {
 	if !operatorDecode(w, r, &req) {
 		return
 	}
-	if req.TaskID <= 0 {
-		writeErr(w, 400, "explicit task_id required for agent control")
+	if req.TaskID < 0 {
+		writeErr(w, 400, "invalid task_id")
 		return
 	}
-	if _, ok := s.m.Task(strconv.FormatInt(req.TaskID, 10)); !ok {
+	if _, ok := s.m.Task(strconv.FormatInt(req.TaskID, 10)); req.TaskID > 0 && !ok {
 		writeErr(w, 400, "task not found")
 		return
 	}
@@ -866,7 +866,7 @@ func (s *Server) operatorC2Chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Agent == "" {
-		req.Agent = "pentest"
+		req.Agent = "mainagent"
 	}
 	if !operatorExecutionRole(req.Agent) {
 		writeErr(w, 400, "execution role required")
@@ -896,16 +896,18 @@ func (s *Server) operatorC2Tools() []actool.CoreTool {
 		}})
 	}
 	return []actool.CoreTool{tool("c2_list_sessions", "列出当前 C2 控制会话；不返回认证密钥。", map[string]any{}, nil, true, func(ctx context.Context, b json.RawMessage) (any, error) {
-		if agent.RunInfoFrom(ctx).TaskID <= 0 {
-			return nil, fmt.Errorf("task context required")
+		var opts struct {
+			ListenerID int64  `json:"listener_id"`
+			Status     string `json:"status"`
 		}
-		ri := agent.RunInfoFrom(ctx)
-		conv := strings.TrimPrefix(ri.SessionID, "conv-")
-		var bound map[string]int64
-		if err := s.m.pg.OperatorSetting(ctx, "conversation.c2."+conv, &bound); err != nil || bound["task_id"] != ri.TaskID {
-			return []map[string]any{}, nil
+		if json.Unmarshal(b, &opts) != nil {
+			return nil, fmt.Errorf("invalid input")
 		}
-		return s.operatorSQLList(ctx, `SELECT to_jsonb(x) FROM c2_sessions x WHERE id=$1 AND status='active'`, bound["session_id"])
+		sid := int64(0)
+		if binding, ok := ctx.Value(operatorRemoteBindingKey{}).(operatorRemoteBinding); ok && binding.Kind == "c2" {
+			sid = binding.SessionID
+		}
+		return s.operatorSQLList(ctx, `SELECT to_jsonb(x) FROM c2_sessions x WHERE ($1=0 OR id=$1) AND ($2=0 OR listener_id=$2) AND ($3='' OR status=$3) ORDER BY id DESC`, sid, opts.ListenerID, opts.Status)
 	}), tool("c2_exec", "向显式绑定的 C2 会话排队 shell 任务，命令遵循现有工具闸门。文件传输、退出等按原版任务类型进入人工审批；已投递任务不会自动重放。", map[string]any{"session_id": map[string]any{"type": "integer"}, "command": strParam("命令")}, []string{"session_id", "command"}, false, func(ctx context.Context, b json.RawMessage) (any, error) {
 		var v struct {
 			ID      int64  `json:"session_id"`
@@ -949,14 +951,15 @@ func (s *Server) operatorC2Tools() []actool.CoreTool {
 	})}
 }
 func (s *Server) checkC2TaskBinding(ctx context.Context, sid int64) error {
-	ri := agent.RunInfoFrom(ctx)
-	if ri.TaskID <= 0 {
-		return fmt.Errorf("task context required")
+	if binding, ok := ctx.Value(operatorRemoteBindingKey{}).(operatorRemoteBinding); ok && binding.Kind == "c2" && binding.SessionID != sid {
+		return fmt.Errorf("此 C2 对话仅绑定会话 %d", binding.SessionID)
 	}
-	var bound map[string]int64
-	conv := strings.TrimPrefix(ri.SessionID, "conv-")
-	if err := s.m.pg.OperatorSetting(ctx, "conversation.c2."+conv, &bound); err != nil || bound["task_id"] != ri.TaskID || bound["session_id"] != sid {
-		return fmt.Errorf("C2 session is not explicitly bound to this task conversation")
+	var status string
+	if err := s.m.pg.QueryRowContext(ctx, "SELECT status FROM c2_sessions WHERE id=$1", sid).Scan(&status); err != nil {
+		return err
+	}
+	if status == "killed" {
+		return fmt.Errorf("C2 session unavailable")
 	}
 	return nil
 }

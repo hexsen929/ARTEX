@@ -1279,13 +1279,13 @@ function C2() {
               <Input
                 className="max-w-xs"
                 type="number"
-                placeholder="所属任务 ID"
+                placeholder="任务 ID（留空为独立对话）"
                 value={task}
                 onChange={(e) => setTask(e.target.value)}
               />
               <Button
                 variant="outline"
-                disabled={!task || action.busy}
+                disabled={action.busy}
                 onClick={() =>
                   action.run(async () => {
                     const v = await api.save<{ conversation_id: number }>(`/c2/sessions/${session.id}/chat`, {
@@ -1295,7 +1295,7 @@ function C2() {
                   }, "")
                 }
               >
-                打开任务绑定对话
+                打开会话绑定对话
               </Button>
             </div>
             <form

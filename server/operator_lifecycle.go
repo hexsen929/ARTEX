@@ -45,7 +45,7 @@ func (s *Server) operatorConversationContext(ctx context.Context, c *db.Conversa
 		if err != nil {
 			return ctx, nil, true, conversationAdmissionError()
 		}
-		if b["task_id"] < 0 || (kind != "webshell" && b["task_id"] == 0) || (kind != "expert" && b["session_id"] <= 0) || (kind != "expert" && !operatorExecutionRole(c.AgentKey)) {
+		if b["task_id"] < 0 || (kind == "expert" && b["task_id"] == 0) || (kind != "expert" && b["session_id"] <= 0) || (kind != "expert" && !operatorExecutionRole(c.AgentKey)) {
 			return ctx, nil, true, conversationAdmissionError()
 		}
 		if kind != "expert" {
@@ -57,6 +57,12 @@ func (s *Server) operatorConversationContext(ctx context.Context, c *db.Conversa
 			}
 			rec, err := s.sessStore.Get(ctx, b["session_id"])
 			if err != nil || rec == nil || rec.CreatedByTask != 0 {
+				return ctx, nil, true, conversationAdmissionError()
+			}
+			return ctx, nil, true, nil
+		}
+		if kind == "c2" && b["task_id"] == 0 {
+			if err := s.checkC2TaskBinding(ctx, b["session_id"]); err != nil {
 				return ctx, nil, true, conversationAdmissionError()
 			}
 			return ctx, nil, true, nil

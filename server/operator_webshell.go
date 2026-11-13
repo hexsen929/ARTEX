@@ -344,7 +344,7 @@ func (s *Server) operatorWebshellChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Agent == "" {
-		req.Agent = "pentest"
+		req.Agent = "mainagent"
 	}
 	if !operatorExecutionRole(req.Agent) {
 		writeErr(w, 400, "execution role required")
@@ -431,7 +431,9 @@ func (s *Server) operatorSessionTools() []actool.CoreTool {
 				}
 				items := []map[string]any{}
 				if opts.Status == "" || rec.Status == opts.Status {
-					items = append(items, sessionItem(rec))
+					item := sessionItem(rec)
+					item["session_id"] = rec.ID
+					items = append(items, item)
 				}
 				return encode(items)
 			}
@@ -454,7 +456,9 @@ func (s *Server) operatorSessionTools() []actool.CoreTool {
 						continue
 					}
 				}
-				items = append(items, sessionItem(r))
+				item := sessionItem(r)
+				item["session_id"] = r.ID
+				items = append(items, item)
 			}
 			return encode(items)
 		}}),

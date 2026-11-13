@@ -7,9 +7,8 @@ import (
 
 func TestOperatorOriginalMixedChineseQueryTerms(t *testing.T) {
 	got := ExtractTerms("HTTPS 测试 Spring_Boot 反序列化漏洞的验证 alpha.alpha --ab--")
-	want := []Term{{"spring_boot", true}, {"alpha.alpha", true}, {"ab", false}, {"反序列化漏洞的验证", false}}
+	want := []Term{{"spring_boot", true}, {"alpha.alpha", true}, {"ab", false}}
 	// A >8-rune phrase is not an anchor; its overlapping non-stop bigrams are.
-	want = want[:3]
 	want = append(want, Term{"反序", false}, Term{"序列", false}, Term{"列化", false}, Term{"化漏", false}, Term{"漏洞", false}, Term{"验证", false})
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v; want %#v", got, want)
@@ -21,6 +20,24 @@ func TestOperatorOriginalMixedChineseQueryTerms(t *testing.T) {
 	}
 	if len(ExtractTerms("http https www 测试 使用 如何")) != 0 {
 		t.Fatal("original stopwords were retained")
+	}
+}
+
+func TestOperatorOriginalSDKSearchBucketsAndBrief(t *testing.T) {
+	r := Rank([]Entry{{ID: 1, Code: "fixture", Title: "needle", Polarity: "context", Verified: true, Usage: "usage", HasContent: true}}, Query{Q: "needle"})
+	d := r.ToolResponse()
+	b := d["buckets"].(map[string]any)
+	items := b["ammo"].([]map[string]any)
+	if len(items) != 1 || items[0]["has_content"] != true || items[0]["usage"] != "usage" {
+		t.Fatal(d)
+	}
+	for _, k := range []string{"content", "score", "path", "source_url"} {
+		if _, ok := items[0][k]; ok {
+			t.Fatal("not original compact metadata", k)
+		}
+	}
+	if _, ok := d["counts"]; !ok {
+		t.Fatal("SDK counts missing")
 	}
 }
 

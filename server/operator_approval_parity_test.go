@@ -71,9 +71,10 @@ func TestOperatorC2OriginalApprovalFlowAndCancellation(t *testing.T) {
 		if cancelled {
 			cancel()
 		} else {
-			if err = s.m.interceptor.Decide(pending, true); err != nil {
+			status, response := operatorRequest(t, s, "POST", fmt.Sprintf("/api/c2/tasks/%d/approve", id), map[string]any{})
+			if status != 200 {
 				cancel()
-				t.Fatal(err)
+				t.Fatal(status, response)
 			}
 		}
 		got := <-done
@@ -85,5 +86,42 @@ func TestOperatorC2OriginalApprovalFlowAndCancellation(t *testing.T) {
 		if got != want {
 			t.Fatal(got, want)
 		}
+	}
+}
+
+func TestOperatorC2IndependentConversationKeepsExactSessionBinding(t *testing.T) {
+	s := operatorFixture(t)
+	var lid, sid, other int64
+	if err := s.m.pg.QueryRow(`INSERT INTO c2_listeners(name,kind,bind_host,bind_port,encryption_key,implant_token) VALUES('fixture','http_beacon','127.0.0.1',18891,'fixture','fixture') RETURNING id`).Scan(&lid); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = s.m.pg.Exec("DELETE FROM c2_listeners WHERE id=$1", lid) })
+	for _, dest := range []*int64{&sid, &other} {
+		if err := s.m.pg.QueryRow(`INSERT INTO c2_sessions(listener_id,implant_uuid,hostname) VALUES($1,$2,'fixture') RETURNING id`, lid, fmt.Sprint(time.Now().UnixNano())).Scan(dest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, response := operatorRequest(t, s, "POST", fmt.Sprintf("/api/c2/sessions/%d/chat", sid), map[string]any{})
+	if code != 200 {
+		t.Fatal(code, response)
+	}
+	cid := int64(response["conversation_id"].(float64))
+	defer s.m.pg.Exec("DELETE FROM conversations WHERE id=$1", cid)
+	c, err := s.m.pg.GetConversation(cid)
+	if err != nil || c == nil {
+		t.Fatal(err)
+	}
+	if c.AgentKey != "mainagent" {
+		t.Fatal("original independent C2 role changed", c.AgentKey)
+	}
+	ctx, owners, bound, err := s.operatorConversationContext(t.Context(), c)
+	if err != nil || !bound || len(owners) != 0 || ctx.Value(operatorTaskChatKey{}) != nil {
+		t.Fatal(owners, bound, err)
+	}
+	if err = s.checkC2TaskBinding(ctx, sid); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.checkC2TaskBinding(ctx, other); err == nil {
+		t.Fatal("C2 chat escaped its bound session")
 	}
 }

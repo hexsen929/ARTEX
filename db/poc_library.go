@@ -282,7 +282,7 @@ func (d *DB) KBSearchEntries(ctx context.Context, q kb.Query) ([]kb.Entry, error
 		matches = strings.Join(counts, "+")
 	}
 	where := []string{"(source_finding_id IS NULL OR EXISTS(SELECT 1 FROM findings f WHERE f.id=source_finding_id AND (body->>'verified'!='true' OR f.verification_status='verified')))"}
-	for _, f := range []struct{ field, value string }{{"category", q.Category}, {"kind", q.Kind}, {"polarity", q.Polarity}} {
+	for _, f := range []struct{ field, value string }{{"category", q.Category}, {"kind", q.Kind}} {
 		if f.value != "" {
 			args = append(args, f.value)
 			expr := "body->>'" + f.field + "'"
