@@ -828,7 +828,10 @@ function Webshells() {
                       action.run(async () => {
                         const answer = Number(edit.created_by_task)
                           ? String(edit.created_by_task)
-                          : window.prompt("绑定任务 ID；填 0 打开仅控制此手工会话的独立对话", String(edit.task_id ?? 0));
+                          : window.prompt(
+                              "绑定任务 ID；填 0 打开仅控制此手工会话的独立对话",
+                              String(edit.task_id ?? 0),
+                            );
                         if (answer === null || answer.trim() === "") return;
                         const selected = Number(answer);
                         if (!Number.isSafeInteger(selected) || selected < 0) throw new Error("任务 ID 无效");

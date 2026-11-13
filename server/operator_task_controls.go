@@ -194,5 +194,5 @@ func (s *Server) operatorTaskSteer(w http.ResponseWriter, r *http.Request) {
 }
 
 func operatorExecutionRole(key string) bool {
-	return key == "pentest" || isOperatorExpert(key)
+	return key == "mainagent" || key == "pentest" || isOperatorExpert(key)
 }
