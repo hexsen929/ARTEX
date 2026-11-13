@@ -57,9 +57,17 @@ def canonical_skill(raw, name, description=None):
     # Preserve original valid frontmatter and body unless a distinct variant
     # needs a distinct registry name. Malformed source remains under refs/.
     end = text.find("\n---", 4) if text.startswith("---\n") else -1
-    if end >= 0 and meta["name"] == name and description is None:
+    front = text[4:end] if end >= 0 else ""
+    malformed = bool(re.search(r"(?m)^(?:#{1,6}\s|```)", front))
+    valid_name = bool(re.search(r"(?m)^name:\s*[^\n]+$", front))
+    if end >= 0 and valid_name and not malformed and meta["name"] == name and description is None:
         return text.encode()
-    body = text[end + 4:].lstrip("\n") if end >= 0 else text
+    if malformed:
+        # ScopeSentry puts Markdown before its first horizontal rule; that
+        # rule is not a YAML closing delimiter. Preserve the complete guide.
+        body = re.sub(r"(?m)^(?:##\s*)?(?:name|description|role|whenToUse):[^\n]*\n?", "", text[4:]).lstrip("\n")
+    else:
+        body = text[end + 4:].lstrip("\n") if end >= 0 else text
     desc = description or meta["description"] or (name + " imported operator skill")
     header = "---\nname: " + name + "\ndescription: " + json.dumps(desc, ensure_ascii=False) + "\n"
     for key in ("role", "whenToUse"):

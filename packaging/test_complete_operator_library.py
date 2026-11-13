@@ -44,3 +44,10 @@ class CompleteLibraryTests(unittest.TestCase):
         result = complete.canonical_skill(raw, "named")
         self.assertTrue(result.startswith(b"---\nname: named\n"))
         self.assertIn(b"# body", result)
+    def test_malformed_source_horizontal_rule_is_not_frontmatter_end(self):
+        raw = b"---\n\n## name: named\ndescription: fixture\n\n# Guide\nfirst part\n\n---\n\n## Second\nlast part\n"
+        result = complete.canonical_skill(raw, "named")
+        self.assertTrue(result.startswith(b"---\nname: named\n"))
+        self.assertIn(b"# Guide\nfirst part", result)
+        self.assertIn(b"## Second\nlast part", result)
+        self.assertNotIn(b"## name:", result)
