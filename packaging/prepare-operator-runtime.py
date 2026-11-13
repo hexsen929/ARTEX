@@ -38,16 +38,25 @@ def source(name,root):
         if len(roots)!=1:raise ValueError('source must have one root')
         prefix=next(iter(roots))+'/'
         total=0
+        links=[]
         for info in archive.infolist():
             parts=PurePosixPath(info.filename)
             total+=info.file_size
-            if parts.is_absolute() or '..' in parts.parts or stat.S_ISLNK(info.external_attr>>16) or total>512<<20:
+            if parts.is_absolute() or '..' in parts.parts or total>512<<20:
                 raise ValueError('unsafe source member')
             if info.is_dir():continue
             rel=info.filename.removeprefix(prefix)
             if rel==info.filename:continue
             path=destination.joinpath(*PurePosixPath(rel).parts);path.parent.mkdir(parents=True,exist_ok=True)
+            if stat.S_ISLNK(info.external_attr>>16):
+                link=archive.read(info).decode('utf-8')
+                target=Path(os.path.normpath(str(path.parent/link)))
+                if Path(link).is_absolute():raise ValueError('absolute source link')
+                try:target.relative_to(destination)
+                except ValueError:raise ValueError('source link escapes its pinned archive')
+                links.append((path,link));continue
             path.write_bytes(archive.read(info));path.chmod(0o644)
+        for path,link in links:os.symlink(link,path)
     return destination
 
 def write(path,text):
@@ -91,7 +100,7 @@ exec "$HERE/java/bin/java" --module-path "$HERE/javafx/lib" --add-modules javafx
 
     # GUI runtime and core are ordinary vendored tool resources, not the host's
     # application profile, keychain, shell list or personal Electron state.
-    ant=source('antsword',root);run('npm','install','--ignore-scripts','--no-audit','--no-fund',cwd=ant)
+    ant=source('antsword',root) # Exact vendored runtime dependencies are part of this pinned source archive.
     electron=root/'electron-build';electron.mkdir();(electron/'package.json').write_text(json.dumps({'private':True,'dependencies':{'electron':LOCK['electron_version']}}))
     run('npm','install','--no-audit','--no-fund',cwd=electron)
     dist=electron/'node_modules/electron/dist/Electron.app';app=root/'AntSword.app';shutil.copytree(dist,app,symlinks=True)
