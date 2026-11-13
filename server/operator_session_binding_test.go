@@ -37,6 +37,9 @@ func TestOperatorWebshellConversationControlsOnlyItsBoundSession(t *testing.T) {
 	if _, err := s.lookupTaskSession(ctx, b); err != nil {
 		t.Fatal("ordinary expert task lost session access", err)
 	}
+	if _, err := s.lookupTaskSession(ctx, global); err != nil {
+		t.Fatal("live task lost original global-session access", err)
+	}
 	if _, err := s.lookupTaskSession(t.Context(), global); err == nil {
 		t.Fatal("unbound global chat guessed a session ID")
 	}

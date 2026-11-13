@@ -405,6 +405,22 @@ func (s *Server) operatorWebshellAsset(w http.ResponseWriter, r *http.Request) {
 func (s *Server) operatorSessionTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		actool.Build(actool.Spec{Name: "list_sessions", Description: "列出当前任务可控制的会话；不暴露连接密码。", Schema: operatorSchema("list_sessions", map[string]any{}), ReadOnly: func(json.RawMessage) bool { return true }, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+			var opts struct {
+				Status        string `json:"status"`
+				IncludeGlobal *bool  `json:"include_global"`
+			}
+			if json.Unmarshal(b, &opts) != nil {
+				return actool.Errorf("invalid input"), nil
+			}
+			opts.Status = strings.ToLower(strings.TrimSpace(opts.Status))
+			if opts.Status != db.SessionAlive && opts.Status != db.SessionDead {
+				opts.Status = ""
+			}
+			includeGlobal := opts.IncludeGlobal == nil || *opts.IncludeGlobal
+			encode := func(items []map[string]any) (actool.Result, error) {
+				out, _ := json.Marshal(map[string]any{"sessions": items, "count": len(items)})
+				return actool.Text(string(out)), nil
+			}
 			if binding, ok := ctx.Value(operatorRemoteBindingKey{}).(operatorRemoteBinding); ok && binding.Kind == "webshell" {
 				if _, err := s.lookupTaskSession(ctx, binding.SessionID); err != nil {
 					return actool.Errorf(err.Error()), nil
@@ -413,23 +429,34 @@ func (s *Server) operatorSessionTools() []actool.CoreTool {
 				if err != nil {
 					return actool.Errorf(err.Error()), nil
 				}
-				out, _ := json.Marshal([]map[string]any{sessionItem(rec)})
-				return actool.Text(string(out)), nil
+				items := []map[string]any{}
+				if opts.Status == "" || rec.Status == opts.Status {
+					items = append(items, sessionItem(rec))
+				}
+				return encode(items)
 			}
 			id := agent.RunInfoFrom(ctx).TaskID
-			if id <= 0 {
-				return actool.Errorf("task context required"), nil
-			}
-			rs, err := s.sessStore.ListForTask(ctx, id, "")
+			rs, err := s.sessStore.List(ctx, opts.Status)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
 			items := []map[string]any{}
 			for _, r := range rs {
+				if id > 0 {
+					if r.CreatedByTask == 0 && !includeGlobal {
+						continue
+					}
+					ok, err := s.sessStore.TaskCanUse(ctx, r.ID, id)
+					if err != nil {
+						return actool.Errorf(err.Error()), nil
+					}
+					if !ok {
+						continue
+					}
+				}
 				items = append(items, sessionItem(r))
 			}
-			out, _ := json.Marshal(items)
-			return actool.Text(string(out)), nil
+			return encode(items)
 		}}),
 		actool.Build(actool.Spec{Name: "session_eval", Description: "通过当前任务绑定的 PHP 会话执行原生 PHP 片段。使用已有任务会话授权，不创建任意远程连接。", Schema: operatorSchema("session_eval", map[string]any{}), Permissions: sessionPerm, ReadOnly: func(json.RawMessage) bool { return false }, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
 			var v struct {
