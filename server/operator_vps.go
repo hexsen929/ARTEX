@@ -3,21 +3,67 @@ package server
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/Autumn-27/artex/agent"
 	actool "github.com/Autumn-27/norma/tool"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// The original VPS client uses its own TOFU file, never ~/.ssh/known_hosts.
+// Serialize check+append so concurrent first connections cannot trust two keys.
+var operatorKnownHostsMu sync.Mutex
+
+func operatorVPSHostKeyCallback(path, configuredHost string, pin map[string]string) ssh.HostKeyCallback {
+	return func(host string, remote net.Addr, key ssh.PublicKey) error {
+		if pin["key"] != "" {
+			if pin["host"] != configuredHost || pin["key"] != ssh.FingerprintSHA256(key) {
+				return fmt.Errorf("SSH host key differs from explicit pin: %s", ssh.FingerprintSHA256(key))
+			}
+			return nil
+		}
+		operatorKnownHostsMu.Lock()
+		defer operatorKnownHostsMu.Unlock()
+		check, err := knownhosts.New(path)
+		if err == nil {
+			err = check(host, remote, key)
+			if err == nil {
+				return nil
+			}
+			var unknown *knownhosts.KeyError
+			if !errors.As(err, &unknown) || len(unknown.Want) != 0 {
+				return fmt.Errorf("SSH host key mismatch for %s in %s: %w", host, path, err)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(f, knownhosts.Line([]string{knownhosts.Normalize(host)}, key))
+		closeErr := f.Close()
+		if err != nil {
+			return err
+		}
+		return closeErr
+	}
+}
 
 type operatorVPS struct {
 	ID                           int64     `json:"id"`
@@ -276,14 +322,7 @@ func (s *Server) runOperatorVPSTimeout(ctx context.Context, id int64, command st
 	}
 	var trusted map[string]string
 	_ = s.m.pg.OperatorSetting(ctx, fmt.Sprintf("vps.hostkey.%d", id), &trusted)
-	cfg := &ssh.ClientConfig{User: v.User, Auth: auth, Timeout: 10 * time.Second, HostKeyCallback: func(host string, remote net.Addr, key ssh.PublicKey) error {
-		sum := sha256.Sum256(key.Marshal())
-		fp := "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:])
-		if trusted["host"] != v.Host || trusted["key"] != fp {
-			return fmt.Errorf("SSH host key not pinned: %s", fp)
-		}
-		return nil
-	}}
+	cfg := &ssh.ClientConfig{User: v.User, Auth: auth, Timeout: 10 * time.Second, HostKeyCallback: operatorVPSHostKeyCallback(filepath.Join(s.dataDir, "vps_known_hosts"), v.Host, trusted)}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	conn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(v.Host, strconv.Itoa(v.Port)))

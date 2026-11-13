@@ -29,6 +29,11 @@ func (s *Server) closeOperatorModules() {
 }
 
 type operatorTaskChatKey struct{}
+type operatorRemoteBindingKey struct{}
+type operatorRemoteBinding struct {
+	Kind              string
+	SessionID, TaskID int64
+}
 
 func (s *Server) operatorConversationContext(ctx context.Context, c *db.Conversation) (context.Context, []int64, bool, error) {
 	for _, kind := range []string{"webshell", "c2", "expert"} {
@@ -40,8 +45,21 @@ func (s *Server) operatorConversationContext(ctx context.Context, c *db.Conversa
 		if err != nil {
 			return ctx, nil, true, conversationAdmissionError()
 		}
-		if b["task_id"] <= 0 || (kind != "expert" && b["session_id"] <= 0) || (kind != "expert" && !operatorExecutionRole(c.AgentKey)) {
+		if b["task_id"] < 0 || (kind != "webshell" && b["task_id"] == 0) || (kind != "expert" && b["session_id"] <= 0) || (kind != "expert" && !operatorExecutionRole(c.AgentKey)) {
 			return ctx, nil, true, conversationAdmissionError()
+		}
+		if kind != "expert" {
+			ctx = context.WithValue(ctx, operatorRemoteBindingKey{}, operatorRemoteBinding{Kind: kind, SessionID: b["session_id"], TaskID: b["task_id"]})
+		}
+		if kind == "webshell" && b["task_id"] == 0 {
+			if s.sessStore == nil {
+				return ctx, nil, true, conversationAdmissionError()
+			}
+			rec, err := s.sessStore.Get(ctx, b["session_id"])
+			if err != nil || rec == nil || rec.CreatedByTask != 0 {
+				return ctx, nil, true, conversationAdmissionError()
+			}
+			return ctx, nil, true, nil
 		}
 		parent, err := s.m.pg.GetTask(b["task_id"])
 		if err != nil || parent == nil || parent.Paused || parent.Status == "done" || parent.Status == "failed" || parent.Status == "timeout" {

@@ -826,15 +826,12 @@ function Webshells() {
                     disabled={action.busy}
                     onClick={() =>
                       action.run(async () => {
-                        const selected =
-                          Number(edit.created_by_task) ||
-                          Number(
-                            window.prompt(
-                              "选择要授权控制此会话的任务 ID（将记录显式授权）",
-                              String(edit.task_id ?? ""),
-                            ),
-                          );
-                        if (!selected) return;
+                        const answer = Number(edit.created_by_task)
+                          ? String(edit.created_by_task)
+                          : window.prompt("绑定任务 ID；填 0 打开仅控制此手工会话的独立对话", String(edit.task_id ?? 0));
+                        if (answer === null || answer.trim() === "") return;
+                        const selected = Number(answer);
+                        if (!Number.isSafeInteger(selected) || selected < 0) throw new Error("任务 ID 无效");
                         const v = await api.save<{ conversation_id: number }>(`/webshell/${edit.id}/chat`, {
                           task_id: selected,
                         });

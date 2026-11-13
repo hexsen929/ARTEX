@@ -335,11 +335,11 @@ func (s *Server) operatorWebshellChat(w http.ResponseWriter, r *http.Request) {
 	if req.TaskID == 0 {
 		req.TaskID = rec.CreatedByTask
 	}
-	if req.TaskID <= 0 {
-		writeErr(w, 409, "select an explicit task for agent control")
+	if req.TaskID < 0 {
+		writeErr(w, 400, "invalid task_id")
 		return
 	}
-	if _, ok := s.m.Task(strconv.FormatInt(req.TaskID, 10)); !ok {
+	if _, ok := s.m.Task(strconv.FormatInt(req.TaskID, 10)); req.TaskID > 0 && !ok {
 		writeErr(w, 404, "task not found")
 		return
 	}
@@ -350,7 +350,7 @@ func (s *Server) operatorWebshellChat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "execution role required")
 		return
 	}
-	if req.TaskID != rec.CreatedByTask {
+	if req.TaskID > 0 && req.TaskID != rec.CreatedByTask {
 		if err = s.sessStore.BindTask(r.Context(), id, req.TaskID); err != nil {
 			operatorError(w, err)
 			return
@@ -405,6 +405,17 @@ func (s *Server) operatorWebshellAsset(w http.ResponseWriter, r *http.Request) {
 func (s *Server) operatorSessionTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		actool.Build(actool.Spec{Name: "list_sessions", Description: "列出当前任务可控制的会话；不暴露连接密码。", Schema: operatorSchema("list_sessions", map[string]any{}), ReadOnly: func(json.RawMessage) bool { return true }, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+			if binding, ok := ctx.Value(operatorRemoteBindingKey{}).(operatorRemoteBinding); ok && binding.Kind == "webshell" {
+				if _, err := s.lookupTaskSession(ctx, binding.SessionID); err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				rec, err := s.sessStore.Get(ctx, binding.SessionID)
+				if err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				out, _ := json.Marshal([]map[string]any{sessionItem(rec)})
+				return actool.Text(string(out)), nil
+			}
 			id := agent.RunInfoFrom(ctx).TaskID
 			if id <= 0 {
 				return actool.Errorf("task context required"), nil
