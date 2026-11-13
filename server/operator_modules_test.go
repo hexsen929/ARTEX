@@ -200,7 +200,8 @@ func TestOperatorCleanupRetainsManagedResourcesAndDetectsNestedChanges(t *testin
 		t.Fatal(err)
 	}
 	s.stage = manager
-	entry, err := manager.Put(t.Context(), "fixture.txt", strings.NewReader("fixture"), stage.PutOpts{})
+	t.Cleanup(manager.Close)
+	entry, err := manager.PutContent("fixture.txt", []byte("fixture"), stage.PutOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
