@@ -96,7 +96,8 @@ def build(root):
     (bootstrap/'main.js').write_text("""const {app}=require('electron');
 const path=require('path');const fs=require('fs');
 const state=process.env.ARTEX_ANTSWORD_DATA||path.join(process.resourcesPath,'../../../runtime/antsword');
-fs.mkdirSync(state,{recursive:true});app.setPath('userData',state);
+fs.mkdirSync(state,{recursive:true});process.env.AS_WORKDIR=state;process.env.HOME=path.join(state,'home');fs.mkdirSync(process.env.HOME,{recursive:true});app.setPath('userData',state);
+const dialog=require('electron').dialog;for(const key of ['showOpenDialog','showSaveDialog','showMessageBox']){const sync=dialog[key+'Sync'];if(sync){dialog[key]=function(...args){if(typeof args[args.length-1]==='function'){const callback=args.pop();const result=sync.apply(dialog,args);callback(result);return result;}return sync.apply(dialog,args)}}}
 if(process.env.ARTEX_TOOL_SMOKE==='1'){
   let failed=false;process.on('uncaughtException',e=>{console.error(e.stack);app.exit(2)});
   app.on('browser-window-created',(_,window)=>{

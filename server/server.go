@@ -44,16 +44,18 @@ var BuildVersion = "dev"
 // Server exposes the ARTEX backend over a JSON HTTP API for the shadcn/ui
 // frontend.
 type Server struct {
-	surfaceClassifyMu sync.Mutex
-	c2Ops             *c2OperatorState
-	scheduleMu        sync.Mutex
-	m                 *Manager
-	engine            *Engine
-	ctx               context.Context
-	dataDir           string
-	metricsMu         sync.Mutex
-	lastCPUUse        uint64
-	lastCPUAt         time.Time
+	operatorTriggerMu     sync.Mutex
+	operatorTriggerCounts map[string]int
+	surfaceClassifyMu     sync.Mutex
+	c2Ops                 *c2OperatorState
+	scheduleMu            sync.Mutex
+	m                     *Manager
+	engine                *Engine
+	ctx                   context.Context
+	dataDir               string
+	metricsMu             sync.Mutex
+	lastCPUUse            uint64
+	lastCPUAt             time.Time
 
 	skillDir  string // root directory for skill subdirectories
 	jwtKey    []byte // HS256 signing key loaded from / generated into dataDir/jwt.key

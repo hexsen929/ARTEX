@@ -1566,3 +1566,22 @@ func (e *Engine) claimNext(t *Task, name string) *db.Node {
 	}
 	return nil
 }
+
+// PendingSteers reports only queued, undelivered correction messages.
+func (e *Engine) PendingSteers(intent int64) int {
+	if e == nil {
+		return 0
+	}
+	e.steerMu.Lock()
+	defer e.steerMu.Unlock()
+	return len(e.steerBox[intent])
+}
+func (e *Engine) HasRunningIntent(intent int64) bool {
+	if e == nil {
+		return false
+	}
+	e.workMu.Lock()
+	defer e.workMu.Unlock()
+	run := e.work[intent]
+	return run != nil && !run.finishing
+}

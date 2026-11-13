@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -29,27 +28,36 @@ func (s *Server) admitOperatorTrigger(ctx context.Context, key string, task int6
 	if !isOperatorExpert(key) || task <= 0 {
 		return true, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	cap := 30
 	for _, setting := range []string{"trigger_run_cap", "trigger_run_cap_" + key} {
-		v, ok, err := s.m.pg.GetSetting(setting)
+		value, ok, err := s.m.pg.GetSetting(setting)
 		if err != nil {
 			return false, err
 		}
 		if ok {
-			n, e := strconv.Atoi(v)
-			if e != nil || n < 1 || n > 1000 {
-				return false, fmt.Errorf("invalid trigger cap")
+			n, err := strconv.Atoi(value)
+			if err == nil && n >= 0 {
+				cap = n
 			}
-			cap = n
 		}
 	}
+	if cap <= 0 {
+		return true, nil
+	}
 	name := fmt.Sprintf("trigger.budget.%d.%s", task, key)
-	var raw []byte
-	err := s.m.pg.QueryRowContext(ctx, `INSERT INTO operator_module_settings(key,value) VALUES($1,'{"count":1}') ON CONFLICT(key) DO UPDATE SET value=jsonb_set(operator_module_settings.value,'{count}',to_jsonb((operator_module_settings.value->>'count')::int+1)),updated_at=now() WHERE (operator_module_settings.value->>'count')::int<$2 RETURNING value`, name, cap).Scan(&raw)
-	if err == sql.ErrNoRows {
+	s.operatorTriggerMu.Lock()
+	defer s.operatorTriggerMu.Unlock()
+	if s.operatorTriggerCounts == nil {
+		s.operatorTriggerCounts = map[string]int{}
+	}
+	if s.operatorTriggerCounts[name] >= cap {
 		return false, nil
 	}
-	return err == nil, err
+	s.operatorTriggerCounts[name]++
+	return true, nil
 }
 func (s *Server) operatorTriggerBudget(w http.ResponseWriter, r *http.Request) {
 	if s.pg(w) == nil {
@@ -63,8 +71,8 @@ func (s *Server) operatorTriggerBudget(w http.ResponseWriter, r *http.Request) {
 		if !operatorDecode(w, r, &v) {
 			return
 		}
-		if v.Cap < 1 || v.Cap > 1000 || v.Agent != "" && !isOperatorExpert(v.Agent) {
-			writeErr(w, 400, "cap must be 1-1000 and agent must be a known expert")
+		if v.Cap < 0 || v.Cap > 1000 || v.Agent != "" && !isOperatorExpert(v.Agent) {
+			writeErr(w, 400, "cap must be 0-1000 (0 is unlimited) and agent must be a known expert")
 			return
 		}
 		key := "trigger_run_cap"
@@ -76,11 +84,13 @@ func (s *Server) operatorTriggerBudget(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	items, err := s.operatorSQLList(r.Context(), `SELECT jsonb_build_object('key',key,'value',value,'updated_at',updated_at) FROM operator_module_settings WHERE key LIKE 'trigger.budget.%' ORDER BY updated_at DESC LIMIT 100`)
-	if err != nil {
-		operatorError(w, err)
-		return
+	s.operatorTriggerMu.Lock()
+	items := []map[string]any{}
+	for key, count := range s.operatorTriggerCounts {
+		items = append(items, map[string]any{"key": key, "value": map[string]int{"count": count}})
 	}
+	s.operatorTriggerMu.Unlock()
+
 	cap := "30"
 	if v, ok, _ := s.m.pg.GetSetting("trigger_run_cap"); ok {
 		cap = v
@@ -116,9 +126,16 @@ func (s *Server) operatorTaskSteer(w http.ResponseWriter, r *http.Request) {
 			operatorError(w, err)
 			return
 		}
+		if s.engine != nil && !s.engine.HasRunningIntent(nid) {
+			continue
+		}
 		var payload map[string]any
 		_ = json.Unmarshal(raw, &payload)
-		items = append(items, map[string]any{"intent_id": nid, "payload": payload})
+		pending := 0
+		if s.engine != nil {
+			pending = s.engine.PendingSteers(nid)
+		}
+		items = append(items, map[string]any{"intent_id": nid, "payload": payload, "pending": pending})
 		allowed[nid] = true
 	}
 	err = rows.Err()
@@ -128,7 +145,7 @@ func (s *Server) operatorTaskSteer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == "GET" {
-		writeJSON(w, 200, map[string]any{"running": items})
+		writeJSON(w, 200, map[string]any{"running": items, "available": len(items) > 0})
 		return
 	}
 	if s.engine == nil {
