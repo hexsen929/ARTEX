@@ -122,17 +122,21 @@ exec "$HERE/java/bin/java" --module-path "$HERE/javafx/lib" --add-modules javafx
     if point not in text:raise ValueError('upstream window patch point drifted')
     text=text.replace(point,point+'\n      contextIsolation: false,\n      enableRemoteModule: true,',1)
     core.write_text(text)
+    for entry,old in [('load.entry.js',"path.join(remote.process.env.AS_WORKDIR, 'source')"),('app.entry.js',"path.join(remote.process.env.AS_WORKDIR, 'source/core')")]:
+        path=resources/'antsword/source'/entry;text=path.read_text()
+        if text.count(old)!=1:raise ValueError('upstream core/data path split drifted')
+        path.write_text(text.replace(old,old.replace('AS_WORKDIR','ARTEX_ANTSWORD_CORE')))
     bootstrap=resources/'app';bootstrap.mkdir();(bootstrap/'package.json').write_text('{"name":"artex-antsword","main":"main.js"}')
     (bootstrap/'main.js').write_text("""const {app}=require('electron');
 const path=require('path');const fs=require('fs');
 const state=process.env.ARTEX_ANTSWORD_DATA||path.join(process.resourcesPath,'../../../runtime/antsword');
-fs.mkdirSync(state,{recursive:true});process.env.AS_WORKDIR=state;process.env.HOME=path.join(state,'home');fs.mkdirSync(process.env.HOME,{recursive:true});app.setPath('userData',state);
+fs.mkdirSync(state,{recursive:true});process.env.AS_WORKDIR=state;process.env.ARTEX_ANTSWORD_CORE=path.join(process.resourcesPath,'antsword');process.env.HOME=path.join(state,'home');fs.mkdirSync(process.env.HOME,{recursive:true});app.setPath('userData',state);
 const dialog=require('electron').dialog;for(const key of ['showOpenDialog','showSaveDialog','showMessageBox']){const sync=dialog[key+'Sync'];if(sync){dialog[key]=function(...args){if(typeof args[args.length-1]==='function'){const callback=args.pop();const result=sync.apply(dialog,args);callback(result);return result;}return sync.apply(dialog,args)}}}
 if(process.env.ARTEX_TOOL_SMOKE==='1'){
   let failed=false;process.on('uncaughtException',e=>{console.error(e.stack);app.exit(2)});
   app.on('browser-window-created',(_,window)=>{
     window.webContents.on('console-message',(_,level,message)=>{if(level>=3){console.error(message);failed=true}});
-    window.webContents.once('did-finish-load',()=>{setTimeout(()=>{console.log('ARTEX_ANTSWORD_READY');app.exit(failed?3:0)},3000)});
+    window.webContents.once('did-finish-load',()=>{const timer=setInterval(async()=>{try{const ready=await window.webContents.executeJavaScript('!!(window.antSword && antSword.package && antSword.module.shellmanager && antSword.core && Object.keys(antSword.core).length)');if(ready){clearInterval(timer);console.log('ARTEX_ANTSWORD_READY');app.exit(failed?3:0)}}catch(e){console.error(e.stack);app.exit(3)}},500)});
   });setTimeout(()=>app.exit(4),45000);
 }
 require('../antsword/app.js');
