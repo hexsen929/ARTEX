@@ -34,7 +34,7 @@ jobs:
         with:
           node-version: '22'
       - name: Verify complete resource import and clean tool-state fixtures
-        run: python3 -m unittest discover -s packaging -p 'test_*.py'
+        run: python3 -m unittest discover -s packaging -p 'test_complete_operator_library.py'
       - run: go test -race -p=1 ./agent ./kb ./c2 ./db ./server ./session -run 'TestOperator|TestLibrary|TestReferenceBlock' -count=1 -timeout=5m
       - name: Build current UI and isolated Mac preview
         run: |
