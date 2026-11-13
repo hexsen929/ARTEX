@@ -3,9 +3,11 @@ package server
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -53,5 +55,17 @@ func TestOperatorVPSOriginalTOFUAndChangedKey(t *testing.T) {
 	}
 	if err = check("fixture.invalid:18895", remote, key); err == nil {
 		t.Fatal("explicit pin accepted wrong key")
+	}
+}
+
+func TestOperatorVPSIndependentChatReachesRegisteredHostSelection(t *testing.T) {
+	s := operatorFixture(t)
+	result, err := s.operatorVPSTool().Call(t.Context(), json.RawMessage(`{"vps":"not-a-real-registered-fixture","command":"printf fixture"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(result)
+	if strings.Contains(string(raw), "task context") || !strings.Contains(string(raw), "registered VPS") {
+		t.Fatal(string(raw))
 	}
 }

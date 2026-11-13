@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Autumn-27/artex/agent"
 	actool "github.com/Autumn-27/norma/tool"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -398,10 +397,7 @@ func (s *Server) operatorVPSExec(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 func (s *Server) operatorVPSTool() actool.CoreTool {
-	return actool.Build(actool.Spec{Name: "vps_exec", Description: "在操作员预先登记并启用的 SSH VPS 上执行命令；使用已固定的主机密钥和加密保存的凭据。仅接受已登记 ID，不能临时指定任意主机。", Schema: operatorSchema("vps_exec", map[string]any{}), Permissions: sessionPerm, ReadOnly: func(json.RawMessage) bool { return false }, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
-		if agent.RunInfoFrom(ctx).TaskID <= 0 {
-			return actool.Errorf("task context required"), nil
-		}
+	return actool.Build(actool.Spec{Name: "vps_exec", Description: "在操作员预先登记并启用的 SSH VPS 上执行命令；使用应用专属 TOFU/可选指纹和加密保存的凭据。支持独立对话，不能临时指定未登记主机。", Schema: operatorSchema("vps_exec", map[string]any{}), Permissions: sessionPerm, ReadOnly: func(json.RawMessage) bool { return false }, Run: func(ctx context.Context, b json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
 		var v struct {
 			ID        int64  `json:"vps_id"`
 			Command   string `json:"command"`
