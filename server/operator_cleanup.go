@@ -17,12 +17,13 @@ import (
 )
 
 type cleanupItem struct {
-	Key   string   `json:"key"`
-	Label string   `json:"label"`
-	Hint  string   `json:"hint"`
-	Count int      `json:"count"`
-	Bytes int64    `json:"bytes"`
-	Paths []string `json:"-"`
+	Key        string            `json:"key"`
+	Label      string            `json:"label"`
+	Hint       string            `json:"hint"`
+	Count      int               `json:"count"`
+	Bytes      int64             `json:"bytes"`
+	Paths      []string          `json:"-"`
+	Signatures map[string]string `json:"-"`
 }
 
 var cleanupID = regexp.MustCompile(`^(?:conv[-_]?|conversation[-_]?)?([0-9]+)(?:\.[A-Za-z0-9]+)?$`)
@@ -34,6 +35,10 @@ func (s *Server) registerCleanupRoutes(mux *http.ServeMux) {
 func cleanupPathSafe(root, p string) bool {
 	a, err := filepath.Abs(root)
 	if err != nil {
+		return false
+	}
+	fi, err := os.Lstat(a)
+	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
 		return false
 	}
 	b, err := filepath.Abs(p)
@@ -54,25 +59,32 @@ func cleanupPathSafe(root, p string) bool {
 	}
 	return true
 }
-func cleanupSize(p string) (int64, error) {
+func cleanupSize(p string) (int64, error) { n, _, err := cleanupTreeSnapshot(p); return n, err }
+func cleanupTreeSnapshot(p string) (int64, string, error) {
 	var n int64
-	err := filepath.WalkDir(p, func(p string, d fs.DirEntry, err error) error {
+	h := sha256.New()
+	err := filepath.WalkDir(p, func(child string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("symlink present; skip")
 		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(p, child)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(h, "%s:%d:%d:%d\n", rel, fi.Mode(), fi.Size(), fi.ModTime().UnixNano())
 		if !d.IsDir() {
-			fi, e := d.Info()
-			if e != nil {
-				return e
-			}
 			n += fi.Size()
 		}
 		return nil
 	})
-	return n, err
+	return n, hex.EncodeToString(h.Sum(nil)), err
 }
 func (s *Server) scanOperatorCleanup(ctx context.Context) ([]cleanupItem, string, error) {
 	alive := map[string]bool{}
@@ -93,6 +105,19 @@ func (s *Server) scanOperatorCleanup(ctx context.Context) ([]cleanupItem, string
 	if err != nil {
 		return nil, "", err
 	}
+	var activeTunnels, archiveJobs int
+	if err := s.m.pg.QueryRowContext(ctx, "SELECT count(*) FROM tunnels WHERE state!='stopped'").Scan(&activeTunnels); err != nil {
+		return nil, "", err
+	}
+	if err := s.m.pg.QueryRowContext(ctx, "SELECT count(*) FROM task_archives WHERE state!='ready'").Scan(&archiveJobs); err != nil {
+		return nil, "", err
+	}
+	activeStage := map[string]bool{}
+	if s.stage != nil {
+		for _, e := range s.stage.List() {
+			activeStage[e.Token] = true
+		}
+	}
 	defs := []struct {
 		key, label, sub, owner string
 		stale                  bool
@@ -101,6 +126,12 @@ func (s *Server) scanOperatorCleanup(ctx context.Context) ([]cleanupItem, string
 	h := sha256.New()
 	for _, d := range defs {
 		item := cleanupItem{Key: d.key, Label: d.label, Hint: "仅处理可确认无所属记录、无符号链接且无打开文件的内容；暂存须超过24小时"}
+		item.Signatures = map[string]string{}
+		if d.key == "stale_tunnels" && activeTunnels > 0 || d.key == "stale_staging" && archiveJobs > 0 {
+			item.Hint = "存在活动或待恢复资源，保留此类别全部文件"
+			out = append(out, item)
+			continue
+		}
 		root := filepath.Join(s.dataDir, d.sub)
 		es, e := os.ReadDir(root)
 		if os.IsNotExist(e) {
@@ -111,6 +142,9 @@ func (s *Server) scanOperatorCleanup(ctx context.Context) ([]cleanupItem, string
 			return nil, "", e
 		}
 		for _, de := range es {
+			if d.key == "stale_stage" && activeStage[de.Name()] {
+				continue
+			}
 			p := filepath.Join(root, de.Name())
 			if !cleanupPathSafe(s.dataDir, p) {
 				continue
@@ -129,14 +163,15 @@ func (s *Server) scanOperatorCleanup(ctx context.Context) ([]cleanupItem, string
 					continue
 				}
 			}
-			n, e := cleanupSize(p)
+			n, signature, e := cleanupTreeSnapshot(p)
 			if e != nil {
 				continue
 			}
 			item.Paths = append(item.Paths, p)
+			item.Signatures[p] = signature
 			item.Count++
 			item.Bytes += n
-			fmt.Fprintf(h, "%s:%s:%d:%d\n", d.key, p, n, fi.ModTime().UnixNano())
+			fmt.Fprintf(h, "%s:%s:%s\n", d.key, p, signature)
 		}
 		out = append(out, item)
 	}
@@ -173,6 +208,8 @@ func (s *Server) operatorCleanupRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "select cleanup categories")
 		return
 	}
+	s.concMu.Lock()
+	defer s.concMu.Unlock()
 	items, token, err := s.scanOperatorCleanup(r.Context())
 	if err != nil {
 		operatorError(w, err)
@@ -187,9 +224,13 @@ func (s *Server) operatorCleanupRun(w http.ResponseWriter, r *http.Request) {
 		selected[k] = true
 	}
 	paths := []string{}
+	snapshots := map[string]string{}
 	for _, i := range items {
 		if selected[i.Key] {
 			paths = append(paths, i.Paths...)
+			for p, signature := range i.Signatures {
+				snapshots[p] = signature
+			}
 			delete(selected, i.Key)
 		}
 	}
@@ -204,9 +245,14 @@ func (s *Server) operatorCleanupRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	removed := 0
-	// Serialize with task/conversation lifecycle admission; rescan before each removal.
-	s.concMu.Lock()
-	defer s.concMu.Unlock()
+	// The ownership scan and deletion share lifecycle admission lock. Use an
+	// OS-confined root so a replaced intermediate symlink cannot escape dataDir.
+	confined, err := os.OpenRoot(s.dataDir)
+	if err != nil {
+		operatorError(w, err)
+		return
+	}
+	defer confined.Close()
 	for _, p := range paths {
 		if !cleanupPathSafe(s.dataDir, p) {
 			writeErr(w, 409, "cleanup path changed")
@@ -234,7 +280,16 @@ func (s *Server) operatorCleanupRun(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if err = os.RemoveAll(p); err != nil {
+		if _, signature, e := cleanupTreeSnapshot(p); e != nil || signature != snapshots[p] {
+			writeErr(w, 409, "candidate changed during cleanup checks; rescan")
+			return
+		}
+		rel, e := filepath.Rel(s.dataDir, p)
+		if e != nil {
+			operatorError(w, e)
+			return
+		}
+		if err = confined.RemoveAll(rel); err != nil {
 			operatorError(w, err)
 			return
 		}

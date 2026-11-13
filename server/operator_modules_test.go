@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/Autumn-27/artex/c2"
+	"github.com/Autumn-27/artex/stage"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -188,5 +189,45 @@ func TestOperatorCleanupNeverTraversesSymlinks(t *testing.T) {
 	}
 	if cleanupPathSafe(root, filepath.Join(root, "..", "outside")) {
 		t.Fatal("parent escape accepted")
+	}
+}
+
+func TestOperatorCleanupRetainsManagedResourcesAndDetectsNestedChanges(t *testing.T) {
+	s := operatorFixture(t)
+	root := filepath.Join(s.dataDir, "stage")
+	manager, err := stage.New(s.ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.stage = manager
+	entry, err := manager.Put(t.Context(), "fixture.txt", strings.NewReader("fixture"), stage.PutOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err = os.Chtimes(filepath.Join(root, entry.Token), old, old); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := s.scanOperatorCleanup(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range items {
+		if v.Key == "stale_stage" && v.Count != 0 {
+			t.Fatal("managed stage entry classified as garbage")
+		}
+	}
+	dir := filepath.Join(s.dataDir, "fixture")
+	os.MkdirAll(dir, 0700)
+	file := filepath.Join(dir, "nested.txt")
+	os.WriteFile(file, []byte("one"), 0600)
+	_, before, err := cleanupTreeSnapshot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(file, []byte("changed"), 0600)
+	_, after, err := cleanupTreeSnapshot(dir)
+	if err != nil || before == after {
+		t.Fatal("nested file change did not invalidate snapshot", err)
 	}
 }
