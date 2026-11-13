@@ -51,3 +51,12 @@ class CompleteLibraryTests(unittest.TestCase):
         self.assertIn(b"# Guide\nfirst part", result)
         self.assertIn(b"## Second\nlast part", result)
         self.assertNotIn(b"## name:", result)
+    def test_clean_tool_database_preserves_protocols_not_connections(self):
+        with sqlite3.connect(":memory:") as db:
+            db.executescript("CREATE TABLE shells(id INTEGER,url TEXT,password TEXT); INSERT INTO shells VALUES(1,'fixture.invalid','private'); CREATE TABLE TransProtocol(id INTEGER,name TEXT,encode TEXT); INSERT INTO TransProtocol VALUES(1,'fixture','fixture-code');")
+            raw, counts = complete.clean_behinder_database(db.serialize())
+        with sqlite3.connect(":memory:") as db:
+            db.deserialize(raw)
+            self.assertEqual(db.execute("SELECT count(*) FROM shells").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT name FROM TransProtocol").fetchone()[0], "fixture")
+        self.assertEqual(counts, {"shells":0, "TransProtocol":1})

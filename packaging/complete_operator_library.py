@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import tarfile
 import import_operator_resources as basic
 
@@ -79,6 +80,8 @@ def canonical_skill(raw, name, description=None):
 def excluded_tool_state(relative):
     p = PurePosixPath(relative)
     name = p.name.lower()
+    if relative.startswith("Behinder_v4.1/offline/") or name.endswith("_inlog.txt"):
+        return "prior_tool_cache_or_run_history"
     if "__pycache__" in p.parts or "runs" in p.parts or name.endswith((".pyc", ".log", ".out")):
         return "cache_or_run_history"
     if ".bak" in name or name in ("data.db", "data.db-wal", "data.db-shm"):
@@ -86,6 +89,39 @@ def excluded_tool_state(relative):
     if name.startswith(("id_rsa", "id_ed25519", "rt-tunnel-key")) or name.endswith((".pem", ".key", ".p12", ".pfx")):
         return "credential_not_tool_capability"
     return None
+
+
+def clean_behinder_database(raw):
+    """Retain tool schemas/protocol definitions, never shells, hosts or keys."""
+    if len(raw) > 4 << 20:
+        raise ValueError("unexpected Behinder template size")
+    with sqlite3.connect(":memory:") as source, sqlite3.connect(":memory:") as target:
+        source.deserialize(raw)
+        source.execute("PRAGMA query_only=ON")
+        source.execute("PRAGMA trusted_schema=OFF")
+        tables = source.execute("SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
+        counts = {}
+        for name, sql in tables:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name) or not sql.lstrip().upper().startswith("CREATE TABLE "):
+                raise ValueError("unexpected tool database schema")
+            target.execute(sql)
+            counts[name] = 0
+            if name in ("Plugin", "TransProtocol"):
+                rows = source.execute('SELECT * FROM "'+name+'"').fetchall()
+                for row in rows:
+                    target.execute('INSERT INTO "'+name+'" VALUES ('+','.join('?' for _ in row)+')', row)
+                counts[name] = len(rows)
+        if "proxys" in counts:
+            target.execute("INSERT INTO proxys(name,type,ip,port,username,password,status) VALUES('default','HTTP','',0,'','',0)")
+            counts["proxys"] = 1
+        if "catagory" in counts:
+            target.execute("INSERT INTO catagory(name,comment) VALUES('default','')")
+            counts["catagory"] = 1
+        if "ID_SEQ" in counts:
+            target.execute("INSERT INTO ID_SEQ(next_val) VALUES(1)")
+            counts["ID_SEQ"] = 1
+        target.commit()
+        return target.serialize(), counts
 
 
 def host_wrapper(tool, depth=3):
@@ -101,6 +137,7 @@ def complete_library(archive, destination, runtime_metadata=None):
     base = basic.import_resources(archive, root, runtime_metadata)
     skill_files, flat, redteam, toolkit = {}, {}, {}, []
     total = 0
+    clean_databases = []
     with tarfile.open(archive, "r:gz") as tar:
         for member in tar:
             if not member.name.startswith(basic.PREFIX):
@@ -118,6 +155,11 @@ def complete_library(archive, destination, runtime_metadata=None):
                 target = rel.removeprefix("redteam/toolkit/")
                 reason = excluded_tool_state(target)
                 if reason:
+                    if target == "Behinder_v4.1/data.db":
+                        raw, counts = clean_behinder_database(tar.extractfile(member).read())
+                        write(root, "toolkit/Behinder_v4.1/clean-data.db", raw)
+                        clean_databases.append({"path":"toolkit/Behinder_v4.1/clean-data.db", "rows":counts,
+                                                "sha256":hashlib.sha256(raw).hexdigest(),"historical_connections_copied":False})
                     toolkit.append({"source": rel, "status": "excluded_inactive_state", "reason": reason})
                     continue
                 total += member.size
@@ -215,13 +257,29 @@ exec "$JAVA" "$@"
     # Only the Behinder launcher needs JavaFX modules. Godzilla uses the
     # ordinary verified JVM; both retain their original JAR/plugin contents.
     behinder=root/'toolkit/behinder'
-    behinder.write_text('#!/bin/sh\nset -eu\nHERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nROOT=$(CDPATH= cd -- "$HERE/../.." && pwd)\nexec "${ARTEX_DATA_DIR:-$ROOT/data}/tools/javafx-java" -jar "$HERE/Behinder_v4.1/Behinder.jar" "$@"\n')
+    behinder.write_text('''#!/bin/sh
+set -eu
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$HERE/../.." && pwd)
+DATA="${ARTEX_DATA_DIR:-$ROOT/data}"
+STATE="${ARTEX_BEHINDER_DATA:-$DATA/tools/runtime/behinder}"
+mkdir -p "$STATE"
+if [ ! -f "$STATE/data.db" ]; then
+  cp "$HERE/Behinder_v4.1/clean-data.db" "$STATE/data.db"
+  chmod 600 "$STATE/data.db"
+fi
+if [ ! -d "$STATE/Plugins" ] && [ -d "$HERE/Behinder_v4.1/Plugins" ]; then
+  cp -R "$HERE/Behinder_v4.1/Plugins" "$STATE/Plugins"
+fi
+cd "$STATE"
+exec "$DATA/tools/javafx-java" -jar "$HERE/Behinder_v4.1/Behinder.jar" "$@"
+''')
     behinder.chmod(0o700)
     result = {"schema": 2, "independent_skills": imported, "toolkit": toolkit,
               "host_adapters": HOST_TOOLS, "standard_skill_count": len(core),
               "flat_skill_count": len(flat), "distinct_variant_count": sum(x["status"] == "independent_variant" for x in imported),
               "toolkit_bytes": total, "requires_verified_host_runtime": True,
-              "sensitive_state_is_not_activated": True}
+              "sensitive_state_is_not_activated": True, "clean_tool_databases":clean_databases}
     (root / "complete-library-manifest.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
     return result
 
