@@ -57,7 +57,7 @@ func TestOperatorC2OriginalApprovalFlowAndCancellation(t *testing.T) {
 		pending := int64(0)
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
-			_ = s.m.pg.QueryRow(`SELECT id FROM intercept_pending WHERE status='pending' AND tool_name='c2_task:upload' AND tool_input->>'c2_task_id'=$1::text`, id).Scan(&pending)
+			err = s.m.pg.QueryRow(`SELECT id FROM intercept_pending WHERE status='pending' AND tool_name='c2_task:upload' AND tool_input->>'c2_task_id'=$1`, fmt.Sprint(id)).Scan(&pending)
 			if pending > 0 {
 				break
 			}
@@ -65,7 +65,7 @@ func TestOperatorC2OriginalApprovalFlowAndCancellation(t *testing.T) {
 		}
 		if pending == 0 {
 			cancel()
-			t.Fatal("C2 did not enter the original central approval queue")
+			t.Fatalf("C2 did not enter the original central approval queue: %v", err)
 		}
 		t.Cleanup(func() { s.m.pg.Exec("DELETE FROM intercept_pending WHERE id=$1", pending) })
 		if cancelled {

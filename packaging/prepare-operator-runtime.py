@@ -57,6 +57,9 @@ def source(name,root):
                 links.append((path,link));continue
             path.write_bytes(archive.read(info));path.chmod(0o644)
         for path,link in links:os.symlink(link,path)
+        for path,_ in links:
+            try:path.resolve().relative_to(destination.resolve())
+            except (ValueError,RuntimeError):raise ValueError('source link chain escapes its pinned archive')
     return destination
 
 def write(path,text):
@@ -84,6 +87,13 @@ def build(root):
     for name,src in [('oneforall',one),('dirsearch',directory)]:
         target=root/'operator-python'/name;target.mkdir(parents=True)
         run(os.sys.executable,'-m','pip','install','--no-warn-script-location','--target',target,'-r',src/'requirements.txt')
+        if name=='oneforall':
+            # exrex 0.10.5 predates Python 3.11 moving the same regex parser
+            # behind re._parser. Keep the pinned implementation and semantics.
+            parser=target/'exrex.py';text=parser.read_text()
+            old='from re import sre_parse, U'
+            if text.count(old)!=1:raise ValueError('pinned exrex compatibility patch drifted')
+            parser.write_text(text.replace(old,'from re import _parser as sre_parse, U'))
     write(root/'oneforall',python_wrapper('oneforall','oneforall/oneforall.py'))
     write(root/'dirsearch',python_wrapper('dirsearch','dirsearch/dirsearch.py'))
     java=Path(os.environ['JAVA_HOME']);shutil.copytree(java,root/'java',symlinks=False)
