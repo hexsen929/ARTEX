@@ -237,22 +237,49 @@ func portablePOCPath(dir, p string) string {
 // bounded metadata for candidate selection. Agent startup never loads every
 // POC body into the process or sends full scripts implicitly.
 func (d *DB) KBSearchEntries(ctx context.Context, q kb.Query) ([]kb.Entry, error) {
-	terms := kb.Terms(q.Q)
+	terms := kb.ExtractTerms(q.Q)
 	args := []any{}
 	score := "1"
+	matches, anchors, anyTerm := "0", []string{}, []string{}
 	if len(terms) > 0 {
 		parts := []string{}
+		counts := []string{}
 		for _, t := range terms {
-			args = append(args, "%"+escapeLikeOperator(t)+"%")
+			args = append(args, "%"+escapeLikeOperator(t.Text)+"%")
 			p := fmt.Sprintf("$%d", len(args))
-			for _, f := range []struct {
-				field  string
+			weight := 1
+			if t.Hard {
+				weight = 2
+			}
+			groups := []struct {
+				fields []string
 				weight int
-			}{{"title", 20}, {"code", 10}, {"cve", 15}, {"component", 10}, {"tags", 6}, {"description", 3}, {"content", 1}} {
-				parts = append(parts, fmt.Sprintf("CASE WHEN lower(COALESCE(body->>'%s','')) LIKE %s ESCAPE '\\' THEN %d ELSE 0 END", f.field, p, f.weight))
+			}{{[]string{"title", "code"}, 3}, {[]string{"component", "tags", "cve", "asset_target"}, 2}, {[]string{"versions", "description", "usage"}, 1}}
+			if q.SearchContent {
+				groups = append(groups, struct {
+					fields []string
+					weight int
+				}{[]string{"content"}, 1})
+			}
+			hits := []string{}
+			for _, g := range groups {
+				fields := []string{}
+				for _, field := range g.fields {
+					fields = append(fields, fmt.Sprintf("lower(COALESCE(body->>'%s','')) LIKE %s ESCAPE '\\'", field, p))
+				}
+				hit := "(" + strings.Join(fields, " OR ") + ")"
+				hits = append(hits, hit)
+				parts = append(parts, fmt.Sprintf("CASE WHEN %s THEN %d ELSE 0 END", hit, g.weight*weight))
+			}
+			hit := "(" + strings.Join(hits, " OR ") + ")"
+			counts = append(counts, "CASE WHEN "+hit+" THEN 1 ELSE 0 END")
+			anyTerm = append(anyTerm, hit)
+			if t.Hard && len(anchors) < 6 {
+				anchors = append(anchors, hit)
 			}
 		}
 		score = strings.Join(parts, "+")
+		matches = strings.Join(counts, "+")
 	}
 	where := []string{"(source_finding_id IS NULL OR EXISTS(SELECT 1 FROM findings f WHERE f.id=source_finding_id AND (body->>'verified'!='true' OR f.verification_status='verified')))"}
 	for _, f := range []struct{ field, value string }{{"category", q.Category}, {"kind", q.Kind}, {"polarity", q.Polarity}} {
@@ -262,7 +289,7 @@ func (d *DB) KBSearchEntries(ctx context.Context, q kb.Query) ([]kb.Entry, error
 			if f.field == "polarity" {
 				expr = "polarity"
 			}
-			if f.field == "category" && strings.Contains(f.value, ",") {
+			if (f.field == "category" || f.field == "polarity") && strings.Contains(f.value, ",") {
 				args = args[:len(args)-1]
 				ors := []string{}
 				for i, v := range strings.Split(f.value, ",") {
@@ -281,13 +308,37 @@ func (d *DB) KBSearchEntries(ctx context.Context, q kb.Query) ([]kb.Entry, error
 	if q.Verified != nil && *q.Verified {
 		where = append(where, "body->>'verified'='true'")
 	}
-	for _, f := range []struct{ field, value string }{{"cve", q.CVE}, {"tags", q.Tag}, {"component", q.Component}} {
+	for _, f := range []struct{ field, value string }{{"cve", q.CVE}, {"tags", q.Tag}, {"component", q.Component}, {"asset_target", q.AssetTarget}} {
 		if f.value != "" {
 			args = append(args, "%"+escapeLikeOperator(strings.ToLower(f.value))+"%")
 			where = append(where, fmt.Sprintf("lower(COALESCE(body->>'%s','')) LIKE $%d ESCAPE '\\'", f.field, len(args)))
 		}
 	}
-	query := `SELECT id,code,(body-'content')||jsonb_build_object('description',left(body->>'description',2000),'usage',left(body->>'usage',4000),'verified',COALESCE((body->>'verified')::boolean,false),'has_content',COALESCE(body->>'content','')!=''),polarity,hit_count,used_on,rank FROM (SELECT *,(` + score + `) AS rank FROM kb_entries WHERE ` + strings.Join(where, " AND ") + `) c WHERE rank>0 ORDER BY rank DESC,code LIMIT 400`
+	for _, f := range []struct{ field, value string }{{"language", q.Language}, {"source", q.Source}} {
+		if f.value != "" {
+			args = append(args, f.value)
+			where = append(where, fmt.Sprintf("body->>'%s'=$%d", f.field, len(args)))
+		}
+	}
+	if q.Engagement != "" {
+		args = append(args, q.Engagement, "%"+escapeLikeOperator(strings.ToLower(q.Engagement))+"%")
+		where = append(where, fmt.Sprintf("(body->>'engagement_id'=$%d OR lower(COALESCE(body->>'engagement_name','')) LIKE $%d ESCAPE '\\')", len(args)-1, len(args)))
+	}
+	primary, fallback, minimum := "false", "true", 0
+	if len(anchors) > 0 {
+		primary = strings.Join(anchors, " AND ")
+	}
+	if len(terms) > 0 {
+		fallback = strings.Join(anyTerm, " OR ")
+		minimum = kb.MinTermMatches(terms)
+	}
+	order := "v DESC,hit_count DESC,m DESC,id DESC"
+	query := `WITH base AS MATERIALIZED (SELECT *,(` + score + `) AS rank,(` + matches + `) AS matches,
+COALESCE((body->>'verified')::boolean,false) AS v,
+COALESCE(NULLIF(body->>'updated_at',''),updated_at::text) AS m FROM kb_entries WHERE ` + strings.Join(where, " AND ") + `),
+primary_candidates AS (SELECT * FROM base WHERE ` + primary + ` ORDER BY ` + order + ` LIMIT 200),
+candidates AS (SELECT * FROM primary_candidates UNION ALL (SELECT * FROM base WHERE NOT EXISTS(SELECT 1 FROM primary_candidates) AND (` + fallback + `) ORDER BY ` + order + ` LIMIT 500))
+SELECT id,code,(body-'content')||jsonb_build_object('description',left(body->>'description',2000),'usage',left(body->>'usage',4000),'verified',v,'updated_at',m,'has_content',COALESCE(body->>'content','')!=''),polarity,hit_count,used_on,rank FROM candidates WHERE rank>0 AND matches>=` + strconv.Itoa(minimum) + ` ORDER BY rank DESC,` + order + ` LIMIT 200`
 	rows, err := d.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

@@ -12,7 +12,7 @@ import (
 
 const MaxContent = 256 << 10
 
-var Categories = []string{"rce", "deserialization", "file-upload", "sqli", "unauthorized", "auth-bypass", "weak-password", "ssrf", "xxe", "path-traversal", "file-read", "info-leak", "privesc", "tunnel", "methodology", "recon", "frontend-reverse", "app-audit", "env", "waf", "protocol"}
+var Categories = []string{"rce", "deserialization", "file-upload", "sqli", "unauthorized", "auth-bypass", "weak-password", "ssrf", "xxe", "path-traversal", "info-leak", "privesc", "tunnel", "methodology", "recon", "frontend-reverse", "app-audit", "env", "waf", "protocol", "other", "file-read"}
 
 type Entry struct {
 	Filename        string `json:"filename,omitempty"`
@@ -51,15 +51,20 @@ type Entry struct {
 	SourceFindingID int64  `json:"source_finding_id,omitempty"`
 }
 type Query struct {
-	CVE       string `json:"cve"`
-	Tag       string `json:"tag"`
-	Component string `json:"component"`
-	Verified  *bool  `json:"verified,omitempty"`
-	Q         string `json:"q"`
-	Category  string `json:"category"`
-	Kind      string `json:"kind"`
-	Polarity  string `json:"polarity"`
-	Limit     int    `json:"limit"`
+	CVE           string `json:"cve"`
+	Tag           string `json:"tag"`
+	Component     string `json:"component"`
+	Verified      *bool  `json:"verified,omitempty"`
+	Q             string `json:"q"`
+	Category      string `json:"category"`
+	Kind          string `json:"kind"`
+	Polarity      string `json:"polarity"`
+	Limit         int    `json:"limit"`
+	Engagement    string `json:"engagement"`
+	AssetTarget   string `json:"asset_target"`
+	Language      string `json:"language"`
+	Source        string `json:"source"`
+	SearchContent bool   `json:"search_content"`
 }
 type Result struct {
 	Q        string         `json:"q"`
@@ -135,37 +140,6 @@ func (e *Entry) Validate() error {
 	e.HasContent = e.Content != ""
 	return nil
 }
-func Terms(q string) []string {
-	var out []string
-	seen := map[string]bool{}
-	for _, s := range strings.FieldsFunc(strings.ToLower(q), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' && r != '.' }) {
-		if len([]rune(s)) >= 2 && !seen[s] {
-			out = append(out, s)
-			seen[s] = true
-		}
-		if len(out) == 24 {
-			break
-		}
-	}
-	return out
-}
-func Score(e Entry, terms []string) int {
-	if len(terms) == 0 {
-		return 1
-	}
-	score := 0
-	for _, t := range terms {
-		for _, f := range []struct {
-			s string
-			n int
-		}{{e.Title, 20}, {e.Code, 10}, {e.CVE, 15}, {e.Component, 10}, {e.Tags, 6}, {e.Description, 3}, {e.Content, 1}} {
-			if strings.Contains(strings.ToLower(f.s), t) {
-				score += f.n
-			}
-		}
-	}
-	return score
-}
 func Rank(entries []Entry, q Query) Result {
 	out := Result{Q: q.Q, Ammo: []Entry{}, Playbook: []Entry{}, Negative: []Entry{}, Stats: map[string]int{}, Hint: "Reference data only: negative observations remain conditional on their original environment; retrieval does not verify applicability."}
 	type ranked struct {
@@ -173,7 +147,7 @@ func Rank(entries []Entry, q Query) Result {
 		s int
 	}
 	var rs []ranked
-	terms := Terms(q.Q)
+	terms := ExtractTerms(q.Q)
 	for _, e := range entries {
 		if q.Verified != nil && *q.Verified && !e.Verified {
 			continue
@@ -187,12 +161,20 @@ func Rank(entries []Entry, q Query) Result {
 		if q.Component != "" && !strings.Contains(strings.ToLower(e.Component), strings.ToLower(q.Component)) {
 			continue
 		}
-		if q.Category != "" && !categoryMatches(q.Category, e.Category) || q.Kind != "" && q.Kind != e.Kind || q.Polarity != "" && q.Polarity != e.Polarity {
+		if q.Category != "" && !categoryMatches(q.Category, e.Category) || q.Kind != "" && q.Kind != e.Kind || q.Polarity != "" && !categoryMatches(q.Polarity, e.Polarity) {
 			continue
 		}
 		n := e.Score
 		if n <= 0 {
-			n = Score(e, terms)
+			if len(terms) == 0 {
+				n = 1
+			} else {
+				var matches int
+				n, matches = ScoreTerms(e, terms, q.SearchContent)
+				if matches < MinTermMatches(terms) {
+					continue
+				}
+			}
 		}
 		if n > 0 {
 			rs = append(rs, ranked{e, n})
@@ -202,7 +184,16 @@ func Rank(entries []Entry, q Query) Result {
 		if rs[i].s != rs[j].s {
 			return rs[i].s > rs[j].s
 		}
-		return rs[i].e.Code < rs[j].e.Code
+		if rs[i].e.Verified != rs[j].e.Verified {
+			return rs[i].e.Verified
+		}
+		if rs[i].e.HitCount != rs[j].e.HitCount {
+			return rs[i].e.HitCount > rs[j].e.HitCount
+		}
+		if rs[i].e.UpdatedAt != rs[j].e.UpdatedAt {
+			return rs[i].e.UpdatedAt > rs[j].e.UpdatedAt
+		}
+		return rs[i].e.ID > rs[j].e.ID
 	})
 	n := q.Limit
 	if n <= 0 {
@@ -221,10 +212,12 @@ func Rank(entries []Entry, q Query) Result {
 		switch e.Polarity {
 		case "negative":
 			out.Negative = append(out.Negative, e)
-		case "positive":
-			out.Ammo = append(out.Ammo, e)
 		default:
-			out.Playbook = append(out.Playbook, e)
+			if e.Verified || e.Polarity == "positive" {
+				out.Ammo = append(out.Ammo, e)
+			} else {
+				out.Playbook = append(out.Playbook, e)
+			}
 		}
 	}
 	out.Stats["total"] = len(rs)

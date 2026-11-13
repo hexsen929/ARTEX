@@ -32,6 +32,10 @@ func TestOperatorSurfaceOrderAndOverrides(t *testing.T) {
 	if err != nil || n != 1 || len(fs) != 1 || fs[0].Surface != "logic" {
 		t.Fatal(n, fs, err)
 	}
+	detail, err := d.GetFinding(id)
+	if err != nil || detail == nil || detail.Surface != "logic" {
+		t.Fatal("detail/list surface disagreement", detail, err)
+	}
 	_, n, err = d.ListFindingsPage(FindingFilter{VulnClass: class, Surface: "auth"}, 1, 20)
 	if err != nil || n != 0 {
 		t.Fatal(n, err)

@@ -182,7 +182,10 @@ func (s *Server) operatorKBSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, _ := strconv.Atoi(v.Get("limit"))
-	q := kb.Query{Q: v.Get("q"), Category: v.Get("category"), Kind: v.Get("kind"), Polarity: v.Get("polarity"), Limit: n, CVE: v.Get("cve"), Tag: v.Get("tag"), Component: v.Get("component")}
+	if n <= 0 || n > 200 {
+		n = 100
+	}
+	q := kb.Query{Q: v.Get("q"), Category: v.Get("category"), Kind: v.Get("kind"), Polarity: v.Get("polarity"), Limit: n, CVE: v.Get("cve"), Tag: v.Get("tag"), Component: v.Get("component"), Engagement: v.Get("engagement"), AssetTarget: v.Get("asset_target"), Language: v.Get("language"), Source: v.Get("source"), SearchContent: v.Get("content") != "0"}
 	if v.Has("verified") {
 		b, err := strconv.ParseBool(v.Get("verified"))
 		if err != nil {

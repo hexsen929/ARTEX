@@ -764,6 +764,9 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 			return nil, err
 		}
 	}
+	if err = d.applyFindingSurfaces(context.Background(), []*DBFinding{f}); err != nil {
+		return nil, err
+	}
 	return f, nil
 }
 
