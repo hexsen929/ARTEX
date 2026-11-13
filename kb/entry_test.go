@@ -43,3 +43,27 @@ func TestReferenceBlockSizeAndSchema(t *testing.T) {
 		t.Fatal("unknown polarity")
 	}
 }
+
+func TestOperatorKnowledgeImportAndResultCaptureHaveOriginalValidation(t *testing.T) {
+	e := Entry{Title: "fixture", Category: "protocol", Polarity: "positive", Content: "fixture"}
+	if e.ValidateAgentAdd() == nil {
+		t.Fatal("live result accepted without engagement/asset/evidence")
+	}
+	e.Manual = true
+	if err := e.ValidateAgentAdd(); err != nil {
+		t.Fatal("manual material rejected", err)
+	}
+	e.Manual = false
+	e.EngagementID = "fixture"
+	e.AssetTarget = "fixture.invalid"
+	e.Polarity = "context"
+	if err := e.ValidateAgentAdd(); err != nil {
+		t.Fatal("context source rejected", err)
+	}
+	e.Polarity = "positive"
+	e.Verified = true
+	e.VerifiedNote = "observed fixture evidence"
+	if err := e.ValidateAgentAdd(); err != nil {
+		t.Fatal(err)
+	}
+}

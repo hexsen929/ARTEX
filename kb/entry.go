@@ -130,7 +130,7 @@ func (e *Entry) Validate() error {
 		e.Kind = "poc"
 	}
 	if e.Source == "" {
-		e.Source = "manual"
+		e.Source = "self"
 	}
 	e.HasContent = e.Content != ""
 	return nil
@@ -263,4 +263,44 @@ func categoryMatches(filter, category string) bool {
 		}
 	}
 	return false
+}
+
+// ValidateAgentAdd preserves the original distinction between a human/curator
+// material import and a factual result captured from an engagement.
+func (e *Entry) ValidateAgentAdd() error {
+	if err := e.Validate(); err != nil {
+		return err
+	}
+	if e.Manual {
+		return nil
+	}
+	if strings.TrimSpace(e.EngagementID) == "" && strings.TrimSpace(e.EngagementName) == "" {
+		return fmt.Errorf("engagement_id or engagement_name required (or manual=true for material import)")
+	}
+	if strings.TrimSpace(e.AssetTarget) == "" {
+		return fmt.Errorf("asset_target required (or manual=true for material import)")
+	}
+	if !e.Verified && e.Polarity != "context" {
+		return fmt.Errorf("verified=true and verification evidence required for positive/negative results; context may be unverified")
+	}
+	return nil
+}
+
+// Search replies expose reference metadata, not executable full bodies or the
+// internal scoring implementation. kb_get remains the full-text operation.
+func (r Result) MarshalJSON() ([]byte, error) {
+	metadata := func(es []Entry) []map[string]any {
+		out := []map[string]any{}
+		for _, e := range es {
+			raw, _ := json.Marshal(e)
+			var v map[string]any
+			_ = json.Unmarshal(raw, &v)
+			for _, key := range []string{"content", "score", "source_url", "filename", "manual", "source_finding_id"} {
+				delete(v, key)
+			}
+			out = append(out, v)
+		}
+		return out
+	}
+	return json.Marshal(map[string]any{"q": r.Q, "ammo": metadata(r.Ammo), "playbook": metadata(r.Playbook), "negative": metadata(r.Negative), "stats": r.Stats, "hint": r.Hint})
 }

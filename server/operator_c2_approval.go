@@ -39,7 +39,7 @@ func (s *Server) awaitOperatorC2Approval(parent context.Context, taskID, session
 			body = map[string]any{}
 		}
 		raw, _ := json.Marshal(map[string]any{"c2_task_id": taskID, "c2_listener_id": listenerID, "c2_session_id": sessionID, "task_type": kind, "payload": body})
-		allowed = s.m.interceptor.HandleAsk(ctx, 0, intercept.Decision{Action: "ask", Message: fmt.Sprintf("C2 会话 #%d 请求执行危险任务 %q，需要人工审批", sessionID, kind), TimeoutEnabled: false}, "c2_task:"+kind, raw)
+		allowed = s.m.interceptor.HandleAsk(ctx, 0, intercept.Decision{Action: "ask", Message: fmt.Sprintf("C2 会话 #%d 请求执行危险任务 %q，需要人工审批", sessionID, kind), TimeoutEnabled: true, TimeoutSeconds: 300, TimeoutAction: "deny"}, "c2_task:"+kind, raw)
 		reason = "C2 approval rejected or cancelled"
 	}
 	status, approval := "blocked", "rejected"

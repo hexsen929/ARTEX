@@ -287,7 +287,7 @@ func (d *DB) KBSearchEntries(ctx context.Context, q kb.Query) ([]kb.Entry, error
 			where = append(where, fmt.Sprintf("lower(COALESCE(body->>'%s','')) LIKE $%d ESCAPE '\\'", f.field, len(args)))
 		}
 	}
-	query := `SELECT id,code,jsonb_build_object('title',left(body->>'title',1000),'category',body->>'category','kind',body->>'kind','cve',body->>'cve','component',left(body->>'component',1000),'versions',left(body->>'versions',1000),'description',left(body->>'description',2000),'tags',left(body->>'tags',1000),'verified',COALESCE((body->>'verified')::boolean,false),'has_content',COALESCE(body->>'content','')!=''),polarity,hit_count,used_on,rank FROM (SELECT *,(` + score + `) AS rank FROM kb_entries WHERE ` + strings.Join(where, " AND ") + `) c WHERE rank>0 ORDER BY rank DESC,code LIMIT 400`
+	query := `SELECT id,code,(body-'content')||jsonb_build_object('description',left(body->>'description',2000),'usage',left(body->>'usage',4000),'verified',COALESCE((body->>'verified')::boolean,false),'has_content',COALESCE(body->>'content','')!=''),polarity,hit_count,used_on,rank FROM (SELECT *,(` + score + `) AS rank FROM kb_entries WHERE ` + strings.Join(where, " AND ") + `) c WHERE rank>0 ORDER BY rank DESC,code LIMIT 400`
 	rows, err := d.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
