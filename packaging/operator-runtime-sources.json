@@ -27,56 +27,57 @@
     }
   },
   "note": "Sources and binary archives are pinned. Tool source/configuration from the private supplied archive is not uploaded.",
-  "javafx_version": "19",
+  "javafx_version": "21.0.13",
   "javafx": {
     "base": {
-      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-base/19/javafx-base-19-mac-aarch64.jar",
-      "sha256": "2aae0bad5480bbd9572915b72d44f4e4653661ea0122fe2043f112df4798adcb",
-      "size": 752442,
-      "name": "javafx-base-19-mac-aarch64.jar",
-      "class_major": 55
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-base/21.0.13/javafx-base-21.0.13-mac-aarch64.jar",
+      "sha256": "bcb86ab39c655b103b9fd91bb8bce02f90c39dbdb06f84c46671536639cdc499",
+      "size": 753226,
+      "name": "javafx-base-21.0.13-mac-aarch64.jar",
+      "class_major": 61
     },
     "graphics": {
-      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-graphics/19/javafx-graphics-19-mac-aarch64.jar",
-      "sha256": "4adb7f4215e0298acd195dbb26bcac23bb9abcb017a723c37fb3d93a24ddf2af",
-      "size": 4812958,
-      "name": "javafx-graphics-19-mac-aarch64.jar",
-      "class_major": 55
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-graphics/21.0.13/javafx-graphics-21.0.13-mac-aarch64.jar",
+      "sha256": "0b57b97cf0515f5798d775ca9adb01f160cf6d8ab10e3216a015fa27a0ee3317",
+      "size": 4824423,
+      "name": "javafx-graphics-21.0.13-mac-aarch64.jar",
+      "class_major": 61
     },
     "controls": {
-      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-controls/19/javafx-controls-19-mac-aarch64.jar",
-      "sha256": "451625c75540ee2e3e9cee5b5b34ead80bcfc4aef7b91a3cf0a6a3659382021d",
-      "size": 2547893,
-      "name": "javafx-controls-19-mac-aarch64.jar",
-      "class_major": 55
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-controls/21.0.13/javafx-controls-21.0.13-mac-aarch64.jar",
+      "sha256": "e9cfb31e04032abd4170dfa0d00f683a227631e08cb9ca2ff4d946c08dd68120",
+      "size": 2582611,
+      "name": "javafx-controls-21.0.13-mac-aarch64.jar",
+      "class_major": 61
     },
     "fxml": {
-      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-fxml/19/javafx-fxml-19-mac-aarch64.jar",
-      "sha256": "b22dbf334c6358e2dd06d7720f606a3cfca03bc94557dd2d3a48ea857778af22",
-      "size": 129499,
-      "name": "javafx-fxml-19-mac-aarch64.jar",
-      "class_major": 55
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-fxml/21.0.13/javafx-fxml-21.0.13-mac-aarch64.jar",
+      "sha256": "ec5c9875052bcb3be0659af506b21be512f2dae87063a5a11b98fac12dc80732",
+      "size": 130030,
+      "name": "javafx-fxml-21.0.13-mac-aarch64.jar",
+      "class_major": 61
     },
     "media": {
-      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-media/19/javafx-media-19-mac-aarch64.jar",
-      "sha256": "67ed6cd061f9afb4b924a2bb84936d0b79103c822e733a0b022b02328f28a356",
-      "size": 1609811,
-      "name": "javafx-media-19-mac-aarch64.jar",
-      "class_major": 55
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-media/21.0.13/javafx-media-21.0.13-mac-aarch64.jar",
+      "sha256": "07c0a61726c24c5c29ddcb54b1fab452c205e8def761ba738e8060a7a1584536",
+      "size": 1487824,
+      "name": "javafx-media-21.0.13-mac-aarch64.jar",
+      "class_major": 61
     },
     "web": {
-      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-web/19/javafx-web-19-mac-aarch64.jar",
-      "sha256": "749ee061c9f70316f9410e9f4a810091a29217e9ad25c2b7ba34eb9459eaf6d8",
-      "size": 27693340,
-      "name": "javafx-web-19-mac-aarch64.jar",
-      "class_major": 55
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-web/21.0.13/javafx-web-21.0.13-mac-aarch64.jar",
+      "sha256": "7a25cc46dc6c5ebb16a4d1d43b8d25d4f6503cefcd7a9071e69802ca1f1ea494",
+      "size": 40158729,
+      "name": "javafx-web-21.0.13-mac-aarch64.jar",
+      "class_major": 61
     },
     "swing": {
-      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-swing/19/javafx-swing-19-mac-aarch64.jar",
-      "sha256": "7b01912b9625eb68e2d3cf87cf41345935980c762561acef87a7b53d4979b8b5",
-      "size": 88809,
-      "name": "javafx-swing-19-mac-aarch64.jar",
-      "class_major": 55
+      "url": "https://repo.maven.apache.org/maven2/org/openjfx/javafx-swing/21.0.13/javafx-swing-21.0.13-mac-aarch64.jar",
+      "sha256": "22f148f2f13fbd6142dfa419dc6418a7d7b49b9563bcc764e0a57f53555c5f2c",
+      "size": 89706,
+      "name": "javafx-swing-21.0.13-mac-aarch64.jar",
+      "class_major": 61
     }
-  }
+  },
+  "javafx_java_version": "17.0.21+9"
 }

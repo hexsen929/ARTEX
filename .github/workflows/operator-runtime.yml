@@ -28,6 +28,13 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
+          java-version: '17.0.21+9'
+          architecture: aarch64
+      - name: Preserve isolated JavaFX JVM
+        run: echo "ARTEX_JAVAFX_JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
           java-version: '11.0.33+10'
           architecture: aarch64
       - name: Resource import and platform manifest regressions
