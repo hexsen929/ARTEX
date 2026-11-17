@@ -188,9 +188,9 @@ func TestConfigStores(t *testing.T) {
 func TestAgentBindingCountsTreatsJSONNullAsEmptyBinding(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {
-		t.Skipf("postgres unavailable (%v) — skipping", err)
+		t.Fatal(err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { _ = d.Close() })
 	key := fmt.Sprintf("binding-count-null-%d", time.Now().UnixNano())
 	role := key + "-role"
 	agents, err := json.Marshal([]string{role})
@@ -208,6 +208,10 @@ func TestAgentBindingCountsTreatsJSONNullAsEmptyBinding(t *testing.T) {
 	}
 	if counts[role] != 1 {
 		t.Fatalf("valid binding count for %q = %d, want 1", role, counts[role])
+	}
+	var stillNull bool
+	if err := d.QueryRow(`SELECT agents='null'::jsonb FROM tools WHERE key=$1`, key).Scan(&stillNull); err != nil || !stillNull {
+		t.Fatalf("statistics must not mutate stored authorization: stillNull=%v err=%v", stillNull, err)
 	}
 }
 

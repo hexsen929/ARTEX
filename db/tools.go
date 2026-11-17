@@ -158,9 +158,11 @@ func (d *DB) CreateCustomTool(t *Tool) error {
 	if len(exec) == 0 {
 		exec = json.RawMessage("{}")
 	}
-	agents, _ := json.Marshal(t.Agents)
-	if len(agents) == 0 {
-		agents = json.RawMessage("[]")
+	// A nil slice marshals to JSON null, not an empty JSON array. Keep the
+	// stored shape consistent with the tool-binding readers and statistics.
+	agents := json.RawMessage("[]")
+	if len(t.Agents) > 0 {
+		agents, _ = json.Marshal(t.Agents)
 	}
 	_, err := d.Exec(`
 INSERT INTO tools(key, system, description, schema, agents, enabled, kind, exec, deferred)
@@ -180,9 +182,9 @@ func (d *DB) UpdateCustomTool(t *Tool) error {
 	if len(exec) == 0 {
 		exec = json.RawMessage("{}")
 	}
-	agents, _ := json.Marshal(t.Agents)
-	if len(agents) == 0 {
-		agents = json.RawMessage("[]")
+	agents := json.RawMessage("[]")
+	if len(t.Agents) > 0 {
+		agents, _ = json.Marshal(t.Agents)
 	}
 	_, err := d.Exec(`
 UPDATE tools SET description=$2, schema=$3, agents=$4, enabled=$5, kind=$6, exec=$7, deferred=$8
