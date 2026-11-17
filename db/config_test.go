@@ -188,7 +188,7 @@ func TestConfigStores(t *testing.T) {
 func TestAgentBindingCountsTreatsJSONNullAsEmptyBinding(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {
-		t.Fatal(err)
+		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
 	key := fmt.Sprintf("binding-count-null-%d", time.Now().UnixNano())
