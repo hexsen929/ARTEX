@@ -631,7 +631,14 @@ func (d *DB) AgentBindingCounts() (mcp map[int64]int, skill map[int64]int, tools
 	if err = byID(`SELECT agent_id, count(*) FROM agent_skill_visibility WHERE enabled GROUP BY agent_id`, skill); err != nil {
 		return
 	}
-	rows, e := d.Query(`SELECT elem, count(*) FROM tools, jsonb_array_elements_text(agents) AS elem WHERE tools.enabled GROUP BY elem`)
+	// A single legacy/custom tool row can contain JSON null (distinct from
+	// SQL NULL despite the column default/constraint). Treat only those nulls
+	// as an empty binding list so they cannot make every Agent's counts fail.
+	// Other malformed non-array values remain visible as query errors rather
+	// than being silently reported as an authorization count of zero.
+	rows, e := d.Query(`SELECT elem, count(*) FROM tools,
+jsonb_array_elements_text(CASE WHEN agents IS NULL OR jsonb_typeof(agents)='null' THEN '[]'::jsonb ELSE agents END) AS elem
+WHERE tools.enabled GROUP BY elem`)
 	if e != nil {
 		err = e
 		return
