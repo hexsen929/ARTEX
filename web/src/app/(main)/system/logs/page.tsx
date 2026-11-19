@@ -3,7 +3,7 @@
 import * as React from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { createSSE, sseUrl } from "@/lib/api";
+import { apiFetch, createSSE, sseUrl } from "@/lib/api";
 import { MOCK } from "@/lib/mock/enabled";
 import type { LogLine } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -148,7 +148,7 @@ export default function LogsPage() {
     setLoadingHistory(true);
     try {
       const params = minDbId > 0 ? `?before=${minDbId}&limit=200` : `?limit=200`;
-      const res = await fetch(`/api/logs/history${params}`);
+      const res = await apiFetch(`/api/logs/history${params}`);
       if (!res.ok) return;
       const data = (await res.json()) as { items: LogLine[]; has_more: boolean };
       if (data.items?.length) {

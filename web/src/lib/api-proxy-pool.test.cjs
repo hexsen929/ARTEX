@@ -17,7 +17,9 @@ function client(payload, calls = []) {
     exports,
     process: { env: {} },
     URLSearchParams,
+    Headers,
     require: (id) => {
+      if (id === "sonner") return { toast: { error: () => assert.fail("unexpected Basic Auth prompt") } };
       if (id === "@/lib/auth") return { auth: { clearToken: () => assert.fail("unexpected logout") } };
       if (id === "@/lib/auth-refresh") return { refreshAccessToken: async () => assert.fail("unexpected token refresh") };
       if (id === "@/lib/sse-target") return {};

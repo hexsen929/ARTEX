@@ -73,7 +73,12 @@ func TestWalkSkillFilesUsesSlashSeparatedAPIPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries, err := walkSkillFiles(root)
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	entries, err := listSkillFiles(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

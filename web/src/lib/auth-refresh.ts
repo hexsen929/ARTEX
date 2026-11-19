@@ -5,6 +5,13 @@
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+export class BasicAuthRequiredError extends Error {
+  constructor() {
+    super("访问验证已过期，请重新验证");
+    this.name = "BasicAuthRequiredError";
+  }
+}
+
 let refreshPromise: Promise<boolean> | null = null;
 
 // refreshAccessToken 尝试用 refresh cookie 换新 access token 并写回
@@ -24,7 +31,8 @@ export function refreshAccessToken(fetchImpl: FetchLike = fetch): Promise<boolea
           document.cookie = "artex_token=; path=/; max-age=0; SameSite=Lax";
         }
         return true;
-      } catch {
+      } catch (error) {
+        if (error instanceof BasicAuthRequiredError) throw error;
         return false;
       }
     })().finally(() => {
