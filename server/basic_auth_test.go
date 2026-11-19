@@ -300,6 +300,40 @@ func TestBasicAuthGate(t *testing.T) {
 	}
 }
 
+func TestBasicAuthWebExpiryResponseKeepsPageAndProbeChallenges(t *testing.T) {
+	s, _ := basicAuthTestServer(t)
+	if w := saveBasicAuthForTest(s, `{"enabled":true,"username":"entry","password":"test-pass"}`); w.Code != 200 {
+		t.Fatalf("enable Basic Auth: %s", w.Body.String())
+	}
+	gate := s.requireBasicAuth(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("unauthenticated request reached the protected handler")
+	}))
+	for _, tc := range []struct {
+		name, path     string
+		web, challenge bool
+	}{
+		{"API call", "/api/version", true, false},
+		{"refresh call", "/api/auth/refresh", true, false},
+		{"CLI client", "/api/version", false, true},
+		{"browser navigation", "/login", false, true},
+		{"health probe", "/api/health", true, true},
+		{"explicit check", "/api/basic-auth/check", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			if tc.web {
+				r.Header.Set("X-Artex-Client", "web")
+			}
+			w := httptest.NewRecorder()
+			gate.ServeHTTP(w, r)
+			if w.Code != http.StatusUnauthorized || w.Header().Get("X-Artex-Auth") != "basic" ||
+				(w.Header().Get("WWW-Authenticate") != "") != tc.challenge {
+				t.Fatalf("unexpected gate response: status=%d, headers=%v", w.Code, w.Header())
+			}
+		})
+	}
+}
+
 func TestBasicAuthSettingsPersistenceAndRevocation(t *testing.T) {
 	s, store := basicAuthTestServer(t)
 	w := saveBasicAuthForTest(s, `{"enabled":true,"username":"entry","password":"test-pass"}`)
