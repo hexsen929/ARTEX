@@ -240,8 +240,52 @@ func TestSideSummaryCancellationAndFailureDoNotAdvanceMemory(t *testing.T) {
 				replay.Save = func(context.Context, Memory) error { return errors.New("cleared") }
 			}
 			out, _, err := (SideQuestionService{p}).Respond(ctx, Snapshot{Request: fixture()}, "q", replay, ContextOptions{}, nil)
-			if err == nil || calls != 1 || memory.Through != 0 || out.Usage.InputTokens != 9 {
-				t.Fatalf("failed preparation: %+v %+v %v", memory, out, err)
+			wantCalls := 1
+			switch mode {
+			case "empty", "truncated", "too-large":
+				wantCalls = 2
+			}
+			if err == nil || calls != wantCalls || memory.Through != 0 || memory.History != "" || out.Usage.InputTokens != wantCalls*9 {
+				t.Fatalf("failed preparation: calls=%d, memory=%+v, output=%+v, err=%v", calls, memory, out, err)
+			}
+		})
+	}
+}
+
+func TestSideSummaryRetryRespectsWindowAndKeepsSource(t *testing.T) {
+	for _, window := range []int{8192, 32000} {
+		t.Run(fmt.Sprint(window), func(t *testing.T) {
+			var history []Exchange
+			for i := 1; i <= 21; i++ {
+				history = append(history, Exchange{Ordinal: int64(i), Question: "question", Answer: "original facts", Status: "completed"})
+			}
+			var memory Memory
+			var source string
+			var firstBudget, summaries int
+			p := fakeProvider{complete: func(_ context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+				if req.Thinking != "disabled" {
+					return assistant("answer"), "end_turn", llm.Usage{}, nil
+				}
+				summaries++
+				if EstimateInputTokens(req)+req.MaxTokens > window {
+					t.Fatal("summary request exceeds the model window")
+				}
+				if summaries == 1 {
+					source, firstBudget = req.Messages[0].Text(), req.MaxTokens
+					return assistant("partial reply"), "length", llm.Usage{InputTokens: 7}, nil
+				}
+				if summaries != 2 || len(req.Tools) != 0 || req.Messages[0].Text() != source || memory.Through != 0 {
+					t.Fatal("retry changed the source, exposed tools, or saved partial output")
+				}
+				if req.MaxTokens <= firstBudget || req.MaxTokens > 8192 {
+					t.Fatalf("unexpected retry output budget: %d (first: %d)", req.MaxTokens, firstBudget)
+				}
+				return assistant("complete summary"), "end_turn", llm.Usage{InputTokens: 11}, nil
+			}}
+			snapshot := Snapshot{Model: Model{WindowTokens: window}, Request: fixture()}
+			out, _, err := (SideQuestionService{p}).Respond(t.Context(), snapshot, "question", replayFixture(history, &memory), ContextOptions{}, nil)
+			if err != nil || summaries != 2 || memory.History != "complete summary" || memory.Through != 1 || out.Text != "answer" || out.Usage.InputTokens != 18 {
+				t.Fatalf("retry did not finish the question: summaries=%d memory=%+v answer=%+v err=%v", summaries, memory, out, err)
 			}
 		})
 	}
