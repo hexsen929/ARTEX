@@ -161,7 +161,7 @@ func readGoalsSkillReference(ctx context.Context, roots []goalsReferenceRoot, pa
 		if err != nil || !expected.Mode().IsRegular() || expected.Size() > maxGoalsSkillReferenceBytes {
 			return "", deny
 		}
-		file, err := openGoalsReferenceFile(root.root, relative)
+		file, err := openRootFileForRead(root.root, relative)
 		if err != nil {
 			return "", deny
 		}

@@ -21,6 +21,12 @@ type SkillEntryInspection struct {
 	Loadable     bool   `json:"loadable"`
 	LoadError    string `json:"load_error,omitempty"`
 	DeclaredName string `json:"declared_name,omitempty"`
+
+	indexPresent  bool
+	description   string
+	license       string
+	compatibility string
+	mcps          []string
 }
 
 type inspectedSkillFrontmatter struct {
@@ -80,19 +86,18 @@ func inspectSkillEntry(root, name string) SkillEntryInspection {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return fail("SKILL.md 指向配置的 Skill 根目录之外")
 	}
-	info, err := os.Stat(indexReal)
-	if err != nil || !info.Mode().IsRegular() {
+	// Keep existing indexes that point to a shared file inside the configured
+	// library. Open the resolved relative path through a library handle.
+	library, err := os.OpenRoot(rootReal)
+	if err != nil {
+		return fail("Skill 根目录不存在或不可读取")
+	}
+	defer library.Close()
+	f, _, err := openManagedRegularFile(library, rel)
+	if err != nil {
 		return fail("SKILL.md 不是可读取的普通文件")
 	}
-	f, err := os.Open(indexReal)
-	if err != nil {
-		return fail("SKILL.md 不可读取")
-	}
-	opened, err := f.Stat()
-	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
-		_ = f.Close()
-		return fail("SKILL.md 在读取前发生变化，请重试")
-	}
+	result.indexPresent = true
 	data, err := io.ReadAll(io.LimitReader(f, maxSkillIndexBytes+1))
 	closeErr := f.Close()
 	if err != nil || closeErr != nil {
@@ -130,6 +135,11 @@ func inspectSkillEntry(root, name string) SkillEntryInspection {
 		}
 		if !skillMCPFieldReadable(&fm.MCPs) || !skillMCPFieldReadable(&fm.MCP) {
 			return fail("Skill MCP 依赖声明应为名称或名称列表")
+		}
+		result.description, result.license, result.compatibility = fm.Description, fm.License, fm.Compatibility
+		result.mcps = skillDirectoryMCPNames(&fm.MCPs)
+		if len(result.mcps) == 0 {
+			result.mcps = skillDirectoryMCPNames(&fm.MCP)
 		}
 		if fm.Name != "" {
 			if fm.Name != strings.TrimSpace(fm.Name) || strings.IndexFunc(fm.Name, unicode.IsControl) >= 0 {
@@ -189,4 +199,27 @@ func inspectSkillCatalog(root string) (map[string]SkillEntryInspection, error) {
 		}
 	}
 	return result, nil
+}
+
+func skillDirectoryMCPNames(node *yaml.Node) []string {
+	var names []string
+	var scalar string
+	if err := node.Decode(&scalar); err == nil {
+		list := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(scalar), "["), "]")
+		for _, part := range strings.Split(list, ",") {
+			if name := strings.TrimSpace(strings.Trim(part, "\"' ")); name != "" {
+				names = append(names, name)
+			}
+		}
+		return names
+	}
+	var items []string
+	if err := node.Decode(&items); err == nil {
+		for _, item := range items {
+			if name := strings.TrimSpace(item); name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
 }
