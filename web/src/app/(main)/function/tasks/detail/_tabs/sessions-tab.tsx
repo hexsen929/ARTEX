@@ -655,6 +655,20 @@ export function SessionsTab({ taskId, requestedSession = "" }: { taskId: string;
     [controllingIntent, patchIntentState, taskId],
   );
 
+  const retryWorker = React.useCallback(async (session: Session) => {
+    if (!session.intent_id || session.inherited || controllingIntent) return;
+    setControllingIntent(session.intent_id);
+    try {
+      await api.rerunIntent(taskId, session.intent_id);
+      patchIntentState(session.intent_id, "open");
+      toast.success(`Worker #${session.intent_id} 已安排恢复，将续接原会话与已有结果`);
+    } catch (error) {
+      toast.error(`恢复失败：${(error as Error).message}`);
+    } finally {
+      setControllingIntent(null);
+    }
+  }, [controllingIntent, patchIntentState, taskId]);
+
   // SSE connection state — surfaced so a dropped realtime link is visible, never
   // silently shown as "no messages".
   const [sseLive, setSseLive] = React.useState(false);
@@ -2150,6 +2164,17 @@ export function SessionsTab({ taskId, requestedSession = "" }: { taskId: string;
                     )}
                   </InputGroupAddon>
                 </InputGroup>
+              </div>
+            ) : active.role === "worker" && !active.inherited && active.status === "blocked" ? (
+              <div className="flex items-center gap-3 border-t px-4 py-3">
+                <p className="min-w-0 flex-1 text-xs text-muted-foreground">
+                  {[...intents, ...olderIntents].find((node) => node.id === active.intent_id)?.model_recovery?.message
+                    ?? "本轮已中断，已有进度保留。核对恢复条件后可在这里恢复原会话；审批仍在拦截审批页处理。"}
+                </p>
+                <Button size="sm" variant="outline" disabled={controllingIntent === active.intent_id} onClick={() => void retryWorker(active)}>
+                  {controllingIntent === active.intent_id ? <Spinner /> : <RotateCwIcon className="size-3.5" />}
+                  恢复此意图
+                </Button>
               </div>
             ) : (
               <div className="flex items-center border-t px-4 py-2">

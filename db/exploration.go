@@ -391,7 +391,7 @@ WHERE exploration_id=$1 AND kind='intent' AND state='running'`, s.expID)
 func (s *ExplorationStore) ReopenIntent(id int64) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes
 SET state='open', completed_at=NULL, blocked_reason=NULL
- ,payload=jsonb_set(payload,'{automatic_continuations}','0'::jsonb)
+ ,payload=jsonb_set(payload-'automatic_model_recovery','{automatic_continuations}','0'::jsonb)
 WHERE id=$1 AND exploration_id=$2 AND kind='intent'
   AND state IN ('blocked','exhausted','stopped')`, id, s.expID)
 	if err != nil {
@@ -405,7 +405,7 @@ WHERE id=$1 AND exploration_id=$2 AND kind='intent'
 // (batch rerun after e.g. an LLM/network outage that blocked many at once). Returns the
 // number reopened. Workers resume from their transcripts; kept graph writes remain.
 func (s *ExplorationStore) ReopenBlockedIntents() (int64, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL,payload=jsonb_set(payload,'{automatic_continuations}','0'::jsonb)
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL,payload=jsonb_set(payload-'automatic_model_recovery','{automatic_continuations}','0'::jsonb)
 WHERE exploration_id=$1 AND kind='intent' AND state='blocked'`, s.expID)
 	if err != nil {
 		return 0, err

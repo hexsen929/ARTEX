@@ -209,6 +209,7 @@ func trafficDTOs(ex []traffic.ExchangeMeta) []TrafficExchangeDTO {
 // ---- TaskNode (frontend "TaskNode") — frontier, intents, exploration graph nodes ----
 
 type TaskNodeDTO struct {
+	ModelRecovery       *db.IntentRecovery      `json:"model_recovery,omitempty"`
 	ExecutionAttempt    int                     `json:"execution_attempt,omitempty"`
 	ExecutionCheckpoint *db.ExecutionCheckpoint `json:"execution_checkpoint,omitempty"`
 	VerificationStatus  string                  `json:"verification_status,omitempty"`
@@ -244,6 +245,7 @@ func taskNodeDTO(n *db.Node) TaskNodeDTO {
 		ExecutionCheckpoint *db.ExecutionCheckpoint `json:"execution_checkpoint"`
 	}
 	_ = json.Unmarshal(n.Payload, &outcome)
+	d.ModelRecovery = db.IntentRecoveryInfo(n)
 	d.WorkerResult = outcome.WorkerResult
 	d.ExecutionAttempt, d.ExecutionCheckpoint = outcome.ExecutionAttempt, outcome.ExecutionCheckpoint
 	if n.Kind == db.KindFinding {

@@ -362,7 +362,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       return next;
     });
 
-  // 重跑单条：置回 open（乐观更新本地 state，3s 轮询兜底），worker 会重新认领、从头再跑。
+  // 重跑单条：置回 open（乐观更新本地 state，3s 轮询兜底），worker 会重新认领并续接原会话和已有结果。
   const rerunOne = async (id: string) => {
     markRerun(id, true);
     try {
@@ -1045,7 +1045,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                   <ExecutionCheckpoint node={i} />
                   {i.worker_result && (
                     <p className="whitespace-normal text-xs text-muted-foreground">
-                      {i.worker_result.message} <code>{i.worker_result.code}</code>
+                      {i.model_recovery?.message ?? i.worker_result.message} <code>{i.worker_result.code}</code>
                     </p>
                   )}
                 </div>
@@ -1100,7 +1100,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       </div>
 
       {/* Blocked intents — 出错/被拦(如 LLM 网络问题)的意图，可一键重跑：置回 open，
-          worker 会重新认领、从头再跑（已写回图谱的数据保留）；任务若已终态/暂停会自动复活。 */}
+          worker 会重新认领并续接原会话和已有结果（已写回图谱的数据保留）；任务若已终态/暂停会自动复活。 */}
       {blocked.length > 0 && (
         <Card className="border-red-500/30">
           <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
@@ -1122,7 +1122,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                   <ExecutionCheckpoint node={i} />
                   {i.worker_result && (
                     <p className="whitespace-normal text-xs text-muted-foreground">
-                      {i.worker_result.message} <code>{i.worker_result.code}</code>
+                      {i.model_recovery?.message ?? i.worker_result.message} <code>{i.worker_result.code}</code>
                     </p>
                   )}
                 </div>
