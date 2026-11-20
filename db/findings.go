@@ -15,6 +15,7 @@ import (
 // DBFinding is a row in the standalone findings table. It persists across task
 // deletion unless the caller explicitly requests related finding cleanup.
 type DBFinding struct {
+	Surface         string
 	Reproduction    *Reproduction
 	ExportCaseID    int64 // transient unified-export identity, never a finding handle
 	ExportMemberIDs []int64
@@ -150,13 +151,19 @@ func (d *DB) ListFindings(limit int) ([]*DBFinding, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanFindings(rows)
+	out, err := scanFindings(rows)
+	rows.Close()
+	if err == nil {
+		err = d.applyFindingSurfaces(context.Background(), out)
+	}
+	return out, err
 }
 
 // FindingFilter narrows a paginated findings query. Empty-string fields mean "no
 // filter on that column". Sort is "severity" (severity desc, then time) or
 // anything else (time only). TimeDirection defaults to newest first.
 type FindingFilter struct {
+	Surface       string
 	Verification  string // independent evidence-verification state, not triage status
 	Severity      string // high | medium | low
 	Status        string // pending | false_positive | ignored | resolved
@@ -207,6 +214,10 @@ func (f FindingFilter) where() (string, []any) {
 	add("status", f.Status)
 	add("verification_status", f.Verification)
 	add("vulnclass", f.VulnClass)
+	if f.Surface != "" {
+		args = append(args, f.Surface)
+		conds = append(conds, fmt.Sprintf("%s=$%d", surfaceWhereSQL(), len(args)))
+	}
 	if from := strings.TrimSpace(f.From); from != "" {
 		if parsed, err := time.Parse(time.RFC3339, from); err == nil {
 			args = append(args, parsed)
@@ -306,6 +317,10 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 	}
 	defer rows.Close()
 	out, err := scanFindings(rows)
+	rows.Close()
+	if err == nil {
+		err = d.applyFindingSurfaces(context.Background(), out)
+	}
 	return out, total, err
 }
 
@@ -748,6 +763,9 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 		if err := json.Unmarshal(reproduction, &f.Reproduction); err != nil {
 			return nil, err
 		}
+	}
+	if err = d.applyFindingSurfaces(context.Background(), []*DBFinding{f}); err != nil {
+		return nil, err
 	}
 	return f, nil
 }

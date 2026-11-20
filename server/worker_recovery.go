@@ -76,6 +76,12 @@ func (e *Engine) reconcileWorkerOutcomesAt(parent context.Context, t *Task, now 
 	if ctx.Err() != nil {
 		return
 	}
+	if !e.IsPaused(t.ID) && !e.isSettling(t.ID) && !e.OutcomeRecoveryBlocked(t.ID) {
+		limit, delay := e.modelErrorRetryPolicy()
+		if ids, err := t.Store.RecoverTransientIntents(ctx, now, limit, delay); err == nil && len(ids) > 0 {
+			t.Notify()
+		}
+	}
 	runs, err := t.Store.RunningIntentRuns(ctx)
 	if err != nil {
 		return

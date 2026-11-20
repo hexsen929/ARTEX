@@ -66,8 +66,8 @@ func TestExecutionStableCheckIdentitySurvivesWordingAndFailures(t *testing.T) {
 	if err != nil || reused != id {
 		t.Fatal("blocked check duplicated", reused, err)
 	}
-	if _, err := s.ContinuePlannerIntent(id, "provider might work", 1); err == nil {
-		t.Fatal("planner revived infrastructure failure")
+	if reused, err := s.ContinuePlannerIntent(id, "provider might work", 1); err != nil || reused != id {
+		t.Fatal("transient failure did not return original wait state", reused, err)
 	}
 	node, err := s.GetNode(id)
 	if err != nil || node.State != "blocked" {

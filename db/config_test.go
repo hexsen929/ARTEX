@@ -185,6 +185,36 @@ func TestConfigStores(t *testing.T) {
 	d.DeleteMCP(mid)
 }
 
+func TestAgentBindingCountsTreatsJSONNullAsEmptyBinding(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	key := fmt.Sprintf("binding-count-null-%d", time.Now().UnixNano())
+	role := key + "-role"
+	agents, err := json.Marshal([]string{role})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = d.Exec(`INSERT INTO tools(key, agents) VALUES($1, 'null'::jsonb), ($2, $3::jsonb)`, key, key+"-valid", string(agents)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM tools WHERE key IN ($1,$2)`, key, key+"-valid") })
+
+	_, _, counts, err := d.AgentBindingCounts()
+	if err != nil {
+		t.Fatalf("one JSON-null tool binding invalidated all Agent counts: %v", err)
+	}
+	if counts[role] != 1 {
+		t.Fatalf("valid binding count for %q = %d, want 1", role, counts[role])
+	}
+	var stillNull bool
+	if err := d.QueryRow(`SELECT agents='null'::jsonb FROM tools WHERE key=$1`, key).Scan(&stillNull); err != nil || !stillNull {
+		t.Fatalf("statistics must not mutate stored authorization: stillNull=%v err=%v", stillNull, err)
+	}
+}
+
 func TestJevProfileCannotBeActivatedOrAgentBound(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {

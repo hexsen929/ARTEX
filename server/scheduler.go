@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
@@ -20,10 +21,12 @@ import (
 // + finding watermark + fired-goal set) so a restart resumes without double-firing.
 // Triggers only attach to CUSTOM agents.
 type Scheduler struct {
-	s         *Server
-	pg        *db.DB
-	tick      time.Duration
-	startedAt time.Time
+	payoutMu    sync.Mutex
+	payoutFired map[int64]bool
+	s           *Server
+	pg          *db.DB
+	tick        time.Duration
+	startedAt   time.Time
 }
 
 const (
@@ -177,6 +180,9 @@ func (sc *Scheduler) fireFindings(triggers []*db.AgentTrigger) {
 		msgCtx := fmt.Sprintf("\n\n【本次由任务发现 finding 触发】\n发现: [%s/%s] %s",
 			e.VulnClass, e.Severity, e.Summary)
 		for _, tr := range want {
+			if tr.AgentKey == "payout_analyst" && (!moneyDirection(e.Summary, e.VulnClass, e.TaskDesc, e.TaskGoal) || !sc.markPayoutFired(e.TaskID)) {
+				continue
+			}
 			if tr.AgentKey == db.FindingVerifierAgentKey {
 				// verifier 走 finding_checks 管线:先建 check 行(pending)再跑会话,
 				// 不经通用触发队列(队列会话无法关联 check 记录)。finding_verify_mode

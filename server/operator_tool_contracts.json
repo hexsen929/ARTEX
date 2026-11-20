@@ -1,0 +1,263 @@
+{
+  "c2_exec": {
+    "type": "object",
+    "required": [
+      "session_id",
+      "command"
+    ],
+    "properties": {
+      "command": {
+        "type": "string",
+        "description": "要执行的 shell 命令（Windows 走 cmd /c，Linux 走 sh -c）"
+      },
+      "session_id": {
+        "type": "integer",
+        "description": "C2 会话 id（c2_list_sessions 返回）"
+      }
+    }
+  },
+  "c2_list_sessions": {
+    "type": "object",
+    "required": [
+      "listener_id"
+    ],
+    "properties": {
+      "status": {
+        "type": "string",
+        "description": "可选：active | dead | killed"
+      },
+      "listener_id": {
+        "type": "integer",
+        "description": "可选：只看某个监听器的会话"
+      }
+    }
+  },
+  "c2_task_result": {
+    "type": "object",
+    "properties": {
+      "task_id": {
+        "type": "integer",
+        "description": "可选：任务 id"
+      },
+      "session_id": {
+        "type": "integer",
+        "description": "可选：会话 id（查该会话最近 20 条任务）"
+      }
+    }
+  },
+  "kb_add": {
+    "type": "object",
+    "required": [
+      "title"
+    ],
+    "properties": {
+      "cve": {
+        "type": "string",
+        "description": "可选：CVE/CNVD 编号"
+      },
+      "code": {
+        "type": "string",
+        "description": "可选：稳定标识（省略则按标题生成）；同一 code 会合并刷新"
+      },
+      "kind": {
+        "type": "string",
+        "description": "可选：poc|exp|script|template|payload，默认 poc"
+      },
+      "tags": {
+        "type": "string",
+        "description": "可选：逗号分隔标签"
+      },
+      "title": {
+        "type": "string",
+        "description": "条目标题（必填）：如「XX 平台 XX 接口未授权读取」"
+      },
+      "usage": {
+        "type": "string",
+        "description": "可选：用法与命令行示例（复用者最需要的一段）"
+      },
+      "manual": {
+        "type": "boolean",
+        "description": "可选：人工/整理型入库（默认 false）。true 时放宽三件套：靶标与资产可空、verified 可为 false；勾了 verified 仍需 verified_note。仅「入库员」整理用户投喂材料时使用。"
+      },
+      "source": {
+        "type": "string",
+        "description": "可选：web/self/manual/nuclei-template，默认 self"
+      },
+      "content": {
+        "type": "string",
+        "description": "可选：正文（脚本源码 / 原始请求 / 文档 Markdown）"
+      },
+      "category": {
+        "type": "string",
+        "description": "归类（必填，不能为 other）：rce/deserialization/file-upload/sqli/unauthorized/auth-bypass/weak-password/ssrf/xxe/path-traversal/info-leak/privesc/tunnel/methodology/recon/frontend-reverse/app-audit/env/waf/protocol"
+      },
+      "filename": {
+        "type": "string",
+        "description": "可选：落盘文件名（默认按 language 生成 poc.py/poc.sh/...）"
+      },
+      "language": {
+        "type": "string",
+        "description": "可选：python/go/java/bash/http/js/php/markdown（决定落盘文件名）"
+      },
+      "polarity": {
+        "type": "string",
+        "description": "可选：positive/negative/context（negative=已证否路线）"
+      },
+      "severity": {
+        "type": "string",
+        "description": "可选：critical/high/medium/low"
+      },
+      "verified": {
+        "type": "boolean",
+        "description": "是否实测验证过：实测类必填 true 并给证据；polarity=context 的资料类传 false"
+      },
+      "versions": {
+        "type": "string",
+        "description": "可选：影响版本"
+      },
+      "component": {
+        "type": "string",
+        "description": "可选：组件/产品名"
+      },
+      "source_url": {
+        "type": "string",
+        "description": "可选：来源链接"
+      },
+      "description": {
+        "type": "string",
+        "description": "可选：用途/原理/前提"
+      },
+      "asset_target": {
+        "type": "string",
+        "description": "发现资产（必填）：IP/域名/URL"
+      },
+      "engagement_id": {
+        "type": "string",
+        "description": "来源靶标 id（engagement_id/engagement_name 至少一个）"
+      },
+      "verified_note": {
+        "type": "string",
+        "description": "实测验证证据（必填）：哪台目标、什么回显/结果"
+      },
+      "found_by_agent": {
+        "type": "string",
+        "description": "可选：发现角色（recon/vuln-scan/exploit/internal）"
+      },
+      "engagement_name": {
+        "type": "string",
+        "description": "来源靶标名称"
+      }
+    }
+  },
+  "kb_get": {
+    "type": "object",
+    "required": [
+      "key"
+    ],
+    "properties": {
+      "key": {
+        "type": "string",
+        "description": "条目 code 或数字 id（来自 kb_search / 知识库预查块）"
+      },
+      "code": {
+        "type": "string",
+        "description": "兼容别名：优先使用 key"
+      }
+    }
+  },
+  "kb_search": {
+    "type": "object",
+    "properties": {
+      "q": {
+        "type": "string",
+        "description": "检索词：产品名 / CVE / 组件 / 关键词，如 \"1panel 验证码绕过\"（留空则按过滤条件浏览）"
+      },
+      "cve": {
+        "type": "string",
+        "description": "可选：按 CVE 编号过滤"
+      },
+      "tag": {
+        "type": "string",
+        "description": "可选：按 tags 子串过滤"
+      },
+      "kind": {
+        "type": "string",
+        "description": "可选：poc|exp|script|template|payload"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "可选：最多返回条数，默认 20，最大 200"
+      },
+      "category": {
+        "type": "string",
+        "description": "可选：按归类过滤，逗号分隔（rce/deserialization/file-upload/sqli/unauthorized/auth-bypass/weak-password/ssrf/xxe/path-traversal/info-leak/privesc/tunnel/methodology/recon/frontend-reverse/app-audit/env/waf/protocol/other）"
+      },
+      "verified": {
+        "type": "boolean",
+        "description": "可选：只看已验证条目"
+      },
+      "component": {
+        "type": "string",
+        "description": "可选：按组件名过滤"
+      }
+    }
+  },
+  "list_sessions": {
+    "type": "object",
+    "properties": {
+      "status": {
+        "type": "string",
+        "description": "可选：只列 alive 或 dead（默认全部）"
+      },
+      "include_global": {
+        "type": "boolean",
+        "description": "是否包含未关联任务的人工会话（默认 true）"
+      }
+    }
+  },
+  "session_eval": {
+    "type": "object",
+    "required": [
+      "session_id",
+      "code"
+    ],
+    "properties": {
+      "code": {
+        "type": "string",
+        "description": "要执行的 PHP 代码（不带 <?php / ?>；用 echo 输出）"
+      },
+      "timeout": {
+        "type": "integer",
+        "description": "超时秒数（可选，默认 15）"
+      },
+      "session_id": {
+        "type": "integer",
+        "description": "会话 id（list_sessions / register_session 返回）"
+      }
+    }
+  },
+  "vps_exec": {
+    "type": "object",
+    "required": [
+      "command"
+    ],
+    "properties": {
+      "vps": {
+        "type": "string",
+        "description": "哪台 VPS：名称或 id。只登记了一台时可留空"
+      },
+      "command": {
+        "type": "string",
+        "description": "要执行的命令，例如 systemctl start frps / nohup ./frps -c frps.toml & / socat TCP-LISTEN:4444 -"
+      },
+      "timeout_ms": {
+        "type": "integer",
+        "description": "超时毫秒（默认 60000，最大 600000）"
+      },
+      "vps_id": {
+        "type": "integer",
+        "description": "兼容别名：已登记的 VPS ID"
+      }
+    }
+  }
+}

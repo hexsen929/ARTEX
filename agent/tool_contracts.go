@@ -7,7 +7,7 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
-const intentCallContract = "【当前调用契约】新建检查：summary 与 check_identity 必填；续接：仅传 continue_intent_id 和非空 continuation_note，沿用原身份、资产、来源与验收，不传 asset_ids/parent_ids/check_identity。blocked、审批等待、模型故障或未知结果需人工恢复；模型不得反复调用或新建等价检查绕过。返回 state=blocked 或 queued=false 表示没有入队，不能称为成功派发。"
+const intentCallContract = "【当前调用契约】新建检查：summary 与 check_identity 必填；续接：仅传 continue_intent_id 和非空 continuation_note，沿用原身份、资产、来源与验收，不传 asset_ids/parent_ids/check_identity。临时模型断流/限流/服务故障由系统检查原记录并退避自动续接，返回wait_system_recovery时结束本轮等待，不要求用户操作；真实审批、鉴权或无法核实的工具结果保留明确原因。模型不得反复调用或新建等价检查绕过。返回 state=blocked 或 queued=false 表示没有入队，不能称为成功派发。"
 const verificationCallContract = "【当前验证契约】note 是判断依据，不是证据正文。status=confirmed 要求原记录 evidence 非空，或通过 additional_evidence 追加已实际取得的证据；已绑定数据包不自动填写文本 evidence。缺少真实证据时保持 unverified/blocked，不编造输出、不只改写 note 重试。字段错误由 Agent 读取当前记录和已保存证据处理，不请求用户填写内部字段；记录已被其他流程更新时使用当前状态，不重复提交。"
 const trafficReadContract = "【读取边界】traffic_search 返回 items、page、limit、has_more、next_page；has_more=false 时停止翻页。仅按主机宽查询每轮最多12次，之后停止该类翻页，已知记录读取与明确条件的查询仍可在原预算内进行；全部搜索最多40次。持续重复被拒或总预算耗尽时自动整理已读结果并交回Planner，无需用户逐页核对。不得换主机或新建等价意图重置额度。绿勾只说明查询成功，不证明任务有进展。"
 

@@ -2523,3 +2523,191 @@ CREATE TABLE IF NOT EXISTS report_templates (
  id bigserial PRIMARY KEY, version bigint NOT NULL DEFAULT 1, body jsonb NOT NULL,
  CHECK(octet_length(body::text)<=400000)
 );
+
+-- Optional operator modules, reconstructed from observed API contracts.
+-- Never delete or replace existing user settings or interception rules.
+CREATE TABLE IF NOT EXISTS armor_presets (
+    id BIGSERIAL PRIMARY KEY,
+    name text NOT NULL,
+    text text DEFAULT ''::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+CREATE TABLE IF NOT EXISTS c2_events (
+    id BIGSERIAL PRIMARY KEY,
+    level text DEFAULT 'info'::text NOT NULL,
+    category text DEFAULT 'listener'::text NOT NULL,
+    listener_id bigint,
+    session_id bigint,
+    task_id bigint,
+    message text DEFAULT ''::text NOT NULL,
+    data jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT c2_events_category_check CHECK ((category = ANY (ARRAY['listener'::text, 'session'::text, 'task'::text, 'payload'::text, 'opsec'::text]))),
+    CONSTRAINT c2_events_level_check CHECK ((level = ANY (ARRAY['info'::text, 'warn'::text, 'critical'::text])))
+);
+CREATE TABLE IF NOT EXISTS c2_files (
+    id BIGSERIAL PRIMARY KEY,
+    session_id bigint NOT NULL,
+    task_id bigint,
+    direction text NOT NULL,
+    remote_path text DEFAULT ''::text NOT NULL,
+    local_path text DEFAULT ''::text NOT NULL,
+    size_bytes bigint DEFAULT 0 NOT NULL,
+    sha256 text DEFAULT ''::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT c2_files_direction_check CHECK ((direction = ANY (ARRAY['upload'::text, 'download'::text])))
+);
+CREATE TABLE IF NOT EXISTS c2_listeners (
+    id BIGSERIAL PRIMARY KEY,
+    name text DEFAULT ''::text NOT NULL,
+    kind text NOT NULL,
+    bind_host text DEFAULT '127.0.0.1'::text NOT NULL,
+    bind_port integer NOT NULL,
+    path text DEFAULT '/updates/check'::text NOT NULL,
+    encryption_key text DEFAULT ''::text NOT NULL,
+    implant_token text DEFAULT ''::text NOT NULL,
+    envelope text DEFAULT 'auto'::text NOT NULL,
+    status text DEFAULT 'stopped'::text NOT NULL,
+    remark text DEFAULT ''::text NOT NULL,
+    last_error text DEFAULT ''::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    started_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT c2_listeners_bind_port_check CHECK (((bind_port >= 1) AND (bind_port <= 65535))),
+    CONSTRAINT c2_listeners_envelope_check CHECK ((envelope = ANY (ARRAY['auto'::text, 'gcm'::text, 'cbc-hmac'::text]))),
+    CONSTRAINT c2_listeners_kind_check CHECK ((kind = ANY (ARRAY['http_beacon'::text, 'tcp_reverse'::text]))),
+    CONSTRAINT c2_listeners_status_check CHECK ((status = ANY (ARRAY['stopped'::text, 'running'::text, 'error'::text])))
+);
+CREATE TABLE IF NOT EXISTS c2_sessions (
+    id BIGSERIAL PRIMARY KEY,
+    listener_id bigint NOT NULL,
+    implant_uuid text NOT NULL,
+    hostname text DEFAULT ''::text NOT NULL,
+    username text DEFAULT ''::text NOT NULL,
+    os text DEFAULT ''::text NOT NULL,
+    arch text DEFAULT ''::text NOT NULL,
+    pid integer DEFAULT 0 NOT NULL,
+    process_name text DEFAULT ''::text NOT NULL,
+    is_admin boolean DEFAULT false NOT NULL,
+    internal_ip text DEFAULT ''::text NOT NULL,
+    external_ip text DEFAULT ''::text NOT NULL,
+    user_agent text DEFAULT ''::text NOT NULL,
+    sleep_seconds integer DEFAULT 5 NOT NULL,
+    status text DEFAULT 'active'::text NOT NULL,
+    note text DEFAULT ''::text NOT NULL,
+    first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_check_in timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT c2_sessions_status_check CHECK ((status = ANY (ARRAY['active'::text, 'dead'::text, 'killed'::text])))
+);
+CREATE TABLE IF NOT EXISTS c2_tasks (
+    id BIGSERIAL PRIMARY KEY,
+    session_id bigint NOT NULL,
+    task_type text DEFAULT 'shell'::text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    status text DEFAULT 'queued'::text NOT NULL,
+    result_text text DEFAULT ''::text NOT NULL,
+    error text DEFAULT ''::text NOT NULL,
+    source text DEFAULT 'manual'::text NOT NULL,
+    approval_status text DEFAULT ''::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    sent_at timestamp with time zone,
+    completed_at timestamp with time zone,
+    duration_ms bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT c2_tasks_approval_status_check CHECK ((approval_status = ANY (ARRAY[''::text, 'pending'::text, 'approved'::text, 'rejected'::text]))),
+    CONSTRAINT c2_tasks_source_check CHECK ((source = ANY (ARRAY['manual'::text, 'ai'::text]))),
+    CONSTRAINT c2_tasks_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'sent'::text, 'running'::text, 'success'::text, 'failed'::text, 'cancelled'::text, 'blocked'::text, 'awaiting_approval'::text])))
+);
+CREATE TABLE IF NOT EXISTS finding_surface_overrides (
+    vulnclass text PRIMARY KEY,
+    surface text DEFAULT ''::text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kb_entry_meta (
+    code text PRIMARY KEY,
+    polarity text DEFAULT ''::text NOT NULL,
+    category text DEFAULT ''::text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+CREATE TABLE IF NOT EXISTS skill_categories (
+    skill text PRIMARY KEY,
+    category text DEFAULT ''::text NOT NULL,
+    source text DEFAULT ''::text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+CREATE TABLE IF NOT EXISTS skill_docs (
+    id BIGSERIAL PRIMARY KEY,
+    skill text NOT NULL,
+    path text NOT NULL,
+    kind text DEFAULT 'reference'::text NOT NULL,
+    content text DEFAULT ''::text NOT NULL,
+    mtime bigint DEFAULT 0 NOT NULL,
+    size bigint DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+CREATE TABLE IF NOT EXISTS vps_hosts (
+    id BIGSERIAL PRIMARY KEY,
+    kind text DEFAULT 'ssh'::text NOT NULL,
+    label text DEFAULT ''::text NOT NULL,
+    host text NOT NULL,
+    port integer DEFAULT 22 NOT NULL,
+    user_name text DEFAULT 'root'::text NOT NULL,
+    ssh_key text DEFAULT ''::text NOT NULL,
+    ssh_password text DEFAULT ''::text NOT NULL,
+    key_path text DEFAULT ''::text NOT NULL,
+    note text DEFAULT ''::text NOT NULL,
+    prefer_callback boolean DEFAULT false NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    last_check_at timestamp with time zone DEFAULT '1970-01-01 08:00:00+08'::timestamp with time zone NOT NULL,
+    last_check_ok boolean DEFAULT false NOT NULL,
+    last_check_msg text DEFAULT ''::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    socks_user text DEFAULT ''::text NOT NULL,
+    socks_password text DEFAULT ''::text NOT NULL,
+    prefer_egress boolean DEFAULT false NOT NULL
+);
+CREATE TABLE IF NOT EXISTS webshell_commands (
+    id BIGSERIAL PRIMARY KEY,
+    session_id bigint NOT NULL,
+    command text NOT NULL,
+    stdout text DEFAULT ''::text NOT NULL,
+    stderr text DEFAULT ''::text NOT NULL,
+    ms integer DEFAULT 0 NOT NULL,
+    ok boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS remark TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS method TEXT NOT NULL DEFAULT 'POST';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cmd_param TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS encoding TEXT NOT NULL DEFAULT 'auto';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS target_os TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS skill_docs_identity ON skill_docs(skill,path);
+CREATE UNIQUE INDEX IF NOT EXISTS c2_session_identity ON c2_sessions(listener_id,implant_uuid);
+CREATE INDEX IF NOT EXISTS c2_pending_tasks ON c2_tasks(session_id,status,id);
+CREATE INDEX IF NOT EXISTS webshell_history_session ON webshell_commands(session_id,id DESC);
+CREATE TABLE IF NOT EXISTS kb_entries (
+ id BIGSERIAL PRIMARY KEY, code TEXT NOT NULL UNIQUE, body JSONB NOT NULL DEFAULT '{}',
+ polarity TEXT NOT NULL DEFAULT 'context' CHECK (polarity IN ('positive','context','negative')),
+ hit_count BIGINT NOT NULL DEFAULT 0, used_on TEXT NOT NULL DEFAULT '',
+ source_finding_id BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS operator_module_settings (
+ key TEXT PRIMARY KEY, value JSONB NOT NULL DEFAULT '{}', updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+DO $operator_relations$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='operator_c2_listener_owner') THEN
+  ALTER TABLE c2_sessions ADD CONSTRAINT operator_c2_listener_owner FOREIGN KEY(listener_id) REFERENCES c2_listeners(id) ON DELETE CASCADE;
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='operator_c2_task_owner') THEN
+  ALTER TABLE c2_tasks ADD CONSTRAINT operator_c2_task_owner FOREIGN KEY(session_id) REFERENCES c2_sessions(id) ON DELETE CASCADE;
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='operator_c2_file_owner') THEN
+  ALTER TABLE c2_files ADD CONSTRAINT operator_c2_file_owner FOREIGN KEY(session_id) REFERENCES c2_sessions(id) ON DELETE CASCADE;
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='operator_webshell_history_owner') THEN
+  ALTER TABLE webshell_commands ADD CONSTRAINT operator_webshell_history_owner FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE;
+ END IF;
+END $operator_relations$;

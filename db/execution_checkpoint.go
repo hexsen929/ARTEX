@@ -10,6 +10,7 @@ import (
 // A checkpoint describes tool dispatch/return, not whether a network request or
 // vulnerability test actually succeeded. Full content stays in activity/transcript.
 type ExecutionCheckpoint struct {
+	NotExecuted    map[string]string `json:"not_executed,omitempty"`
 	RunToken       string            `json:"run_token"`
 	StartedAt      string            `json:"started_at"`
 	UpdatedAt      string            `json:"updated_at"`
