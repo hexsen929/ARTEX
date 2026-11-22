@@ -44,6 +44,13 @@ export function credentialTaskHref(
     : undefined;
 }
 
+export function credentialCanReveal(
+  credential: Pick<IntranetCredential, "task_available" | "reveal_available">,
+): boolean {
+  // Older servers only advertise task availability; preserve their restriction.
+  return credential.reveal_available ?? credential.task_available;
+}
+
 export function credentialMatchesQuery(credential: IntranetCredential, query: string): boolean {
   const words = query.trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
   if (words.length === 0) return true;
