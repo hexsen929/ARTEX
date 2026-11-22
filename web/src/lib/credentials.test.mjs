@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   CREDENTIAL_SECRET_TTL_MS,
+  credentialCanReveal,
   credentialExternalURL,
   credentialMatchesQuery,
   credentialPage,
@@ -67,6 +68,14 @@ test("only available tasks receive valid internal links", () => {
   for (const task_id of [0, -1, NaN, Infinity, 2.5, Number.MAX_SAFE_INTEGER + 1]) {
     assert.equal(credentialTaskHref({ task_id, task_available: true }), undefined);
   }
+});
+
+test("retained credential reveal is independent of task editing and preserves old-server limits", () => {
+  assert.equal(credentialCanReveal({ task_available: false, reveal_available: true }), true);
+  assert.equal(credentialCanReveal({ task_available: true, reveal_available: false }), false);
+  assert.equal(credentialCanReveal({ task_available: false, reveal_available: false }), false);
+  assert.equal(credentialCanReveal({ task_available: true }), true);
+  assert.equal(credentialCanReveal({ task_available: false }), false);
 });
 
 test("credential search covers provenance/targets/domain without searching secrets", () => {

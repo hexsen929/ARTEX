@@ -63,10 +63,11 @@ type CredentialRecord struct {
 	VerificationHistory  []CredentialVerificationEvent `json:"verification_history"`
 	CreatedAt            time.Time                     `json:"created_at"`
 	// Display-only fields are hydrated from the currently available task/asset.
-	TaskName      string `json:"task_name"`
-	TaskAvailable bool   `json:"task_available"`
-	TargetLabel   string `json:"target_label"`
-	TargetURL     string `json:"target_url"`
+	TaskName        string `json:"task_name"`
+	TaskAvailable   bool   `json:"task_available"`
+	RevealAvailable bool   `json:"reveal_available"`
+	TargetLabel     string `json:"target_label"`
+	TargetURL       string `json:"target_url"`
 }
 
 var (
@@ -274,6 +275,7 @@ const credentialCols = `c.id, c.task_id, COALESCE(c.host_asset_id,0), c.username
  c.domain, c.source, c.verified, c.created_at, c.target, c.source_url, c.source_intent_id, c.source_exploration_id,
  c.verification_status, c.verification_at, c.verification_method, c.verification_evidence, c.verification_by, c.verification_history,
  COALESCE(t.name,''), (t.id IS NOT NULL AND t.deleted_at IS NULL AND t.archived_at IS NULL AND NOT EXISTS(SELECT 1 FROM task_archives ar WHERE ar.task_id=t.id AND ar.state IN ('archive_queued','archiving','restore_queued','restoring','delete_queued','deleting'))),
+ NOT EXISTS(SELECT 1 FROM task_archives ar WHERE ar.task_id=c.task_id AND ar.state IN ('archive_queued','archiving','restore_queued','restoring','delete_queued','deleting')),
  COALESCE(NULLIF(a.url,''),NULLIF(a.domain,''),a.ip,''), COALESCE(a.url,'')`
 const credentialFrom = ` FROM credentials c LEFT JOIN tasks t ON t.id=c.task_id
  LEFT JOIN assets a ON a.id=c.host_asset_id AND c.task_id=ANY(a.task_ids)`
@@ -285,7 +287,7 @@ func (s *CredentialStore) scan(row interface{ Scan(...any) error }) (*Credential
 	if err := row.Scan(&r.ID, &r.TaskID, &r.HostAssetID, &r.Username, &r.CredType, &enc,
 		&r.Domain, &r.Source, &r.Verified, &r.CreatedAt, &r.Target, &r.SourceURL, &r.SourceIntentID, &r.SourceExplorationID,
 		&r.VerificationStatus, &r.VerificationAt, &r.VerificationMethod, &r.VerificationEvidence, &r.VerificationBy, &history,
-		&r.TaskName, &r.TaskAvailable, &assetLabel, &assetURL); err != nil {
+		&r.TaskName, &r.TaskAvailable, &r.RevealAvailable, &assetLabel, &assetURL); err != nil {
 		return nil, err
 	}
 	plain, err := s.decrypt(enc)
@@ -333,6 +335,44 @@ func (s *CredentialStore) Get(ctx context.Context, id int64) (*CredentialRecord,
 		return nil, nil
 	}
 	return r, err
+}
+
+// GetForReveal reads an existing credential independently of task editability.
+// Hold the task lock before the credential lock, matching mutation/archive lock
+// order. Missing or deleted parents do not hide explicitly retained records.
+// The caller releases the read locks after sending the bounded response.
+func (s *CredentialStore) GetForReveal(ctx context.Context, id int64) (record *CredentialRecord, release func(), err error) {
+	tx, err := s.d.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if release == nil {
+			_ = tx.Rollback()
+		}
+	}()
+	var taskID int64
+	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM credentials WHERE id=$1`, id).Scan(&taskID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			err = ErrCredentialNotFound
+		}
+		return nil, nil, err
+	}
+	var parentID int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM tasks WHERE id=$1 FOR SHARE`, taskID).Scan(&parentID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, err
+	}
+	record, err = s.scan(tx.QueryRowContext(ctx, `SELECT `+credentialCols+credentialFrom+` WHERE c.id=$1 FOR SHARE OF c`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, ErrCredentialNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if record.TaskID != taskID || !record.RevealAvailable {
+		return record, nil, ErrCredentialUnavailable
+	}
+	return record, func() { _ = tx.Rollback() }, nil
 }
 
 func (s *CredentialStore) list(ctx context.Context, taskID int64) ([]*CredentialRecord, error) {

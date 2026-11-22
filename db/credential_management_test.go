@@ -1,10 +1,14 @@
 package db
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestNormalizeCredentialManagementMetadata(t *testing.T) {
@@ -262,5 +266,134 @@ func TestCredentialCreateResolvesPartialSourceContext(t *testing.T) {
 	rows, err := store.ListByTask(t.Context(), task.ID)
 	if err != nil || len(rows) != 1 {
 		t.Fatal("rejected source context unexpectedly inserted a credential")
+	}
+}
+
+func TestCredentialRevealLocksAndRetainedRecords(t *testing.T) {
+	d := portTestDB(t)
+	task, err := d.CreateTask("retained credential read fixture", "local fixture", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.Exec(`DELETE FROM credentials WHERE task_id=$1`, task.ID)
+		_, _ = d.Exec(`DELETE FROM task_archives WHERE task_id=$1`, task.ID)
+		_ = d.DeleteTask(task.ID)
+	})
+	store := NewCredentialStore(d, []byte("retained-read-fixture-key"))
+	id, err := store.Create(t.Context(), &CredentialRecord{TaskID: task.ID, CredType: CredToken, Secret: "synthetic-retained-value", Source: "synthetic source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	record, release, err := store.GetForReveal(t.Context(), id)
+	if err != nil || record == nil || release == nil || !record.TaskAvailable || !record.RevealAvailable {
+		t.Fatal("live credential read failed", err)
+	}
+	defer release()
+	for _, query := range []string{
+		`SELECT id FROM tasks WHERE id=$1 FOR UPDATE NOWAIT`,
+		`SELECT id FROM credentials WHERE task_id=$1 FOR UPDATE NOWAIT`,
+	} {
+		probe, err := d.BeginTx(t.Context(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, lockErr := probe.ExecContext(t.Context(), query, task.ID)
+		_ = probe.Rollback()
+		var pgErr *pgconn.PgError
+		if !errors.As(lockErr, &pgErr) || pgErr.Code != "55P03" {
+			t.Fatal("reveal did not keep task and credential write locks excluded")
+		}
+	}
+	release()
+	probe, err := d.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = probe.ExecContext(t.Context(), `SELECT id FROM tasks WHERE id=$1 FOR UPDATE NOWAIT`, task.ID); err != nil {
+		_ = probe.Rollback()
+		t.Fatal("reveal did not release the task lock", err)
+	}
+	_ = probe.Rollback()
+
+	if err = d.SetPaused(task.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = d.QueueTaskArchive(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	record, release, err = store.GetForReveal(t.Context(), id)
+	if !errors.Is(err, ErrCredentialUnavailable) || release != nil {
+		if release != nil {
+			release()
+		}
+		t.Fatal("reveal crossed an archive queue", err)
+	}
+	if _, err = d.Exec(`DELETE FROM task_archives WHERE task_id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = d.Exec(`UPDATE tasks SET deleted_at=now() WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertRetainedRead := func() {
+		t.Helper()
+		record, done, err := store.GetForReveal(t.Context(), id)
+		if err != nil || record == nil || done == nil {
+			t.Fatal("retained credential read failed", err)
+		}
+		defer done()
+		if record.TaskAvailable || !record.RevealAvailable || record.Secret != "synthetic-retained-value" || record.TaskID != task.ID {
+			t.Fatal("retained credential read lost its value or provenance")
+		}
+	}
+	assertRetainedRead()
+	if err = store.UpdateMetadata(t.Context(), id, "fixture.invalid", "", ""); !errors.Is(err, ErrCredentialUnavailable) {
+		t.Fatal("deleted task allowed credential editing", err)
+	}
+	if err = d.DeleteTask(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertRetainedRead()
+	if err = store.Delete(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	if _, done, err := store.GetForReveal(t.Context(), id); !errors.Is(err, ErrCredentialNotFound) || done != nil {
+		if done != nil {
+			done()
+		}
+		t.Fatal("removed credential was still readable", err)
+	}
+}
+
+func TestCredentialRevealCancellationReleasesReadLocks(t *testing.T) {
+	d := portTestDB(t)
+	task, err := d.CreateTask("credential canceled read fixture", "local fixture", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM credentials WHERE task_id=$1`, task.ID); _ = d.DeleteTask(task.ID) })
+	store := NewCredentialStore(d, []byte("canceled-read-fixture-key"))
+	id, err := store.Create(t.Context(), &CredentialRecord{TaskID: task.ID, CredType: CredToken, Secret: "synthetic-cancel-value", Source: "synthetic source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	_, done, err := store.GetForReveal(ctx, id)
+	if err != nil || done == nil {
+		t.Fatal("cannot obtain read locks", err)
+	}
+	defer done()
+	cancel()
+	probeCtx, probeCancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer probeCancel()
+	probe, err := d.BeginTx(probeCtx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Rollback()
+	if _, err = probe.ExecContext(probeCtx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, task.ID); err != nil {
+		t.Fatal("cancellation left a read lock behind", err)
 	}
 }

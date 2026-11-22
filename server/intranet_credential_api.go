@@ -1,16 +1,22 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 )
+
+const credentialRevealTimeout = 10 * time.Second
 
 func credentialNoStore(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -23,7 +29,8 @@ func credentialNoStore(w http.ResponseWriter) {
 func credentialItem(c *db.CredentialRecord) map[string]any {
 	return map[string]any{
 		"id": c.ID, "task_id": c.TaskID, "task_name": c.TaskName, "task_available": c.TaskAvailable,
-		"username": c.Username, "cred_type": c.CredType, "secret_masked": db.MaskSecret(c.Secret),
+		"reveal_available": c.RevealAvailable,
+		"username":         c.Username, "cred_type": c.CredType, "secret_masked": db.MaskSecret(c.Secret),
 		"domain": c.Domain, "source": c.Source, "target": c.Target, "target_label": c.TargetLabel, "target_url": c.TargetURL,
 		"source_url": c.SourceURL, "source_intent_id": c.SourceIntentID, "source_exploration_id": c.SourceExplorationID,
 		"verified": c.VerificationStatus == "verified", "verification_status": c.VerificationStatus,
@@ -123,6 +130,56 @@ func (s *Server) credentialOperation(w http.ResponseWriter, r *http.Request, id 
 	return current, done, "ok"
 }
 
+// Viewing retained records does not require a live editable task. It still
+// participates in runtime deletion barriers and DB archive/read locks.
+func (s *Server) credentialRevealOperation(w http.ResponseWriter, r *http.Request, id int64) (*db.CredentialRecord, func(), string) {
+	if s.credStore == nil {
+		writeErr(w, 503, "凭据子系统未就绪")
+		return nil, nil, "unavailable"
+	}
+	c, err := s.credStore.Get(r.Context(), id)
+	if err != nil {
+		writeErr(w, 500, "凭据读取失败")
+		return nil, nil, "read_error"
+	}
+	if c == nil {
+		writeErr(w, 404, "凭据不存在")
+		return nil, nil, "not_found"
+	}
+	done := func() {}
+	if s.engine != nil {
+		taskID := strconv.FormatInt(c.TaskID, 10)
+		if !s.engine.beginTaskOperation(taskID) {
+			writeErr(w, 409, "凭据所属任务正在删除或归档，请稍后再试")
+			return c, nil, "task_blocked"
+		}
+		done = func() { s.engine.decInflight(taskID) }
+	}
+	current, release, err := s.credStore.GetForReveal(r.Context(), id)
+	if err != nil {
+		done()
+		switch {
+		case errors.Is(err, db.ErrCredentialNotFound):
+			writeErr(w, 404, "凭据不存在")
+			return c, nil, "not_found"
+		case errors.Is(err, db.ErrCredentialUnavailable):
+			writeErr(w, 409, "凭据正在归档、还原或删除处理中，请稍后再试")
+			return c, nil, "read_blocked"
+		default:
+			writeErr(w, 500, "凭据读取失败")
+			return c, nil, "read_error"
+		}
+	}
+	if current.TaskID != c.TaskID {
+		release()
+		done()
+		writeErr(w, 409, "凭据所属任务已变化，请刷新后再试")
+		return c, nil, "task_changed"
+	}
+	var once sync.Once
+	return current, func() { once.Do(func() { release(); done() }) }, "ok"
+}
+
 func (s *Server) credentialMutationError(w http.ResponseWriter, err error) string {
 	switch {
 	case errors.Is(err, db.ErrCredentialVerificationContainsSecret):
@@ -173,7 +230,9 @@ func (s *Server) intranetRevealCredential(w http.ResponseWriter, r *http.Request
 		return
 	}
 	action = "reveal_" + input.Purpose
-	c, done, outcome := s.credentialOperation(w, r, id)
+	ctx, cancel := context.WithTimeout(r.Context(), credentialRevealTimeout)
+	defer cancel()
+	c, done, outcome := s.credentialRevealOperation(w, r.WithContext(ctx), id)
 	if c != nil {
 		taskID = c.TaskID
 	}

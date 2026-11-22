@@ -49,6 +49,7 @@ const records = Array.from({ length: 23 }, (_, index) => {
     task_id: id === 22 ? 202 : id === 1 ? 303 : 101,
     task_name: id === 22 ? TASK_B : id === 1 ? "" : TASK_A,
     task_available: id !== 1,
+    reveal_available: true,
     cred_type: id === 22 ? "token" : "password",
     username: id === 23 ? PRIMARY_USERNAME : id === 22 ? "fixture-bob" : id === 21 ? "fixture-charlie" : `fixture-user-${id}`,
     target: id === 23 ? "https://target.example.invalid/console" : `host-${id}.example.invalid`,
@@ -240,12 +241,14 @@ async function serveAPI(request, response, url) {
     if (!record) return sendJSON(response, 404, { error: "Fixture credential not found" });
     if (action[2] === "reveal" && method === "POST") {
       assert.ok(body.purpose === "view" || body.purpose === "copy", "Reveal purpose must be explicit");
+      if (!record.reveal_available) return sendJSON(response, 409, { error: "Fixture credential read is temporarily blocked" });
       const delay = state.delayNextReveal;
       state.delayNextReveal = 0;
       if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
       return sendJSON(response, 200, { id: record.id, secret: FIXTURE_SECRET });
     }
     if (action[2] === "verification" && method === "PUT") {
+      if (!record.task_available) return sendJSON(response, 409, { error: "Fixture task cannot be edited" });
       if (state.failVerification) return sendJSON(response, 503, { error: "fixture verification save failed" });
       assert.ok(["unverified", "verified", "failed"].includes(body.status), "Verification status must be valid");
       if (body.status !== "unverified" && (!body.method?.trim() || !body.evidence?.trim())) {
@@ -261,6 +264,7 @@ async function serveAPI(request, response, url) {
       return sendJSON(response, 200, record);
     }
     if (action[2] === "metadata" && method === "PATCH") {
+      if (!record.task_available) return sendJSON(response, 409, { error: "Fixture task cannot be edited" });
       Object.assign(record, { target: body.target, target_label: body.target, domain: body.domain, source_url: body.source_url });
       record.target_url = /^https?:\/\//.test(body.target) ? body.target : "";
       return sendJSON(response, 200, record);
@@ -393,6 +397,24 @@ async function main() {
       const orphan = page.getByRole("row").filter({ hasText: "fixture-user-1" });
       assert.ok((await orphan.innerText()).includes("任务当前不可操作"));
       assert.equal(await orphan.getByRole("link").count(), 0);
+      await orphan.getByTestId("credential-details-1").click();
+      const retainedDialog = page.getByRole("dialog");
+      await retainedDialog.getByRole("heading", { name: /^凭据 #1 ·/ }).waitFor();
+      assert.ok(await retainedDialog.getByRole("button", { name: "查看 30 秒", exact: true }).isEnabled());
+      assert.ok(await retainedDialog.getByRole("button", { name: "复制完整值", exact: true }).isEnabled());
+      assert.ok(await retainedDialog.getByRole("button", { name: "保存关联信息", exact: true }).isDisabled());
+      assert.ok(await retainedDialog.getByRole("button", { name: "保存验证记录", exact: true }).isDisabled());
+      assert.ok(await secretAbsent());
+      await retainedDialog.getByRole("button", { name: "查看 30 秒", exact: true }).click();
+      await retainedDialog.locator("pre").filter({ hasText: FIXTURE_SECRET }).waitFor();
+      await retainedDialog.getByRole("button", { name: "隐藏", exact: true }).click();
+      await eventually(secretAbsent, "Retained secret remained visible after Hide");
+      const priorCopies = await page.evaluate(() => window.__fixtureClipboard.length);
+      await retainedDialog.getByRole("button", { name: "复制完整值", exact: true }).click();
+      await eventually(async () => (await page.evaluate(() => window.__fixtureClipboard.length)) === priorCopies + 1, "Retained credential could not be copied");
+      await closeDialog();
+      assert.ok(await secretAbsent());
+      assert.equal(requests.filter((item) => /\/credentials\/1\/(verification|metadata)$/.test(item.path)).length, 0);
       await page.getByRole("button", { name: "上一页", exact: true }).click();
       await page.getByRole("textbox", { name: "搜索凭据", exact: true }).fill("CORP");
       await expectRows(1);
