@@ -253,8 +253,14 @@ function TaskDetailInner() {
   const searchParams = useSearchParams();
   const id = searchParams.get("id") ?? "";
   const [task, setTask] = React.useState<Task | null>(null);
-  const [paused, setPaused] = React.useState(false);
-  const [loaded, setLoaded] = React.useState(false);
+  const currentTaskId = React.useRef(id);
+  currentTaskId.current = id;
+  const paused = task?.id === id && (task.paused ?? task.status === "paused");
+  const queued = !paused && task?.id === id && (task.queued ?? task.status === "queued");
+  const controlInFlight = React.useRef<string | null>(null);
+  const [controlling, setControlling] = React.useState(false);
+  const [loadedTaskId, setLoadedTaskId] = React.useState("");
+  const loaded = loadedTaskId === id;
   const requestedTab = searchParams.get("tab") ?? "sessions";
   const normalizedRequestedTab = requestedTab === "http-history" ? "traffic" : requestedTab;
   const [tab, setTab] = React.useState(
@@ -312,32 +318,43 @@ function TaskDetailInner() {
     };
   }, [id]);
 
-  const taskLoadInFlight = React.useRef<string | null>(null);
+  const taskLoadGeneration = React.useRef(0);
+  const taskLoadInFlight = React.useRef<{ id: string; generation: number } | null>(null);
+  const mounted = React.useRef(true);
+  React.useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      taskLoadGeneration.current++;
+      taskLoadInFlight.current = null;
+    };
+  }, []);
   const load = React.useCallback(() => {
-    if (taskLoadInFlight.current === id) return;
-    taskLoadInFlight.current = id;
+    if (!mounted.current || currentTaskId.current !== id || controlInFlight.current === id || taskLoadInFlight.current?.id === id) return;
+    const request = { id, generation: ++taskLoadGeneration.current };
+    taskLoadInFlight.current = request;
     Promise.all([api.task(id), api.stats(id).catch(() => null)])
       .then(([task, s]) => {
-        if (taskLoadInFlight.current !== id) return;
+        if (!mounted.current || currentTaskId.current !== id || request.generation !== taskLoadGeneration.current || task.id !== id) return;
         const base = { ...task };
         const at = s?.active_task;
-        if (at) {
+        if (at?.id === id) {
           base.in_flight = at.in_flight;
           base.goals_total = at.goals_total;
           base.goals_met = at.goals_met;
           base.engine_mode = s?.engine_mode ?? at.engine_mode;
-          base.paused = at.paused;
         }
+        // Engine pause also protects queued work. Only the task endpoint owns
+        // the lifecycle flags used by the task control buttons.
         setTask(base);
-        setPaused(at?.paused ?? base.paused ?? false);
       })
       .catch(() => {
         // Keep the last rendered task state during a transient poll failure.
       })
       .finally(() => {
-        if (taskLoadInFlight.current === id) {
+        if (taskLoadInFlight.current === request) {
           taskLoadInFlight.current = null;
-          setLoaded(true);
+          if (mounted.current && currentTaskId.current === id) setLoadedTaskId(id);
         }
       });
   }, [id]);
@@ -348,14 +365,36 @@ function TaskDetailInner() {
   }, [load]);
 
   async function togglePause() {
-    if (task && ["done", "failed", "timeout"].includes(task.status)) return;
-    const next = !paused;
+    if (!task || task.id !== id || controlInFlight.current || ["done", "failed", "timeout"].includes(task.status)) return;
+    const action = paused ? "resume" : "pause";
+    controlInFlight.current = id;
+    setControlling(true);
+    // A poll begun before this mutation must not restore its old lifecycle.
+    const generation = ++taskLoadGeneration.current;
+    taskLoadInFlight.current = null;
     try {
-      await api.controlTask(id, next ? "pause" : "resume");
-      setPaused(next);
-      toast.success(next ? "已暂停探索" : "已恢复探索");
+      const result = await api.controlTask(id, action);
+      if (!mounted.current || currentTaskId.current !== id || taskLoadGeneration.current !== generation) return;
+      const status = action === "pause" ? "paused" : result.queued ? "queued" : "running";
+      if (result.id !== id || result.status !== status || typeof result.queued !== "boolean" ||
+          result.paused !== (action === "pause") || (action === "pause" && result.queued)) {
+        throw new Error("操作结果未确认，请刷新任务状态");
+      }
+      setTask((current) => current?.id === id ? {
+        ...current, status, paused: result.paused, queued: result.queued,
+        engine_mode: result.paused || result.queued ? "paused" : "idle",
+      } : current);
+      toast.success(result.queued ? "已进入等待队列" : result.paused ? "已暂停探索" : "已恢复探索");
     } catch (e) {
-      toast.error("操作失败：" + (e as Error).message);
+      if (mounted.current && currentTaskId.current === id && taskLoadGeneration.current === generation) {
+        toast.error("操作失败：" + (e as Error).message);
+      }
+    } finally {
+      controlInFlight.current = null;
+      if (mounted.current) {
+        setControlling(false);
+        if (currentTaskId.current === id) load();
+      }
     }
   }
 
@@ -372,7 +411,7 @@ function TaskDetailInner() {
     }
   }
 
-  if (!task) {
+  if (!task || task.id !== id) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-10 text-center">
         <p className="text-muted-foreground">{loaded ? `任务 ${id} 已被删除、归档或不存在` : "加载中…"}</p>
@@ -389,9 +428,9 @@ function TaskDetailInner() {
 
   const completed = task.status === "done";
   const terminal = ["done", "failed", "timeout"].includes(task.status);
-  const archiveLifecycleEligible = terminal || paused || task.status === "paused";
+  const archiveLifecycleEligible = terminal || paused;
   const canArchive = archiveLifecycleEligible && !task.archive_blocked_by_task_id;
-  let archiveDisabledReason = task.queued ? "排队中的任务必须先暂停" : "运行中的任务必须先暂停";
+  let archiveDisabledReason = queued ? "排队中的任务必须先暂停" : "运行中的任务必须先暂停";
   if (archiveLifecycleEligible && task.archive_blocked_by_task_id) {
     archiveDisabledReason = `任务被未归档任务 #${task.archive_blocked_by_task_id} 直接继承，请先归档依赖任务`;
   }
@@ -407,6 +446,8 @@ function TaskDetailInner() {
     controlVariant = "default";
     controlIcon = <PlayIcon data-icon="inline-start" />;
     controlLabel = "恢复";
+  } else if (queued) {
+    controlLabel = "取消排队";
   }
   const archiveTrigger = (
     <Button
@@ -455,7 +496,13 @@ function TaskDetailInner() {
             onRefreshProfiles={refreshProfiles}
             onUpdated={load}
           />
-          <StatusBadge domain={terminal ? "task" : "engine"} value={terminal ? task.status : engineMode} dot />
+          <span data-testid="task-lifecycle-status">
+            <StatusBadge
+              domain={terminal || paused || queued || task.status === "created" ? "task" : "engine"}
+              value={terminal ? task.status : paused ? "paused" : queued ? "queued" : task.status === "created" ? "created" : engineMode}
+              dot
+            />
+          </span>
           {canArchive ? (
             <AlertDialog>
               <AlertDialogTrigger asChild>{archiveTrigger}</AlertDialogTrigger>
@@ -481,12 +528,17 @@ function TaskDetailInner() {
               <TooltipContent>{archiveDisabledReason}</TooltipContent>
             </Tooltip>
           )}
-          <Button size="sm" variant={controlVariant} onClick={togglePause} disabled={terminal}>
-            {controlIcon}
+          <Button size="sm" variant={controlVariant} onClick={togglePause} disabled={terminal || controlling} data-testid="task-lifecycle-control">
+            {controlling ? <Spinner /> : controlIcon}
             {controlLabel}
           </Button>
         </div>
         <p className="truncate text-xs text-muted-foreground">{task.goal}</p>
+        {queued && !terminal && (
+          <p role="status" className="text-xs text-amber-600" data-testid="task-queue-notice">
+            任务已在等待队列中，获得运行名额和可用模型后会继续；无需再次恢复，可取消排队。
+          </p>
+        )}
         {task.paused && task.pause_reason && (
           <div className="flex flex-wrap items-center gap-2 text-xs text-amber-600">
             <span>暂停原因：{task.pause_reason === "paused_by_proxy" ? "全局代理异常" : task.pause_reason}</span>
