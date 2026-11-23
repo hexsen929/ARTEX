@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -27,7 +28,6 @@ import (
 	"github.com/Autumn-27/artex/intercept/jev"
 	"github.com/Autumn-27/artex/llmhttp"
 	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/norma/skill"
 )
 
 // validSkillName checks the agentskills.io name constraints, widened so a skill can
@@ -1078,19 +1078,10 @@ func (s *Server) fsListSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	inspections, inspectionErr := inspectSkillCatalog(s.skillDir)
-	allReg, registryErr := skill.LoadDir(s.skillDir)
-	registryAvailable := inspectionErr == nil && registryErr == nil
+	registryAvailable := inspectionErr == nil
 	registryError := ""
 	if !registryAvailable {
 		registryError = "Skill 目录元数据读取失败"
-	}
-	metaByDir := map[string]skill.Skill{}
-	if allReg != nil {
-		for _, sk := range allReg.List() {
-			if sk.Dir != "" {
-				metaByDir[filepath.Base(sk.Dir)] = sk
-			}
-		}
 	}
 	usageAvailable := s.m != nil && s.m.pg != nil
 	usageError := ""
@@ -1131,11 +1122,15 @@ func (s *Server) fsListSkills(w http.ResponseWriter, r *http.Request) {
 				node.Agents = st.Agents
 			}
 		}
-		if meta, ok := metaByDir[dirName]; ok {
-			node.Description, node.License, node.Compatibility, node.MCPs = meta.Description, meta.License, meta.Compatibility, meta.MCPs
-		}
-		if inspection.Loadable || skillLibraryPresent(s.skillDir, dirName) {
-			node.Files, err = walkSkillFiles(filepath.Join(s.skillDir, dirName))
+		node.Description, node.License, node.Compatibility, node.MCPs = inspection.description, inspection.license, inspection.compatibility, inspection.mcps
+		if inspection.indexPresent {
+			root, openErr := openSkillEditorRoot(s.skillDir, dirName)
+			if openErr == nil {
+				node.Files, err = listSkillFiles(root)
+				root.Close()
+			} else {
+				err = openErr
+			}
 			if err != nil {
 				node.Loadable, node.LoadError = false, "Skill 文件目录读取失败"
 			}
@@ -1322,10 +1317,14 @@ func (s *Server) fsUpdateSkillMeta(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	skillMD := filepath.Join(s.skillDir, name, "SKILL.md")
-	raw, err := os.ReadFile(skillMD)
+	root := s.requireSkillEditorRoot(w, name)
+	if root == nil {
+		return
+	}
+	defer root.Close()
+	raw, err := readSkillEditorFile(root, "SKILL.md", maxSkillIndexBytes)
 	if err != nil {
-		writeErr(w, 404, "skill not found")
+		writeErr(w, 404, "skill metadata cannot be read")
 		return
 	}
 	updated, err := rewriteSkillFrontmatter(raw, body.MCPs, body.Description, body.License, body.Compatibility)
@@ -1333,8 +1332,8 @@ func (s *Server) fsUpdateSkillMeta(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if err := os.WriteFile(skillMD, updated, 0o644); err != nil {
-		writeErr(w, 500, err.Error())
+	if err := replaceManagedFile(root, "SKILL.md", bytes.NewReader(updated), 0o644); err != nil {
+		writeErr(w, 400, "skill metadata cannot be written")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
@@ -1611,29 +1610,72 @@ func skillRelPath(file string) (string, string) {
 	return clean, ""
 }
 
-// walkSkillFiles returns all files under root (relative to root), sorted,
-// including files in subdirectories (scripts/, references/, assets/, etc.).
-// walkSkillFiles returns all entries under root relative to root.
-// Directories are included with a trailing "/" so the frontend can distinguish
-// them from files and render empty folders in the tree.
-func walkSkillFiles(root string) ([]string, error) {
-	var entries []string
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+// The configured library may itself be a symlink. A skill directory inside it
+// must be a real directory so opening one skill cannot select a sibling.
+func openSkillEditorRoot(libraryPath, name string) (*os.Root, error) {
+	library, err := os.OpenRoot(libraryPath)
+	if err != nil {
+		return nil, err
+	}
+	defer library.Close()
+	return openRealChildDirectory(library, name)
+}
+
+func (s *Server) requireSkillEditorRoot(w http.ResponseWriter, name string) *os.Root {
+	root, err := openSkillEditorRoot(s.skillDir, name)
+	if err != nil {
+		writeErr(w, 404, "skill directory is unavailable")
+		return nil
+	}
+	return root
+}
+
+func readSkillEditorFile(root *os.Root, name string, limit int64) ([]byte, error) {
+	file, info, err := openManagedRegularFile(root, name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if info.Size() > limit {
+		return nil, errSkillEditorFileTooLarge
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, errSkillEditorFileTooLarge
+	}
+	return data, nil
+}
+
+var errSkillEditorFileTooLarge = errors.New("skill file exceeds the editor size limit")
+
+// The API uses slash-separated paths on every platform. Directory names end
+// in "/" so the browser can display empty folders.
+func listSkillFiles(root *os.Root) ([]string, error) {
+	entries := []string{}
+	err := fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // skip unreadable entries
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil || rel == "." {
+			if rel == "." {
+				return err
+			}
 			return nil
 		}
-		// The file list is an HTTP API contract consumed by a frontend that splits
-		// paths on '/'. filepath.Rel uses '\\' on Windows, so normalize before the
-		// value leaves the backend.
-		rel = filepath.ToSlash(rel)
+		if rel == "." {
+			return nil
+		}
+		if !d.IsDir() && strings.HasPrefix(d.Name(), managedSavePrefix) {
+			return nil
+		}
 		if d.IsDir() {
 			entries = append(entries, rel+"/")
-		} else {
+		} else if d.Type().IsRegular() {
 			entries = append(entries, rel)
+		} else if d.Type()&os.ModeSymlink != 0 {
+			if info, err := root.Stat(filepath.FromSlash(rel)); err == nil && info.Mode().IsRegular() {
+				entries = append(entries, rel)
+			}
 		}
 		return nil
 	})
@@ -1646,18 +1688,15 @@ func (s *Server) fsListFiles(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid skill name")
 		return
 	}
-	dirPath := filepath.Join(s.skillDir, name)
-	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
-		writeErr(w, 404, "skill not found")
+	root := s.requireSkillEditorRoot(w, name)
+	if root == nil {
 		return
 	}
-	files, err := walkSkillFiles(dirPath)
+	defer root.Close()
+	files, err := listSkillFiles(root)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeErr(w, 500, "skill directory cannot be read")
 		return
-	}
-	if files == nil {
-		files = []string{}
 	}
 	writeJSON(w, 200, map[string]any{"files": files})
 }
@@ -1673,13 +1712,18 @@ func (s *Server) fsReadFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errMsg)
 		return
 	}
-	data, err := os.ReadFile(filepath.Join(s.skillDir, name, file))
-	if os.IsNotExist(err) {
-		writeErr(w, 404, "file not found")
+	root := s.requireSkillEditorRoot(w, name)
+	if root == nil {
+		return
+	}
+	defer root.Close()
+	data, err := readSkillEditorFile(root, filepath.FromSlash(file), maxSkillFileBytes)
+	if errors.Is(err, errSkillEditorFileTooLarge) {
+		writeErr(w, http.StatusRequestEntityTooLarge, "skill file exceeds the editor size limit")
 		return
 	}
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeErr(w, 404, "skill file cannot be read")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"content": string(data), "file": file})
@@ -1703,19 +1747,18 @@ func (s *Server) fsWriteFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	skillPath := filepath.Join(s.skillDir, name)
-	if _, err := os.Stat(skillPath); os.IsNotExist(err) {
-		writeErr(w, 404, "skill not found")
+	root := s.requireSkillEditorRoot(w, name)
+	if root == nil {
 		return
 	}
-	fullPath := filepath.Join(skillPath, file)
-	// create parent subdirectory if needed (e.g. scripts/, references/, assets/)
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-		writeErr(w, 500, err.Error())
+	defer root.Close()
+	rel := filepath.FromSlash(file)
+	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
+		writeErr(w, 400, "cannot create the skill file directory")
 		return
 	}
-	if err := os.WriteFile(fullPath, []byte(body.Content), 0o644); err != nil {
-		writeErr(w, 500, err.Error())
+	if err := replaceManagedFile(root, rel, strings.NewReader(body.Content), 0o644); err != nil {
+		writeErr(w, 400, "skill file cannot be written")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
@@ -1739,13 +1782,13 @@ func (s *Server) fsCreateDir(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errMsg)
 		return
 	}
-	skillPath := filepath.Join(s.skillDir, name)
-	if _, err := os.Stat(skillPath); os.IsNotExist(err) {
-		writeErr(w, 404, "skill not found")
+	root := s.requireSkillEditorRoot(w, name)
+	if root == nil {
 		return
 	}
-	if err := os.MkdirAll(filepath.Join(skillPath, dir), 0o755); err != nil {
-		writeErr(w, 500, err.Error())
+	defer root.Close()
+	if err := root.MkdirAll(filepath.FromSlash(dir), 0o755); err != nil {
+		writeErr(w, 400, "cannot create the skill directory")
 		return
 	}
 	writeJSON(w, 201, map[string]any{"dir": dir})
@@ -1762,13 +1805,18 @@ func (s *Server) fsDeletePath(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errMsg)
 		return
 	}
-	fullPath := filepath.Join(s.skillDir, name, file)
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+	root := s.requireSkillEditorRoot(w, name)
+	if root == nil {
+		return
+	}
+	defer root.Close()
+	rel := filepath.FromSlash(file)
+	if _, err := root.Lstat(rel); err != nil {
 		writeErr(w, 404, "not found")
 		return
 	}
-	if err := os.RemoveAll(fullPath); err != nil {
-		writeErr(w, 500, err.Error())
+	if err := root.RemoveAll(rel); err != nil {
+		writeErr(w, 400, "skill path cannot be removed")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"deleted": file})

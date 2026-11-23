@@ -2081,6 +2081,8 @@ export interface IntranetCredential {
   task_id: number;
   task_name: string;
   task_available: boolean;
+  /** Retained records can be viewed even when their task cannot be edited. */
+  reveal_available?: boolean;
   host_asset_id?: number;
   cred_type: string;
   username: string;

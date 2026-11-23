@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -327,9 +328,11 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
 	}
-	if err := restoreInterceptRows(tx, remappedTables["intercept_pending"]); err != nil {
+	approvalWarnings, err := restoreInterceptRows(tx, remappedTables["intercept_pending"])
+	if err != nil {
 		return nil, err
 	}
+	warnings = append(warnings, approvalWarnings...)
 	// Approval and conversation parents must exist before their /btw history.
 	for _, table := range []string{"side_question_sessions", "side_question_requests"} {
 		raw := remappedTables[table]
@@ -752,10 +755,56 @@ func restoreTaskLLMProfiles(tx *sql.Tx, raw json.RawMessage) ([]string, error) {
 	return warnings, nil
 }
 
-func restoreInterceptRows(tx *sql.Tx, raw json.RawMessage) error {
+func restoreInterceptRows(tx *sql.Tx, raw json.RawMessage) ([]string, error) {
 	rows, err := decodeArchiveRows(raw)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	ruleCounts := map[int64]int{}
+	for _, row := range rows {
+		if row["rule_id"] == nil {
+			continue
+		}
+		ruleID, ok := jsonInt64(row["rule_id"])
+		if !ok || ruleID <= 0 {
+			return nil, errors.New("restore approval: invalid rule reference")
+		}
+		ruleCounts[ruleID]++
+	}
+	ruleIDs := make([]int64, 0, len(ruleCounts))
+	for id := range ruleCounts {
+		ruleIDs = append(ruleIDs, id)
+	}
+	sort.Slice(ruleIDs, func(i, j int) bool { return ruleIDs[i] < ruleIDs[j] })
+	existingRules := map[int64]bool{}
+	if len(ruleIDs) > 0 {
+		// Rules are global configuration and are intentionally not archived.
+		// Keep surviving keys stable until this restore transaction commits.
+		found, err := tx.Query(`SELECT id FROM intercept_rules WHERE id=ANY($1::bigint[]) ORDER BY id FOR KEY SHARE`, ruleIDs)
+		if err != nil {
+			return nil, err
+		}
+		for found.Next() {
+			var id int64
+			if err := found.Scan(&id); err != nil {
+				_ = found.Close()
+				return nil, err
+			}
+			existingRules[id] = true
+		}
+		err = errors.Join(found.Err(), found.Close())
+		if err != nil {
+			return nil, err
+		}
+	}
+	warnings := []string{}
+	for _, id := range ruleIDs {
+		if !existingRules[id] {
+			warnings = append(warnings, fmt.Sprintf("审批规则 %d 已删除，%d 条历史审批已解除失效关联；原审批结论及快照保留", id, ruleCounts[id]))
+		}
 	}
 	for _, row := range rows {
 		// Archives predating approval snapshots lack this NOT NULL column.
@@ -776,6 +825,11 @@ func restoreInterceptRows(tx *sql.Tx, raw json.RawMessage) error {
 			}
 			row["decision_source"] = source
 		}
+		// Match the foreign key's ON DELETE SET NULL behavior, without
+		// recreating a deleted rule or changing historical decisions.
+		if ruleID, ok := jsonInt64(row["rule_id"]); ok && !existingRules[ruleID] {
+			row["rule_id"] = nil
+		}
 		if status, _ := row["status"].(string); status == "pending" {
 			row["status"] = "timeout"
 			row["reason"] = "任务归档期间审批已超时"
@@ -790,12 +844,12 @@ func restoreInterceptRows(tx *sql.Tx, raw json.RawMessage) error {
 			audit["execution_status"] = "unknown"
 		}
 	}
-	if len(rows) == 0 {
-		return nil
+	encoded, err := json.Marshal(rows)
+	if err != nil {
+		return nil, err
 	}
-	encoded, _ := json.Marshal(rows)
 	_, err = tx.Exec(`INSERT INTO intercept_pending SELECT * FROM json_populate_recordset(NULL::intercept_pending,$1::json)`, string(encoded))
-	return err
+	return warnings, err
 }
 
 func liveTaskExists(tx *sql.Tx, id int64) bool {

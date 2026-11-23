@@ -16,6 +16,7 @@ const baseline = { version: 1, groups: [{ id: "default", name: "Fixture" }], act
 const requests = [], unexpected = new Set(), external = new Set();
 const delayed = new Set();
 const held = new Map();
+const lifecycle = { state: "queued", delayedPoll: false, failControl: false, delayControl: false, controlStarted: 0, controlFinished: 0 };
 const flows = [601, 602, 603].map((id) => ({ id: String(id), ts: stamp, method: "POST", host: `fixture-${id}.invalid`, url: `https://fixture-${id}.invalid/packet`, status: 200, content_type: "text/plain", resp_len: 16, req_len: 32 }));
 function packet(id) { const flow = flows.find((item) => item.id === String(id)); return { req: `POST /packet HTTP/1.1\r\nHost: ${flow.host}\r\nContent-Type: text/plain\r\n\r\nFIXTURE_BODY_${id}`, resp: "HTTP/1.1 200 OK\r\n\r\nFIXTURE_RESPONSE" }; }
 function finding(id) { return { id, finding_id: id, task_id: "101", source_task_id: "101", name: `FINDING_SCOPE_${id}`, vulnclass: "Synthetic", severity: "low", status: "pending", verification_status: "unverified", verification_note: "Fixture only", summary: "Synthetic saved record", evidence: "Synthetic saved evidence", report: "", evidence_version: 1, assets: [], traffic_count: id === "501" ? 1 : 0, inherited: false, ts: stamp }; }
@@ -24,10 +25,34 @@ const evidence = { binding, request: { content: "FIXTURE_EVIDENCE_BODY", binary:
 function json(response, value, code = 200) { if (response.destroyed || response.writableEnded) return; response.writeHead(code, { "Content-Type": "application/json", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); }
 async function delayedJSON(key, response, value) { if (delayed.has(key)) await new Promise((resolve) => { held.set(key, resolve); }); json(response, value); }
 function release(key) { delayed.delete(key); const resolve = held.get(key); held.delete(key); resolve?.(); }
-function task(id) { return { id, name: `TASK_SCOPE_${id}`, description: `Synthetic task ${id}`, goal: "Read saved fixture metadata only", status: "done", paused: false, exploration_id: id, worker_count: 1, workers: 1, created_at: stamp, goals_total: 0, goals_met: 0, intents_total: 0, completed_at: stamp, tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 } }; }
+function task(id) {
+  const item = { id, name: `TASK_SCOPE_${id}`, description: `Synthetic task ${id}`, goal: "Read saved fixture metadata only", status: "done", paused: false, queued: false, exploration_id: id, worker_count: 1, workers: 1, created_at: stamp, goals_total: 0, goals_met: 0, intents_total: 0, completed_at: stamp, tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 } };
+  if (id === "909") Object.assign(item, { status: lifecycle.state, paused: lifecycle.state === "paused", queued: lifecycle.state === "queued", completed_at: "" });
+  return item;
+}
 async function serveAPI(request, response, url) {
   const endpoint = url.pathname, method = request.method || "GET";
   requests.push({ endpoint, method, query: Object.fromEntries(url.searchParams) });
+  if (endpoint === "/api/tasks/909/control" && method === "POST") {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    const body = JSON.parse(raw || "{}");
+    assert.ok(["pause", "resume"].includes(body.action));
+    lifecycle.controlStarted++;
+    if (lifecycle.failControl) {
+      lifecycle.failControl = false;
+      return json(response, { error: "FIXTURE_CONTROL_FAILED" }, 409);
+    }
+    const result = { id: "909", status: body.action === "pause" ? "paused" : "queued", paused: body.action === "pause", queued: body.action === "resume" };
+    lifecycle.state = result.status;
+    if (lifecycle.delayControl) {
+      delayed.add("lifecycle:control");
+      lifecycle.delayControl = false;
+    }
+    await delayedJSON("lifecycle:control", response, result);
+    lifecycle.controlFinished++;
+    return;
+  }
   if (method !== "GET") { unexpected.add(`${method} ${endpoint}`); return json(response, { error: "Mutation forbidden in this fixture" }, 405); }
   if (endpoint === "/api/auth/status") return json(response, { initialized: true });
   if (endpoint === "/api/version") return json(response, { version: "fixture" });
@@ -38,10 +63,25 @@ async function serveAPI(request, response, url) {
   if (endpoint === "/api/skills/missing") return json(response, { missing: [] });
   if (endpoint === "/api/intercept/pending") return json(response, { pending: [] });
   if (endpoint === "/api/tasks") return json(response, { tasks: [task("101"), task("202")], active: "" });
-  if (/^\/api\/tasks\/(101|202)$/.test(endpoint)) return json(response, task(endpoint.split("/").at(-1)));
-  if (/^\/api\/intercept\/task\/(101|202)$/.test(endpoint)) return json(response, { items: [] });
+  if (/^\/api\/tasks\/(101|202|909)$/.test(endpoint)) {
+    const id = endpoint.split("/").at(-1);
+    const snapshot = task(id);
+    if (id === "909" && lifecycle.delayedPoll) {
+      lifecycle.delayedPoll = false;
+      delayed.add("lifecycle:poll");
+      return delayedJSON("lifecycle:poll", response, snapshot);
+    }
+    return json(response, snapshot);
+  }
+  if (/^\/api\/intercept\/task\/(101|202|909)$/.test(endpoint)) return json(response, { items: [] });
   if (endpoint === "/api/llm/profiles") return json(response, { profiles: [] });
-  if (endpoint === "/api/stats") return json(response, { active_task: null, tasks: 2, traffic: 0, llm_configured: false, engine_mode: "idle" });
+  if (endpoint === "/api/stats") {
+    if (url.searchParams.get("task") === "909") {
+      const engineMode = lifecycle.state === "running" ? "idle" : "paused";
+      return json(response, { active_task: { id: "909", paused: engineMode === "paused", engine_mode: engineMode, in_flight: 0, goals_total: 0, goals_met: 0 }, engine_mode: engineMode, llm_configured: true });
+    }
+    return json(response, { active_task: null, tasks: 2, traffic: 0, llm_configured: false, engine_mode: "idle" });
+  }
   if (endpoint === "/api/report") { response.writeHead(200, { "Content-Type": "text/markdown" }); return response.end("# SYNTHETIC_REPORT_VIEW"); }
   if (endpoint === "/api/traffic") { const scoped = url.searchParams.get("task_id") === "202" ? [flows[2]] : flows; const query = url.searchParams.get("q"); const current = query ? scoped.filter((flow) => flow.id.includes(query)) : scoped; return json(response, { enabled: false, count: current.length, total: current.length, page: 0, size: 50, exchanges: current, proxy: "" }); }
   if (endpoint === "/api/traffic/hosts") return json(response, { hosts: flows.map((flow) => ({ host: flow.host, count: 1 })) });
@@ -84,6 +124,55 @@ async function main() {
     window.fetch = (input, init) => { const url = new URL(typeof input === "string" ? input : input.url, location.href); const marker = url.pathname.endsWith("/traffic/701") ? "finding:701" : url.pathname === "/api/traffic/exchange" ? `traffic:${url.searchParams.get("id")}` : ""; if (marker && window.__ignoreSeedAbort) { const options = { ...init }; const signal = options.signal; window.__seedSignalAborts.push({ marker, provided: !!signal, aborted: !!signal?.aborted }); const event = window.__seedSignalAborts.at(-1); signal?.addEventListener("abort", () => { event.aborted = true; }, { once: true }); delete options.signal; return original(input, options); } return original(input, init); };
   }, { token, storageKey, baseline });
   page = await context.newPage(); page.setDefaultTimeout(20000); const errors = []; page.on("pageerror", (error) => errors.push(error.message));
+
+  await page.goto(origin + "/function/tasks/detail?id=909&tab=traffic", { waitUntil: "networkidle" });
+  const lifecycleBadge = page.getByTestId("task-lifecycle-status");
+  const lifecycleButton = page.getByTestId("task-lifecycle-control");
+  await lifecycleBadge.getByText("排队中", { exact: true }).waitFor();
+  assert.equal((await lifecycleButton.innerText()).trim(), "取消排队");
+  await page.getByTestId("task-queue-notice").waitFor();
+  assert.equal(await lifecycleBadge.getByText("已暂停", { exact: true }).count(), 0);
+  console.log("PASS queued task is not presented as manually paused");
+
+  lifecycle.failControl = true;
+  await lifecycleButton.click();
+  await page.getByText("操作失败：FIXTURE_CONTROL_FAILED", { exact: true }).waitFor();
+  assert.equal(lifecycle.state, "queued");
+  assert.equal((await lifecycleButton.innerText()).trim(), "取消排队");
+  await lifecycleButton.click();
+  await lifecycleBadge.getByText("已暂停", { exact: true }).waitFor();
+  assert.equal((await lifecycleButton.innerText()).trim(), "恢复");
+  console.log("PASS cancel queue uses pause and failed control keeps the prior state");
+
+  lifecycle.delayedPoll = true;
+  await eventually(() => held.has("lifecycle:poll"), "Pre-resume poll did not reach its delay barrier");
+  lifecycle.delayControl = true;
+  await lifecycleButton.click();
+  await eventually(() => held.has("lifecycle:control"), "Resume did not reach its delay barrier");
+  assert.ok(await lifecycleButton.isDisabled(), "Control button remains enabled during a resume");
+  const resumeCalls = lifecycle.controlStarted;
+  release("lifecycle:control");
+  await lifecycleBadge.getByText("排队中", { exact: true }).waitFor();
+  await page.getByText("已进入等待队列", { exact: true }).waitFor();
+  release("lifecycle:poll");
+  await settle(page);
+  assert.equal((await lifecycleButton.innerText()).trim(), "取消排队");
+  assert.equal(lifecycle.controlStarted, resumeCalls);
+  console.log("PASS queued resume is acknowledged and delayed polling cannot restore the old pause");
+
+  lifecycle.delayControl = true;
+  await lifecycleButton.click();
+  await eventually(() => held.has("lifecycle:control"), "Delayed pause did not reach its delay barrier");
+  await page.evaluate(() => history.pushState(null, "", "/function/tasks/detail?id=202&tab=traffic"));
+  await page.getByText("TASK_SCOPE_202", { exact: true }).waitFor();
+  await lifecycleBadge.getByText("已完成", { exact: true }).waitFor();
+  release("lifecycle:control");
+  await eventually(() => lifecycle.controlFinished === 3, "Delayed old-task control did not finish");
+  await settle(page);
+  assert.equal((await lifecycleButton.innerText()).trim(), "已完成");
+  assert.ok(await lifecycleButton.isDisabled());
+  assert.equal(await page.getByTestId("task-queue-notice").count(), 0);
+  console.log("PASS late control response cannot modify a different task");
 
   delayed.add("finding:701"); await page.goto(origin + "/function/findings/detail?id=501", { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "FINDING_SCOPE_501", exact: true }).waitFor();

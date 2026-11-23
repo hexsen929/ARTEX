@@ -31,6 +31,7 @@ import { api } from "@/lib/api";
 import {
   CREDENTIAL_SECRET_TTL_MS,
   CREDENTIAL_STATUS_LABELS,
+  credentialCanReveal,
   credentialExternalURL,
   credentialMatchesQuery,
   credentialPage,
@@ -118,6 +119,7 @@ function CredentialDetails({
   const secretTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const operationBusy = React.useRef(false);
   const saveOperation = React.useRef(false);
+  const canReveal = credentialCanReveal(credential);
 
   const clearSecret = React.useCallback(() => {
     revealGeneration.current++;
@@ -147,11 +149,15 @@ function CredentialDetails({
     };
   }, [clearSecret]);
 
+  React.useEffect(() => {
+    if (!canReveal) clearSecret();
+  }, [canReveal, clearSecret]);
+
   const reveal = async (purpose: "view" | "copy") => {
     if (
       operationBusy.current ||
       saveOperation.current ||
-      !credential.task_available ||
+      !canReveal ||
       document.visibilityState !== "visible"
     )
       return;
@@ -290,7 +296,7 @@ function CredentialDetails({
         <div className="space-y-5">
           {!credential.task_available ? (
             <p role="status" className="rounded-md bg-muted p-3 text-xs text-muted-foreground">
-              所属任务当前不可操作，以下记录仅供查看。
+              所属任务当前不可编辑。{canReveal ? "已保留的凭据可按需查看或复制。" : "当前仅能查看记录信息。"}
             </p>
           ) : null}
           <section className="grid gap-3 rounded-lg border p-3 text-sm sm:grid-cols-2">
@@ -327,7 +333,7 @@ function CredentialDetails({
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={secretBusy !== null || metadataBusy || verificationBusy || !credential.task_available}
+                  disabled={secretBusy !== null || metadataBusy || verificationBusy || (!secret && !canReveal)}
                   onClick={() => (secret ? clearSecret() : void reveal("view"))}
                 >
                   {secretBusy === "view" ? (
@@ -342,7 +348,7 @@ function CredentialDetails({
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={secretBusy !== null || metadataBusy || verificationBusy || !credential.task_available}
+                  disabled={secretBusy !== null || metadataBusy || verificationBusy || !canReveal}
                   onClick={() => void reveal("copy")}
                 >
                   {secretBusy === "copy" ? (
@@ -354,6 +360,9 @@ function CredentialDetails({
                 </Button>
               </div>
             </div>
+            {!canReveal && (
+              <p className="text-xs text-muted-foreground">凭据暂不可读取；归档、还原或删除处理完成后请刷新。</p>
+            )}
             <pre className="max-h-52 overflow-auto rounded-md bg-muted p-3 font-mono text-xs break-all whitespace-pre-wrap select-text">
               {secret || credential.secret_masked || "—"}
             </pre>

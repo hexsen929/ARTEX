@@ -12,6 +12,7 @@
 package intercept
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -625,52 +626,111 @@ func (i *Interceptor) Match(toolName string, input []byte) (Decision, bool) {
 			Message:  "拦截规则加载失败,平台按 fail-closed 策略禁止执行此工具",
 		}, true
 	}
-	if len(rules) == 0 {
+	r, ok := firstMatchingRule(rules, toolName, input)
+	if !ok {
 		return Decision{}, false
 	}
+	msg := r.Message
+	if msg == "" {
+		msg = defaultMessage(r.Action, r.Name)
+	}
+	configJSON, _ := json.Marshal(r.InterceptRule)
+	return Decision{
+		RuleName: r.Name, ConfigDigest: digestInput(configJSON),
+		Action:         r.Action,
+		Message:        msg,
+		RuleID:         r.ID,
+		TimeoutEnabled: r.TimeoutEnabled,
+		TimeoutSeconds: r.TimeoutSeconds,
+		TimeoutAction:  r.TimeoutAction,
+	}, true
+}
+
+func firstMatchingRule(rules []compiledRule, toolName string, input []byte) (compiledRule, bool) {
+	var values []string
+	decoded := false
 	for _, r := range rules {
 		if ruleMatches(r, toolName, input) {
-			msg := r.Message
-			if msg == "" {
-				msg = defaultMessage(r.Action, r.Name)
+			return r, true
+		}
+		// Only denial rules can gain matches from decoded values. Otherwise a
+		// new match could turn a later denial into an approval or an allow.
+		if r.MatchTarget != "tool_input" || r.Action != "deny" {
+			continue
+		}
+		if !decoded {
+			values, decoded = decodedInputStrings(input), true
+		}
+		for _, value := range values {
+			if r.matchesPattern(value) {
+				return r, true
 			}
-			configJSON, _ := json.Marshal(r.InterceptRule)
-			return Decision{
-				RuleName: r.Name, ConfigDigest: digestInput(configJSON),
-				Action:         r.Action,
-				Message:        msg,
-				RuleID:         r.ID,
-				TimeoutEnabled: r.TimeoutEnabled,
-				TimeoutSeconds: r.TimeoutSeconds,
-				TimeoutAction:  r.TimeoutAction,
-			}, true
 		}
 	}
-	return Decision{}, false
+	return compiledRule{}, false
 }
 
 func ruleMatches(r compiledRule, toolName string, input []byte) bool {
-	var subject string
 	switch r.MatchTarget {
-	case "tool_name":
-		subject = toolName
 	case "tool_input":
-		subject = string(input)
+		return r.matchesPattern(string(input))
+	case "tool_name":
+		if r.matchesPattern(toolName) {
+			return true
+		}
+		// Existing rules also cover the alternate name for the same tool.
+		alias := canonicalInterceptTool(toolName)
+		return alias != toolName && r.matchesPattern(alias)
 	default:
 		return false
 	}
-	matches := func(value string) bool {
-		if r.MatchType == "regex" {
-			return r.re != nil && r.re.MatchString(value)
+}
+
+func (r compiledRule) matchesPattern(value string) bool {
+	if r.MatchType == "regex" {
+		return r.re != nil && r.re.MatchString(value)
+	}
+	return strings.Contains(value, r.Pattern)
+}
+
+// Read JSON string values in their original order, including repeated
+// members. Field names and malformed JSON are handled by the raw match.
+func decodedInputStrings(input []byte) []string {
+	if !json.Valid(input) {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(input))
+	dec.UseNumber()
+	var values []string
+	var walk func() error
+	walk = func() error {
+		token, err := dec.Token()
+		if err != nil {
+			return err
 		}
-		return strings.Contains(value, r.Pattern)
+		switch value := token.(type) {
+		case string:
+			values = append(values, value)
+		case json.Delim:
+			for dec.More() {
+				if value == '{' {
+					if _, err := dec.Token(); err != nil {
+						return err
+					}
+				}
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+			_, err = dec.Token()
+			return err
+		}
+		return nil
 	}
-	if matches(subject) {
-		return true
+	if err := walk(); err != nil {
+		return nil
 	}
-	// Existing WebFetch/web_search rules cover the new backend names, while
-	// an explicit deepseek_* rule can still match the original name above.
-	return r.MatchTarget == "tool_name" && canonicalInterceptTool(toolName) != toolName && matches(canonicalInterceptTool(toolName))
+	return values
 }
 
 func defaultMessage(action, name string) string {

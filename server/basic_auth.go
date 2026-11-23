@@ -139,7 +139,13 @@ func (s *Server) requireBasicAuth(next http.Handler) http.Handler {
 		username, password, ok := r.BasicAuth()
 		if !ok || len(password) > maxPasswordBytes || username != cfg.Username ||
 			bcrypt.CompareHashAndPassword([]byte(cfg.PasswordHash), []byte(password)) != nil {
-			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted", charset="UTF-8"`)
+			w.Header().Set("X-Artex-Auth", "basic")
+			// The web client offers a new page challenge when the user is
+			// ready. Keep the standard challenge for other clients and probes.
+			webRequest := strings.HasPrefix(r.URL.Path, "/api/") && r.Header.Get("X-Artex-Client") == "web"
+			if !webRequest || r.URL.Path == "/api/basic-auth/check" || r.URL.Path == "/api/health" {
+				w.Header().Set("WWW-Authenticate", `Basic realm="Restricted", charset="UTF-8"`)
+			}
 			writeErr(w, http.StatusUnauthorized, "请先完成 HTTP Basic Auth 验证")
 			return
 		}

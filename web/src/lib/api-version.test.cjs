@@ -9,19 +9,30 @@ const compiled = ts.transpileModule(fs.readFileSync(path.join(__dirname, "api.ts
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
 
-function client(fetch, refreshAccessToken = async () => assert.fail("unexpected token refresh")) {
+const refreshCompiled = ts.transpileModule(fs.readFileSync(path.join(__dirname, "auth-refresh.ts"), "utf8"), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText;
+
+function client(fetch, refreshAccessToken, options = {}) {
   const exports = {};
+  const refresh = {};
+  vm.runInNewContext(refreshCompiled, { exports: refresh, fetch });
   vm.runInNewContext(compiled, {
     exports,
     process: { env: {} },
     URLSearchParams,
+    Headers,
     AbortController,
     DOMException,
-    window: {},
+    window: { location: { reload: options.reload ?? (() => assert.fail("unexpected page reload")) } },
     localStorage: { getItem: () => "test-admin-token" },
     require: (id) => {
+      if (id === "sonner") return { toast: { error: options.notify ?? (() => assert.fail("unexpected Basic Auth prompt")) } };
       if (id === "@/lib/auth") return { auth: { clearToken: () => assert.fail("unexpected logout") } };
-      if (id === "@/lib/auth-refresh") return { refreshAccessToken };
+      if (id === "@/lib/auth-refresh") return {
+        ...refresh,
+        refreshAccessToken: refreshAccessToken ?? (options.realRefresh ? refresh.refreshAccessToken : async () => assert.fail("unexpected token refresh")),
+      };
       if (id === "@/lib/sse-target") return {};
       if (id === "@/lib/topology-mapping") return {};
       if (id === "@/lib/mock/enabled") return { MOCK: false };
@@ -37,7 +48,7 @@ test("version queries carry the admin token and request fresh results after rest
   const versions = ["v1.0.0", "v1.0.1"];
   const api = client(async (url, init) => {
     assert.equal(url, "/api/version");
-    assert.equal(init.headers.Authorization, "Bearer test-admin-token");
+    assert.equal(new Headers(init.headers).get("Authorization"), "Bearer test-admin-token");
     assert.equal(init.cache, "no-store");
     return { ok: true, status: 200, json: async () => ({ version: versions.shift() }) };
   });
@@ -61,7 +72,7 @@ test("version verification forwards the caller abort signal without losing authe
   const controller = new AbortController();
   const api = client(async (url, init) => {
     assert.equal(url, "/api/version");
-    assert.equal(init.headers.Authorization, "Bearer test-admin-token");
+    assert.equal(new Headers(init.headers).get("Authorization"), "Bearer test-admin-token");
     assert.equal(init.signal, controller.signal);
     controller.abort();
     assert.equal(init.signal.aborted, true);
@@ -122,4 +133,37 @@ test("a pre-cancelled version query does not send HTTP or start shared refresh",
   controller.abort();
   const api = client(async () => assert.fail("Cancelled request sent HTTP"));
   await assert.rejects(api.version(controller.signal), { name: "AbortError" });
+});
+
+test("expired Basic Auth preserves the admin login and asks before reloading", async () => {
+  let calls = 0, reloads = 0;
+  let action;
+  const api = client(async (_url, init) => {
+    calls++;
+    assert.equal(init.headers.get("X-Artex-Client"), "web");
+    return new Response(null, { status: 401, headers: { "X-Artex-Auth": "basic" } });
+  }, undefined, {
+    notify: (_message, toastOptions) => { action = toastOptions.action; },
+    reload: () => { reloads++; },
+  });
+
+  await assert.rejects(api.version(), { name: "BasicAuthRequiredError" });
+  assert.equal(calls, 1);
+  assert.equal(reloads, 0);
+  action.onClick();
+  assert.equal(reloads, 1);
+});
+
+test("outer gate expiry during admin token refresh does not log out or replay the request", async () => {
+  const calls = [];
+  const api = client(async (url) => {
+    calls.push(url);
+    return new Response(null, {
+      status: 401,
+      headers: url === "/api/auth/refresh" ? { "X-Artex-Auth": "basic" } : {},
+    });
+  }, undefined, { realRefresh: true, notify: () => {} });
+
+  await assert.rejects(api.version(), { name: "BasicAuthRequiredError" });
+  assert.deepEqual(calls, ["/api/version", "/api/auth/refresh"]);
 });

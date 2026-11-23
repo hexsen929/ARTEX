@@ -2,7 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -74,11 +77,23 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		defer s.engine.decInflight(id)
 	}
-	dir := filepath.Join(s.m.dir, sub, id, "uploads")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		writeErr(w, 500, "建目录失败: "+err.Error())
+	rel := filepath.Join(sub, id, "uploads")
+	root, err := os.OpenRoot(s.m.dir)
+	if err != nil {
+		writeErr(w, 500, "工作区不可读取")
 		return
 	}
+	defer root.Close()
+	if err := root.MkdirAll(rel, 0o755); err != nil {
+		writeErr(w, 400, "无法建立附件目录")
+		return
+	}
+	uploads, err := root.OpenRoot(rel)
+	if err != nil {
+		writeErr(w, 400, "附件目录不可用")
+		return
+	}
+	defer uploads.Close()
 	r.Body = http.MaxBytesReader(w, r.Body, maxChatUpload)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeErr(w, 400, "解析上传失败或超出大小限制: "+err.Error())
@@ -95,31 +110,47 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 		if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
 			continue
 		}
-		dest := uniqueUploadPath(dir, name)
-		if err := saveUpload(hdr, dest); err != nil {
-			writeErr(w, 500, "保存失败: "+err.Error())
+		base, err := createChatUpload(uploads, name, hdr)
+		if err != nil {
+			writeErr(w, 500, "无法保存附件")
 			return
 		}
-		base := filepath.Base(dest)
+		dest := filepath.Join(s.m.dir, rel, base)
 		out = append(out, chatAttachment{Name: base, Path: "uploads/" + base, Size: hdr.Size, Abs: dest})
 	}
 	writeJSON(w, 200, map[string]any{"attachments": out})
 }
 
-// uniqueUploadPath returns dir/name, or dir/name-1, dir/name-2… when it already exists,
-// so re-uploading the same filename never clobbers a prior attachment.
-func uniqueUploadPath(dir, name string) string {
-	dest := filepath.Join(dir, name)
-	if _, err := os.Stat(dest); os.IsNotExist(err) {
-		return dest
+// Reserve each attachment name with exclusive creation so simultaneous uploads
+// cannot overwrite one another.
+func createChatUpload(dir *os.Root, name string, hdr *multipart.FileHeader) (string, error) {
+	src, err := hdr.Open()
+	if err != nil {
+		return "", err
 	}
+	defer src.Close()
+
 	ext := filepath.Ext(name)
 	stem := strings.TrimSuffix(name, ext)
-	for i := 1; ; i++ {
-		cand := filepath.Join(dir, fmt.Sprintf("%s-%d%s", stem, i, ext))
-		if _, err := os.Stat(cand); os.IsNotExist(err) {
-			return cand
+	for i := 0; ; i++ {
+		candidate := name
+		if i > 0 {
+			candidate = fmt.Sprintf("%s-%d%s", stem, i, ext)
 		}
+		file, err := dir.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, copyErr := io.Copy(file, src)
+		closeErr := file.Close()
+		if err := errors.Join(copyErr, closeErr); err != nil {
+			_ = dir.Remove(candidate)
+			return "", err
+		}
+		return candidate, nil
 	}
 }
 

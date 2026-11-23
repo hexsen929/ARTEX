@@ -42,7 +42,7 @@ func TestCredentialSameOrigin(t *testing.T) {
 }
 
 func TestCredentialDTOIsMaskedAndHasTraceability(t *testing.T) {
-	raw, err := json.Marshal(credentialItem(&db.CredentialRecord{ID: 1, TaskID: 2, TaskName: "fixture-task", TaskAvailable: true, Secret: "private-fixture-secret", VerificationStatus: "unverified", VerificationHistory: []db.CredentialVerificationEvent{}}))
+	raw, err := json.Marshal(credentialItem(&db.CredentialRecord{ID: 1, TaskID: 2, TaskName: "fixture-task", TaskAvailable: true, RevealAvailable: true, Secret: "private-fixture-secret", VerificationStatus: "unverified", VerificationHistory: []db.CredentialVerificationEvent{}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestCredentialDTOIsMaskedAndHasTraceability(t *testing.T) {
 	if strings.Contains(text, "private-fixture-secret") || strings.Contains(text, `"secret":`) {
 		t.Fatal("list DTO leaked secret")
 	}
-	for _, want := range []string{`"task_name":"fixture-task"`, `"task_available":true`, `"verification_status":"unverified"`, `"secret_masked":"pr****et"`} {
+	for _, want := range []string{`"task_name":"fixture-task"`, `"task_available":true`, `"reveal_available":true`, `"verification_status":"unverified"`, `"secret_masked":"pr****et"`} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %s", want)
 		}
@@ -219,5 +219,54 @@ func TestCredentialManagementHTTPRoundtripAndAudit(t *testing.T) {
 	w = request("POST", "reveal", `{"purpose":"view"}`)
 	if w.Code != 409 || strings.Contains(w.Body.String(), "fixture-secret-never-log") {
 		t.Fatal("reveal crossed archive queue")
+	}
+	if _, err = pg.Exec(`DELETE FROM task_archives WHERE task_id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = pg.DeleteTask(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	s.engine = NewEngine(nil)
+	beforeAudit := audit.Len()
+	for _, purpose := range []string{"view", "copy"} {
+		w = request("POST", "reveal", `{"purpose":"`+purpose+`"}`)
+		var result struct {
+			ID     int64  `json:"id"`
+			Secret string `json:"secret"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.ID != id || result.Secret != "fixture-secret-never-log" || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("explicit reveal of a retained credential failed")
+		}
+		if s.engine.inflightCount(strconv.FormatInt(task.ID, 10)) != 0 {
+			t.Fatal("retained reveal left a runtime operation registered")
+		}
+	}
+	retainedAudit := audit.String()[beforeAudit:]
+	if !strings.Contains(retainedAudit, "credential_reveal_view") || !strings.Contains(retainedAudit, "credential_reveal_copy") || strings.Contains(retainedAudit, "fixture-secret-never-log") {
+		t.Fatal("retained reveal omitted audit or leaked the secret")
+	}
+	for _, op := range []struct{ method, action, body string }{
+		{"PATCH", "metadata", `{"target":"updated.invalid"}`},
+		{"PUT", "verification", `{"status":"verified","method":"manual","evidence":"fixture"}`},
+	} {
+		w = request(op.method, op.action, op.body)
+		if w.Code != 409 || strings.Contains(w.Body.String(), "fixture-secret-never-log") {
+			t.Fatal("retained credential became editable without an available task")
+		}
+	}
+	if !s.engine.BeginDelete(strconv.FormatInt(task.ID, 10)) {
+		t.Fatal("cannot install synthetic task deletion barrier")
+	}
+	w = request("POST", "reveal", `{"purpose":"view"}`)
+	if w.Code != 409 || strings.Contains(w.Body.String(), "fixture-secret-never-log") {
+		t.Fatal("retained reveal crossed an active runtime deletion barrier")
+	}
+	s.engine.AbortDelete(strconv.FormatInt(task.ID, 10), true)
+	if err = store.Delete(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	w = request("POST", "reveal", `{"purpose":"view"}`)
+	if w.Code != 404 || strings.Contains(w.Body.String(), "fixture-secret-never-log") {
+		t.Fatal("a deleted credential was still revealed")
 	}
 }
