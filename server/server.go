@@ -44,14 +44,18 @@ var BuildVersion = "dev"
 // Server exposes the ARTEX backend over a JSON HTTP API for the shadcn/ui
 // frontend.
 type Server struct {
-	scheduleMu sync.Mutex
-	m          *Manager
-	engine     *Engine
-	ctx        context.Context
-	dataDir    string
-	metricsMu  sync.Mutex
-	lastCPUUse uint64
-	lastCPUAt  time.Time
+	operatorTriggerMu     sync.Mutex
+	operatorTriggerCounts map[string]int
+	surfaceClassifyMu     sync.Mutex
+	c2Ops                 *c2OperatorState
+	scheduleMu            sync.Mutex
+	m                     *Manager
+	engine                *Engine
+	ctx                   context.Context
+	dataDir               string
+	metricsMu             sync.Mutex
+	lastCPUUse            uint64
+	lastCPUAt             time.Time
 
 	skillDir  string // root directory for skill subdirectories
 	jwtKey    []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
@@ -359,6 +363,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	}
 	s.wireMemoryRecall()
 	s.wireKnowledge()
+	s.initOperatorModules()
 	s.restoreTaskRuntimes()
 	s.ensureProxySupervisor()
 	s.proxyPoolWG.Add(1)
@@ -389,6 +394,7 @@ func (s *Server) Close() {
 	if s == nil {
 		return
 	}
+	s.closeOperatorModules()
 	s.stopTaskConversationRuns()
 	if s.proxyCancel != nil {
 		s.proxyCancel()
@@ -984,6 +990,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
 	s.registerMemoryRoutes(mux)
 	s.registerKnowledgeRoutes(mux)
+	s.registerOperatorRoutes(mux)
 	s.registerReportTemplateRoutes(mux)
 
 	// 页面一键更新。走的是默认的 JWT 鉴权（auth.go 只放行 /api/auth/* 和
@@ -1634,7 +1641,7 @@ func (s *Server) controlIntent(w http.ResponseWriter, r *http.Request) {
 }
 
 // rerunIntent 重跑一条没跑成功的意图(blocked/exhausted/stopped):把它置回 open,worker
-// 会重新认领、从头再跑(已写回图谱的 fact/finding/asset 保留);若任务已终态/暂停则顺带复活。
+// 会重新认领并续接原会话与已有结果(已写回图谱的 fact/finding/asset 保留);若任务已终态/暂停则顺带复活。
 // 用于「出错的 work 点击继续运行」——网络/LLM 抖动导致 blocked 后可一键重试。
 func restoreRerunIntent(t *Task, before *db.Node) error {
 	if t == nil || before == nil {

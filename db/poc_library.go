@@ -1,0 +1,392 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"github.com/Autumn-27/artex/kb"
+	_ "modernc.org/sqlite"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+func (d *DB) KBEntries(ctx context.Context) ([]kb.Entry, error) {
+	rows, err := d.QueryContext(ctx, `SELECT id,code,body,polarity,hit_count,used_on,created_at,updated_at FROM kb_entries ORDER BY id DESC LIMIT 10000`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []kb.Entry{}
+	for rows.Next() {
+		var id, h int64
+		var code, p, u string
+		var b []byte
+		var c, m time.Time
+		if err = rows.Scan(&id, &code, &b, &p, &h, &u, &c, &m); err != nil {
+			return nil, err
+		}
+		var e kb.Entry
+		if err = json.Unmarshal(b, &e); err != nil {
+			return nil, err
+		}
+		e.ID = id
+		e.Code = code
+		e.Polarity = p
+		e.HitCount = h
+		e.UsedOn = u
+		e.CreatedAt = c.Format(time.RFC3339)
+		e.UpdatedAt = m.Format(time.RFC3339)
+		e.HasContent = e.Content != ""
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+func (d *DB) KBGet(ctx context.Context, code string, count bool, usedOn string) (kb.Entry, error) {
+	var e kb.Entry
+	var b []byte
+	var c, m time.Time
+	var row *sql.Row
+	if count {
+		row = d.QueryRowContext(ctx, `UPDATE kb_entries SET hit_count=hit_count+1,used_on=$2,updated_at=now() WHERE code=$1 AND (source_finding_id IS NULL OR EXISTS(SELECT 1 FROM findings f WHERE f.id=source_finding_id AND (body->>'verified'!='true' OR f.verification_status='verified'))) RETURNING id,body,polarity,hit_count,used_on,created_at,updated_at`, code, usedOn)
+	} else {
+		row = d.QueryRowContext(ctx, `SELECT id,body,polarity,hit_count,used_on,created_at,updated_at FROM kb_entries WHERE code=$1 AND (source_finding_id IS NULL OR EXISTS(SELECT 1 FROM findings f WHERE f.id=source_finding_id AND (body->>'verified'!='true' OR f.verification_status='verified')))`, code)
+	}
+	var id, h int64
+	var p, u string
+	if err := row.Scan(&id, &b, &p, &h, &u, &c, &m); err != nil {
+		if err == sql.ErrNoRows {
+			if n, er := strconv.ParseInt(code, 10, 64); er == nil && n > 0 {
+				var resolved string
+				if d.QueryRowContext(ctx, "SELECT code FROM kb_entries WHERE id=$1", n).Scan(&resolved) == nil && resolved != code {
+					return d.KBGet(ctx, resolved, count, usedOn)
+				}
+			}
+		}
+		return e, err
+	}
+	if err := json.Unmarshal(b, &e); err != nil {
+		return e, err
+	}
+	e.ID = id
+	e.Code = code
+	e.Polarity = p
+	e.HitCount = h
+	e.UsedOn = u
+	e.CreatedAt = c.Format(time.RFC3339)
+	e.UpdatedAt = m.Format(time.RFC3339)
+	e.HasContent = e.Content != ""
+	return e, nil
+}
+func (d *DB) KBPut(ctx context.Context, e kb.Entry) (kb.Entry, bool, error) {
+	if err := e.Validate(); err != nil {
+		return e, false, err
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		return e, false, err
+	}
+	var created bool
+	err = d.QueryRowContext(ctx, `INSERT INTO kb_entries(code,body,polarity,source_finding_id) VALUES($1,$2::jsonb,$3,$4) ON CONFLICT(code) DO UPDATE SET body=EXCLUDED.body,polarity=EXCLUDED.polarity,source_finding_id=EXCLUDED.source_finding_id,updated_at=now() RETURNING id,(xmax=0)`, e.Code, b, e.Polarity, nilIfZero(e.SourceFindingID)).Scan(&e.ID, &created)
+	return e, created, err
+}
+
+// ImportLegacyKB reads only the configured database, never follows its POC paths,
+// and never executes imported content. Existing human edits are preserved.
+func (d *DB) ImportLegacyKB(ctx context.Context, dir string) (int, error) {
+	p := filepath.Join(dir, "knowledge.db")
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return 0, err
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > 256<<20 {
+		return 0, fmt.Errorf("knowledge.db must be a regular database under 256 MiB")
+	}
+	metadata := map[string]struct {
+		Polarity string `json:"polarity"`
+		Category string `json:"category"`
+	}{}
+	mp := filepath.Join(dir, "entry-meta.json")
+	if fi, err := os.Lstat(mp); err == nil {
+		if !fi.Mode().IsRegular() || fi.Size() > 1<<20 {
+			return 0, fmt.Errorf("invalid entry metadata file")
+		}
+		b, err := os.ReadFile(mp)
+		if err != nil {
+			return 0, err
+		}
+		if err = json.Unmarshal(b, &metadata); err != nil {
+			return 0, fmt.Errorf("invalid entry metadata JSON")
+		}
+	}
+	u := url.URL{Scheme: "file", Path: p}
+	q := u.Query()
+	q.Set("mode", "ro")
+	u.RawQuery = q.Encode()
+	s, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return 0, err
+	}
+	defer s.Close()
+	s.SetMaxOpenConns(1)
+	rows, err := s.QueryContext(ctx, `SELECT code,title,kind,category,cve,component,versions,severity,language,source,source_url,description,usage,content,path,verified,verified_note,hit_count,used_on,engagement_id,engagement_name,asset_target,found_by_agent,tags,created_by,created_at,updated_at FROM poc LIMIT 10001`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	n := 0
+	scanned := 0
+	for rows.Next() {
+		scanned++
+		if scanned > 10000 {
+			return 0, fmt.Errorf("knowledge import exceeds 10000 entries")
+		}
+		if n >= 10000 {
+			return 0, fmt.Errorf("knowledge import exceeds 10000 entries")
+		}
+		vals := make([]sql.NullString, 27)
+		dest := make([]any, len(vals))
+		for i := range vals {
+			dest[i] = &vals[i]
+		}
+		if err = rows.Scan(dest...); err != nil {
+			return 0, err
+		}
+		f := func(i int) string { return vals[i].String }
+		e := kb.Entry{Code: f(0), Title: f(1), Kind: f(2), Category: f(3), CVE: f(4), Component: f(5), Versions: f(6), Severity: f(7), Language: f(8), Source: f(9), SourceURL: f(10), Description: f(11), Usage: f(12), Content: f(13), Path: portablePOCPath(dir, f(14)), Verified: f(15) == "1", VerifiedNote: f(16), UsedOn: f(18), EngagementID: f(19), EngagementName: f(20), AssetTarget: f(21), FoundByAgent: f(22), Tags: f(23), CreatedBy: f(24)}
+		e.CreatedAt = f(25)
+		e.UpdatedAt = f(26)
+		e.HitCount, _ = strconv.ParseInt(f(17), 10, 64)
+		if e.HitCount < 0 {
+			e.HitCount = 0
+		}
+		e.Polarity = kb.GuessPolarity(e)
+		if meta, ok := metadata[e.Code]; ok {
+			if meta.Polarity == "positive" || meta.Polarity == "context" || meta.Polarity == "negative" {
+				e.Polarity = meta.Polarity
+			}
+			if meta.Category != "" {
+				e.Category = meta.Category
+			}
+		}
+		b, er := json.Marshal(e)
+		if er != nil {
+			return 0, er
+		}
+		if len(b) > kb.MaxContent+(128<<10) {
+			return 0, fmt.Errorf("knowledge entry too large")
+		}
+		created, ce := time.Parse(time.RFC3339Nano, e.CreatedAt)
+		if ce != nil {
+			created = time.Now().UTC()
+		}
+		updated, ue := time.Parse(time.RFC3339Nano, e.UpdatedAt)
+		if ue != nil {
+			updated = created
+		}
+		res, er := tx.ExecContext(ctx, `INSERT INTO kb_entries(code,body,polarity,hit_count,used_on,created_at,updated_at) VALUES($1,$2::jsonb,$3,$4,$5,$6,$7) ON CONFLICT(code) DO NOTHING`, e.Code, b, e.Polarity, e.HitCount, e.UsedOn, created, updated)
+		if er != nil {
+			return 0, er
+		}
+		v, _ := res.RowsAffected()
+		n += int(v)
+	}
+	if err = rows.Err(); err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+func portablePOCPath(dir, p string) string {
+	p = strings.ReplaceAll(p, "\\", "/")
+	i := strings.LastIndex("/"+p, "/pocs/")
+	if i < 0 {
+		return ""
+	}
+	tail := ("/" + p)[i+6:]
+	root := filepath.Join(dir, "pocs")
+	out := filepath.Join(root, filepath.FromSlash(tail))
+	rel, err := filepath.Rel(root, out)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	if fi, err := os.Lstat(out); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	realRoot, e1 := filepath.EvalSymlinks(root)
+	realOut, e2 := filepath.EvalSymlinks(out)
+	if e1 != nil || e2 != nil {
+		return ""
+	}
+	rel, err = filepath.Rel(realRoot, realOut)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	return realOut
+}
+
+// KBSearchEntries ranks full stored text in PostgreSQL, but only materializes
+// bounded metadata for candidate selection. Agent startup never loads every
+// POC body into the process or sends full scripts implicitly.
+func (d *DB) KBSearchEntries(ctx context.Context, q kb.Query) ([]kb.Entry, error) {
+	terms := kb.ExtractTerms(q.Q)
+	args := []any{}
+	score := "1"
+	matches, anchors, anyTerm := "0", []string{}, []string{}
+	if len(terms) > 0 {
+		parts := []string{}
+		counts := []string{}
+		for _, t := range terms {
+			args = append(args, "%"+escapeLikeOperator(t.Text)+"%")
+			p := fmt.Sprintf("$%d", len(args))
+			weight := 1
+			if t.Hard {
+				weight = 2
+			}
+			groups := []struct {
+				fields []string
+				weight int
+			}{{[]string{"title", "code"}, 3}, {[]string{"component", "tags", "cve", "asset_target"}, 2}, {[]string{"versions", "description", "usage"}, 1}}
+			if q.SearchContent {
+				groups = append(groups, struct {
+					fields []string
+					weight int
+				}{[]string{"content"}, 1})
+			}
+			hits := []string{}
+			for _, g := range groups {
+				fields := []string{}
+				for _, field := range g.fields {
+					fields = append(fields, fmt.Sprintf("lower(COALESCE(body->>'%s','')) LIKE %s ESCAPE '\\'", field, p))
+				}
+				hit := "(" + strings.Join(fields, " OR ") + ")"
+				hits = append(hits, hit)
+				parts = append(parts, fmt.Sprintf("CASE WHEN %s THEN %d ELSE 0 END", hit, g.weight*weight))
+			}
+			hit := "(" + strings.Join(hits, " OR ") + ")"
+			counts = append(counts, "CASE WHEN "+hit+" THEN 1 ELSE 0 END")
+			anyTerm = append(anyTerm, hit)
+			if t.Hard && len(anchors) < 6 {
+				anchors = append(anchors, hit)
+			}
+		}
+		score = strings.Join(parts, "+")
+		matches = strings.Join(counts, "+")
+	}
+	where := []string{"(source_finding_id IS NULL OR EXISTS(SELECT 1 FROM findings f WHERE f.id=source_finding_id AND (body->>'verified'!='true' OR f.verification_status='verified')))"}
+	for _, f := range []struct{ field, value string }{{"category", q.Category}, {"kind", q.Kind}} {
+		if f.value != "" {
+			args = append(args, f.value)
+			expr := "body->>'" + f.field + "'"
+			if f.field == "polarity" {
+				expr = "polarity"
+			}
+			if (f.field == "category" || f.field == "polarity") && strings.Contains(f.value, ",") {
+				args = args[:len(args)-1]
+				ors := []string{}
+				for i, v := range strings.Split(f.value, ",") {
+					if i == 24 {
+						break
+					}
+					args = append(args, strings.TrimSpace(v))
+					ors = append(ors, fmt.Sprintf("%s=$%d", expr, len(args)))
+				}
+				where = append(where, "("+strings.Join(ors, " OR ")+")")
+			} else {
+				where = append(where, fmt.Sprintf("%s=$%d", expr, len(args)))
+			}
+		}
+	}
+	if q.Verified != nil && *q.Verified {
+		where = append(where, "body->>'verified'='true'")
+	}
+	for _, f := range []struct{ field, value string }{{"cve", q.CVE}, {"tags", q.Tag}, {"component", q.Component}, {"asset_target", q.AssetTarget}} {
+		if f.value != "" {
+			args = append(args, "%"+escapeLikeOperator(strings.ToLower(f.value))+"%")
+			where = append(where, fmt.Sprintf("lower(COALESCE(body->>'%s','')) LIKE $%d ESCAPE '\\'", f.field, len(args)))
+		}
+	}
+	for _, f := range []struct{ field, value string }{{"language", q.Language}, {"source", q.Source}} {
+		if f.value != "" {
+			args = append(args, f.value)
+			where = append(where, fmt.Sprintf("body->>'%s'=$%d", f.field, len(args)))
+		}
+	}
+	if q.Engagement != "" {
+		args = append(args, q.Engagement, "%"+escapeLikeOperator(strings.ToLower(q.Engagement))+"%")
+		where = append(where, fmt.Sprintf("(body->>'engagement_id'=$%d OR lower(COALESCE(body->>'engagement_name','')) LIKE $%d ESCAPE '\\')", len(args)-1, len(args)))
+	}
+	primary, fallback, minimum := "false", "true", 0
+	if len(anchors) > 0 {
+		primary = strings.Join(anchors, " AND ")
+	}
+	if len(terms) > 0 {
+		fallback = strings.Join(anyTerm, " OR ")
+		minimum = kb.MinTermMatches(terms)
+	}
+	order := "v DESC,hit_count DESC,m DESC,id DESC"
+	query := `WITH base AS MATERIALIZED (SELECT *,(` + score + `) AS rank,(` + matches + `) AS matches,
+COALESCE((body->>'verified')::boolean,false) AS v,
+COALESCE(NULLIF(body->>'updated_at',''),updated_at::text) AS m FROM kb_entries WHERE ` + strings.Join(where, " AND ") + `),
+primary_candidates AS (SELECT * FROM base WHERE ` + primary + ` ORDER BY ` + order + ` LIMIT 200),
+candidates AS (SELECT * FROM primary_candidates UNION ALL (SELECT * FROM base WHERE NOT EXISTS(SELECT 1 FROM primary_candidates) AND (` + fallback + `) ORDER BY ` + order + ` LIMIT 500))
+SELECT id,code,(body-'content')||jsonb_build_object('description',left(body->>'description',2000),'usage',left(body->>'usage',4000),'verified',v,'updated_at',m,'has_content',COALESCE(body->>'content','')!=''),polarity,hit_count,used_on,rank FROM candidates WHERE rank>0 AND matches>=` + strconv.Itoa(minimum) + ` ORDER BY rank DESC,` + order + ` LIMIT 200`
+	rows, err := d.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []kb.Entry{}
+	for rows.Next() {
+		var e kb.Entry
+		var b []byte
+		if err = rows.Scan(&e.ID, &e.Code, &b, &e.Polarity, &e.HitCount, &e.UsedOn, &e.Score); err != nil {
+			return nil, err
+		}
+		var v kb.Entry
+		if err = json.Unmarshal(b, &v); err != nil {
+			return nil, err
+		}
+		v.ID = e.ID
+		v.Code = e.Code
+		v.Polarity = e.Polarity
+		v.HitCount = e.HitCount
+		v.UsedOn = e.UsedOn
+		v.Score = e.Score
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+func escapeLikeOperator(s string) string {
+	return strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(s)
+}
+func (d *DB) KBStats(ctx context.Context) (int, int, int, int64, error) {
+	var total, verified, negative int
+	var reused int64
+	err := d.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER (WHERE body->>'verified'='true'),count(*) FILTER (WHERE polarity='negative'),COALESCE(sum(hit_count),0) FROM kb_entries`).Scan(&total, &verified, &negative, &reused)
+	return total, verified, negative, reused, err
+}
+
+// Automatic capture never overwrites a human-edited entry with the same code.
+func (d *DB) KBInsertIfAbsent(ctx context.Context, e kb.Entry) (kb.Entry, bool, error) {
+	if err := e.Validate(); err != nil {
+		return e, false, err
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		return e, false, err
+	}
+	err = d.QueryRowContext(ctx, `INSERT INTO kb_entries(code,body,polarity,source_finding_id) VALUES($1,$2::jsonb,$3,$4) ON CONFLICT(code) DO NOTHING RETURNING id`, e.Code, b, e.Polarity, nilIfZero(e.SourceFindingID)).Scan(&e.ID)
+	if err == sql.ErrNoRows {
+		return e, false, nil
+	}
+	return e, err == nil, err
+}

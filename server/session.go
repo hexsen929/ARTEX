@@ -569,15 +569,22 @@ func (s *Server) lookupSession(id int64) (session.Session, error) {
 // blackboard inheritance alone never grants access to a parent session.
 func (s *Server) lookupTaskSession(ctx context.Context, id int64) (session.Session, error) {
 	ri := agent.RunInfoFrom(ctx)
-	if ri.TaskID <= 0 || s.sessStore == nil {
+	binding, bound := ctx.Value(operatorRemoteBindingKey{}).(operatorRemoteBinding)
+	if bound && binding.Kind == "webshell" && (binding.SessionID != id || binding.TaskID != ri.TaskID) {
+		return nil, fmt.Errorf("此 WebShell 对话仅绑定会话 %d", binding.SessionID)
+	}
+	globalBound := bound && binding.Kind == "webshell" && binding.TaskID == 0 && binding.SessionID == id && id > 0
+	if (ri.TaskID <= 0 && !globalBound) || s.sessStore == nil {
 		return nil, fmt.Errorf("会话操作需要有效任务上下文")
 	}
-	ok, err := s.sessStore.TaskCanUse(ctx, id, ri.TaskID)
-	if err != nil {
-		return nil, fmt.Errorf("会话任务授权读取失败: %w", err)
-	}
-	if !ok {
-		return nil, fmt.Errorf("会话 %d 未向任务 %d 显式移交授权", id, ri.TaskID)
+	if !globalBound {
+		ok, err := s.sessStore.TaskCanUse(ctx, id, ri.TaskID)
+		if err != nil {
+			return nil, fmt.Errorf("会话任务授权读取失败: %w", err)
+		}
+		if !ok {
+			return nil, fmt.Errorf("会话 %d 未向任务 %d 显式移交授权", id, ri.TaskID)
+		}
 	}
 	rec, err := s.sessStore.Get(ctx, id)
 	if err != nil {
@@ -585,6 +592,9 @@ func (s *Server) lookupTaskSession(ctx context.Context, id int64) (session.Sessi
 	}
 	if rec == nil {
 		return nil, fmt.Errorf("会话 %d 已不存在", id)
+	}
+	if globalBound && rec.CreatedByTask != 0 {
+		return nil, fmt.Errorf("会话 %d 已不再是手工全局会话", id)
 	}
 	if _, err = s.sessionRoECheck(ctx, rec.URL); err != nil {
 		return nil, err

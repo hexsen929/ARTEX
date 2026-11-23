@@ -1,0 +1,73 @@
+{
+  "c2_exec": [
+    "worker",
+    "mainagent"
+  ],
+  "c2_list_sessions": [
+    "worker",
+    "mainagent"
+  ],
+  "c2_task_result": [
+    "worker",
+    "mainagent"
+  ],
+  "kb_add": [
+    "mainagent",
+    "worker",
+    "exploit",
+    "cloud",
+    "avevasion",
+    "reverser",
+    "payout_analyst",
+    "kb_curator",
+    "code_auditor"
+  ],
+  "kb_get": [
+    "mainagent",
+    "planner",
+    "worker",
+    "exploit",
+    "cloud",
+    "avevasion",
+    "reverser",
+    "payout_analyst",
+    "kb_curator",
+    "code_auditor"
+  ],
+  "kb_search": [
+    "mainagent",
+    "planner",
+    "worker",
+    "exploit",
+    "cloud",
+    "avevasion",
+    "reverser",
+    "payout_analyst",
+    "kb_curator",
+    "code_auditor"
+  ],
+  "list_sessions": [
+    "worker",
+    "mainagent",
+    "exploit",
+    "cloud",
+    "avevasion",
+    "pentest"
+  ],
+  "session_eval": [
+    "worker",
+    "mainagent",
+    "exploit",
+    "cloud",
+    "avevasion",
+    "pentest"
+  ],
+  "vps_exec": [
+    "auto",
+    "worker",
+    "pentest",
+    "exploit",
+    "cloud",
+    "avevasion"
+  ]
+}

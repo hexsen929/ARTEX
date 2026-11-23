@@ -764,10 +764,11 @@ var builtinLateralRules = []struct {
 const hydraCommandPattern = `(?i)\bhydra(?:$|[^[:alnum:]_:])`
 
 func (d *DB) repairHydraNamespaceRule() error {
-	// Only replace the exact old built-in matcher. Preserve custom rules,
-	// priorities, approval actions, enabled flags and timeout choices.
+	// Only replace the stock ask matcher. An explicitly changed allow/deny
+	// action makes its matching scope an operator choice too; changing that
+	// scope silently can undo a deliberately imported policy on every boot.
 	_, err := d.Exec(`UPDATE intercept_rules SET pattern=$1
-WHERE builtin=true AND name=$2 AND match_target='tool_input' AND match_type='regex' AND pattern=$3`,
+WHERE builtin=true AND action='ask' AND name=$2 AND match_target='tool_input' AND match_type='regex' AND pattern=$3`,
 		hydraCommandPattern, "[内置] 口令喷洒/爆破: hydra", `(?i)\bhydra\b`)
 	return err
 }

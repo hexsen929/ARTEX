@@ -297,6 +297,15 @@ jobs:
             grep -q -- "^--- PASS: $name " "$verification_log"
           done
 
+      - name: Automatic model recovery and committed streamed tools
+        run: |
+          set -euo pipefail
+          recovery_log="$RUNNER_TEMP/automatic-model-recovery.log"
+          go test -race -p=1 -v ./agent ./db ./server -run '^TestAutomaticRecovery' -count=1 -timeout=5m | tee "$recovery_log"
+          for name in TestAutomaticRecoveryStreamNeverDispatchesFailedTurn TestAutomaticRecoveryStreamCommitsCompleteTurnExactlyOnce TestAutomaticRecoveryCheckpointDecisionAndPreservation TestAutomaticRecoveryConcurrencyAndDurableLimit TestAutomaticRecoveryRollbackDoesNotPublishOrEraseEvidence TestAutomaticRecoveryEngineResumesSameTranscriptWithoutRepeatingTool; do
+            grep -q -- "^--- PASS: $name " "$recovery_log"
+          done
+
       - name: Runtime contracts and bounded tool loops
         run: |
           set -euo pipefail
@@ -412,6 +421,12 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
         run: node scripts/newfindingmerge-ui-smoke.cjs
         working-directory: web
+      - name: Automatic recovery worker session browser regression
+        env:
+          ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/credential-ui-browsers
+        working-directory: web
+        run: node scripts/automatic-recovery-ui-smoke.cjs
       - name: Runtime policy settings browser regressions
         env:
           ARTEX_PLAYWRIGHT_DIR: ${{ runner.temp }}/credential-ui-runtime/node_modules/playwright

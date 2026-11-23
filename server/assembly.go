@@ -487,6 +487,7 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 			decorated := agent.DecorateTool(t, row.Description, schema)
 			if row.System && row.Kind == "builtin" {
 				decorated = agent.RuntimeToolContract(decorated)
+				decorated = operatorRuntimeContract(decorated)
 			}
 			return meterTool(decorated, pg, row.Key, agentKey, runInfo), nil
 		}

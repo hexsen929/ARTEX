@@ -26,6 +26,7 @@ type Database struct {
 
 // Config is the on-disk config file shape.
 type Config struct {
+	KnowledgeDir    string   `json:"knowledge_dir"`
 	Database        Database `json:"database"`
 	SkillDir        string   `json:"skill_dir"`
 	CallbackAddr    string   `json:"callback_addr"`

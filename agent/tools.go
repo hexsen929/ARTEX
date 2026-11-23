@@ -24,7 +24,7 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 		var p map[string]any
 		_ = json.Unmarshal(n.Payload, &p)
 		m := map[string]any{"id": n.ID, "summary": p["summary"], "state": n.State}
-		for _, key := range []string{"worker_result", "acceptance", "prerequisites", "stop_condition", "chain_tags", "check_identity", "execution_attempt", "execution_checkpoint", "continuation_note", "automatic_continuations"} {
+		for _, key := range []string{"worker_result", "acceptance", "prerequisites", "stop_condition", "chain_tags", "check_identity", "execution_attempt", "execution_checkpoint", "continuation_note", "automatic_continuations", "automatic_model_recovery"} {
 			if value, ok := p[key]; ok {
 				m[key] = value
 			}
@@ -41,6 +41,15 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 			m["next_action"] = "review_saved_verification"
 			m["requires_operator"] = false
 			m["automatic_requeue"] = false
+		}
+		if recovery := db.IntentRecoveryInfo(n); recovery != nil {
+			m["model_recovery"] = recovery
+			m["next_action"] = "wait_system_recovery"
+			m["requires_operator"] = recovery.Status == "result_uncertain" || recovery.Status == "disabled" || recovery.Status == "waiting"
+			if m["requires_operator"] == true {
+				m["next_action"] = "review_recovery_reason"
+			}
+			m["automatic_requeue"] = recovery.Status == "queued" || recovery.Status == "retry_wait"
 		}
 		if n.Inherited {
 			m["source_task_id"] = n.SourceTaskID
@@ -1251,7 +1260,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			"question":     str("稳定的检查问题标签；改变摘要措辞时沿用，不用次数/日期造新标签"),
 		}, "resource", "operation", "identity_ref", "question"),
 		"continue_intent_id": idp("续接已有检查时填写原意图ID，保留同一会话和证据；与 check_identity/asset_ids/parent_ids 互斥"),
-		"continuation_note":  str("续接必填：复用哪些产物、最后结果、下一步；仅已知结果的预算耗尽可自动续接，最多2次，故障/审批/未知结果需人工恢复"),
+		"continuation_note":  str("续接必填：复用哪些产物、最后结果、下一步；仅已知结果的预算耗尽可自动续接，最多2次，临时模型故障由系统核对后自动恢复；真实审批或未知工具结果保留等待"),
 		"summary":            str("一个明确的测试问题：对象、判断依据与本次要解决的未知；不把整条依赖链塞进一句话"),
 		"acceptance":         str("可观察的完成证据；把准备完成、核心检查已执行、验证成立分别说明"),
 		"stop_condition":     str("停止条件与尚未完成时的交接；审批、模型或环境故障不能写成测试阴性"),

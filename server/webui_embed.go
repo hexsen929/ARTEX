@@ -40,6 +40,7 @@ func (s *Server) webuiHandler() http.Handler {
 				return
 			}
 		}
+		setWebUICacheHeaders(w, "index.html")
 		http.ServeFileFS(w, r, root, "index.html")
 	})
 }
@@ -55,6 +56,7 @@ func serveFileIfExists(w http.ResponseWriter, r *http.Request, fsys fs.FS, name 
 	if statErr != nil || st.IsDir() {
 		return false
 	}
+	setWebUICacheHeaders(w, name)
 	http.ServeFileFS(w, r, fsys, name)
 	return true
 }

@@ -763,7 +763,26 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 	}
 	// On a manual stop ctx is cancelled; Chat already emits a clean "已手动停止"
 	// step, so skip the raw-error entry — only surface genuine failures.
-	if _, err := ca.Chat(ctx, c.AgentKey, sessionID, msg, maxTurns, maxDuration, webSearch, emit); err != nil {
+	var chatErr error
+	if taskID, ok := ctx.Value(operatorTaskChatKey{}).(int64); ok {
+		task, exists := s.m.Task(strconv.FormatInt(taskID, 10))
+		if !exists || task.Store == nil {
+			chatErr = conversationAdmissionError()
+		} else {
+			expected := task.Store.ID()
+			validate := func(callCtx context.Context) error {
+				p, e := s.m.pg.GetTask(taskID)
+				if e != nil || p == nil || p.ExplorationID != expected || p.Paused || p.Status == "done" || p.Status == "failed" || p.Status == "timeout" || callCtx.Err() != nil {
+					return conversationAdmissionError()
+				}
+				return nil
+			}
+			_, chatErr = ca.ChatInTask(ctx, c.AgentKey, sessionID, taskContextHeader(taskID, task.Description, task.Goal)+"\n"+msg, maxTurns, maxDuration, webSearch, emit, s.m.Assets(), task.Store, s.evidenceStore(), validate)
+		}
+	} else {
+		_, chatErr = ca.Chat(ctx, c.AgentKey, sessionID, msg, maxTurns, maxDuration, webSearch, emit)
+	}
+	if err := chatErr; err != nil {
 		finishReason = err.Error()
 		if ctx.Err() == nil {
 			_, _ = pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true,
@@ -1159,9 +1178,27 @@ func (s *Server) runTriggeredRun(item triggeredRun) {
 			err = checkErr
 			return
 		}
+		owners := triggerTaskOwners(item)
+		if isOperatorExpert(item.agentKey) && len(owners) > 0 {
+			if len(owners) != 1 {
+				err = fmt.Errorf("expert trigger cannot merge execution from different tasks")
+				return
+			}
+			admitted, e := s.admitOperatorTrigger(s.ctx, item.agentKey, owners[0])
+			if e != nil || !admitted {
+				err = fmt.Errorf("expert trigger budget exhausted or unavailable")
+				return
+			}
+		}
 		if c == nil {
 			c, err = pg.CreateConversation(item.agentKey, firstLine(item.title, 60), nil)
 			if err != nil {
+				return
+			}
+		}
+		if isOperatorExpert(item.agentKey) && len(owners) == 1 {
+			if e := pg.SaveOperatorSetting(s.ctx, fmt.Sprintf("conversation.expert.%d", c.ID), map[string]int64{"task_id": owners[0]}); e != nil {
+				err = e
 				return
 			}
 		}
